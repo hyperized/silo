@@ -1,7 +1,6 @@
-// Package config loads silod's runtime configuration from environment
-// variables, following the 12-factor convention. It applies sensible
-// defaults so the daemon boots with minimal explicit configuration,
-// matching silo's "approachable defaults" guideline.
+// Package config loads silod's 12-factor environment configuration.
+// Defaults match what `make up` writes to deploy/.env so the daemon
+// boots with no manual configuration beyond SILO_ENCRYPTION_KEY.
 package config
 
 import (
@@ -13,68 +12,69 @@ import (
 	"strings"
 )
 
-// KeySource selects where silo's encryption key comes from.
-//
-// In cryptography terms this is a key-encryption-key (KEK) that wraps
-// per-chunk data-encryption-keys (DEKs); the DEK/KEK split is an
-// implementation detail of the chunk store. From the operator's
-// perspective there is one key to manage: the silo encryption key.
+// KeySource selects where silod reads the cluster encryption key from.
+// Only the operator-managed key is surfaced here; the KEK/DEK split that
+// the crypto package uses internally is deliberately hidden so operators
+// have one thing to manage, not two.
 type KeySource string
 
 const (
-	// KeySourceStatic reads the encryption key from SILO_ENCRYPTION_KEY
-	// as a base64 string. Intended for development; production
-	// deployments should use file or (later) a KMS.
+	// KeySourceStatic reads the key from SILO_ENCRYPTION_KEY (base64).
+	// Convenient for development and docker-compose; not appropriate for
+	// production because env vars leak through process listings and
+	// process inspection.
 	KeySourceStatic KeySource = "static"
-	// KeySourceFile reads the encryption key from the path in SILO_ENCRYPTION_KEY_PATH.
+	// KeySourceFile reads the key from a file at SILO_ENCRYPTION_KEY_PATH.
+	// The recommended production path because filesystem ACLs (0400 on a
+	// secret-mounted volume) give a tighter access boundary than env vars.
 	KeySourceFile KeySource = "file"
 )
 
-// Defaults used when an environment variable is unset.
 const (
 	DefaultGRPCAddr    = "0.0.0.0:7000"
 	DefaultHTTPAddr    = "0.0.0.0:7080"
 	DefaultDataDir     = "/var/lib/silo"
-	DefaultChunkSize   = 4 * 1024 * 1024 // 4 MiB
+	DefaultChunkSize   = 4 * 1024 * 1024
 	DefaultReplication = 3
 	DefaultKeySource   = KeySourceStatic
 	DefaultLogLevel    = "info"
 	DefaultLogFormat   = "text"
 )
 
-// Config holds the validated runtime configuration for a silod process.
 type Config struct {
-	NodeID         string
-	GRPCAddr       string
-	HTTPAddr       string
-	Seeds          []string
-	Domain         string
-	DataDir        string
-	ChunkSize      int64
-	Replication    int
-	KeySource      KeySource
-	EncryptionKey  []byte
-	KeyPath        string
-	LogLevel       string
-	LogFormat      string
+	NodeID        string
+	GRPCAddr      string
+	HTTPAddr      string
+	Seeds         []string
+	Domain        string
+	DataDir       string
+	ChunkSize     int64
+	Replication   int
+	KeySource     KeySource
+	EncryptionKey []byte
+	KeyPath       string
+	LogLevel      string
+	LogFormat     string
 }
 
-// EnvFunc resolves an environment variable name to its value.
-// Allows Load to be exercised without touching the process environment.
+// EnvFunc resolves an env-var name to its value. Injected into Load so
+// tests can drive the configuration without mutating the real process
+// environment (which would force serial execution and leak between
+// packages).
 type EnvFunc func(string) string
 
-// osHostname is the hostname resolver used to derive NodeID when SILO_NODE_ID
-// is unset. Swapped out in tests.
+// osHostname is swappable so tests can exercise the SILO_NODE_ID
+// hostname-fallback path deterministically.
 var osHostname = os.Hostname
 
-// LoadFromEnv loads configuration from the process environment.
-// Equivalent to Load(os.Getenv).
+// LoadFromEnv is the production entry point — silod calls this from main.
 func LoadFromEnv() (*Config, error) {
 	return Load(os.Getenv)
 }
 
-// Load reads configuration values from the given env resolver, applies
-// defaults, and validates the result. The returned Config is ready to use.
+// Load reads, defaults, and validates a Config. Defaults are applied
+// before validation so the operator's reported error always references
+// the value silod would actually use, not the half-built struct.
 func Load(env EnvFunc) (*Config, error) {
 	cfg := &Config{
 		NodeID:    env("SILO_NODE_ID"),
@@ -120,10 +120,8 @@ func Load(env EnvFunc) (*Config, error) {
 	return cfg, nil
 }
 
-// Validate enforces the invariants every silod process needs to start.
-// Every returned error is written as an instruction: it names the
-// offending variable, shows the bad value when useful, and tells the
-// operator what to set it to. See PLAN.md §1 "Errors are instructions".
+// Validate's errors are intentionally instruction-shaped: see the
+// "errors are instructions" project rule.
 func (c *Config) Validate() error {
 	if c.NodeID == "" {
 		return errors.New("node id is empty; set SILO_NODE_ID explicitly, or run on a host with a non-empty hostname")
@@ -224,8 +222,7 @@ func loadEncryptionKey(env EnvFunc, cfg *Config) error {
 		if cfg.KeyPath == "" {
 			return errors.New("SILO_ENCRYPTION_KEY_PATH is required when SILO_ENCRYPTION_KEY_SOURCE=file; point it at a file containing 32 raw bytes (create one with: openssl rand 32 > /etc/silo/key && chmod 0400 /etc/silo/key)")
 		}
-		// Actual file read happens in the crypto package at startup; we
-		// only validate that the operator told us where to look.
+		// File contents are read by the crypto package at startup, not here.
 		return nil
 	default:
 		return fmt.Errorf("SILO_ENCRYPTION_KEY_SOURCE %q is not recognised; set it to static (key in SILO_ENCRYPTION_KEY env var) or file (key at SILO_ENCRYPTION_KEY_PATH)", cfg.KeySource)

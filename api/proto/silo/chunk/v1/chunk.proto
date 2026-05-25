@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package silo.chunk.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/hyperized/silo/api/proto/silo/chunk/v1;chunkv1";
+
+// ChunkStore is the silod-side chunk RPC surface. Put and Get are
+// streaming because chunk payloads can exceed the default 4 MiB gRPC
+// message limit and we do not want to twist operators into configuring
+// max-message-size on both ends.
+service ChunkStore {
+  rpc Put(stream PutRequest) returns (PutResponse);
+  rpc Get(GetRequest) returns (stream GetResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Stat(StatRequest) returns (StatResponse);
+}
+
+// ChunkInfo carries plaintext and on-disk sizes so callers can reason
+// about encryption overhead without a follow-up Stat.
+message ChunkInfo {
+  string chunk_id = 1;
+  int64 plain_bytes = 2;
+  int64 stored_bytes = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+// PutRequest: first frame carries the header, subsequent frames carry
+// data. Splitting the oneof keeps the schema honest — the chunk id is
+// announced exactly once, before any bytes.
+message PutRequest {
+  oneof body {
+    PutHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message PutHeader {
+  string chunk_id = 1;
+}
+
+message PutResponse {
+  ChunkInfo info = 1;
+}
+
+message GetRequest {
+  string chunk_id = 1;
+}
+
+// GetResponse: server sends one info frame first, then any number of
+// data frames. Clients should treat receipt of info as "the chunk
+// exists and is decrypting"; bytes follow.
+message GetResponse {
+  oneof body {
+    ChunkInfo info = 1;
+    bytes data = 2;
+  }
+}
+
+message DeleteRequest {
+  string chunk_id = 1;
+}
+
+message DeleteResponse {}
+
+message StatRequest {
+  string chunk_id = 1;
+}
+
+message StatResponse {
+  ChunkInfo info = 1;
+}

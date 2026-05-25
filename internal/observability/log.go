@@ -1,7 +1,7 @@
-// Package observability provides the structured logger and the HTTP
-// listener used for health and metrics endpoints. It is intentionally
-// dependency-free: the M0 metrics surface emits Prometheus exposition
-// format directly so silod has no third-party metrics library yet.
+// Package observability provides the slog logger and the HTTP listener
+// used for health and metrics. The /metrics handler emits Prometheus
+// exposition text directly so silod stays free of a metrics-library
+// dependency until there are real metrics worth shipping.
 package observability
 
 import (
@@ -11,10 +11,11 @@ import (
 	"strings"
 )
 
-// NewLogger builds a slog.Logger with the requested level and output format.
-// Format must be "text" or "json"; level must be "debug", "info", "warn",
-// or "error". Both arguments are validated by the config package upstream;
-// this function defends against direct callers.
+// NewLogger builds an slog.Logger from level/format strings. Both are
+// validated again here even though config.Validate already checks them,
+// because direct callers (tests, future embedders) can reach this
+// function without going through Config — failing closed on unknown
+// values is cheap insurance against silent misconfiguration.
 func NewLogger(out io.Writer, level, format string) (*slog.Logger, error) {
 	lvl, err := parseLevel(level)
 	if err != nil {

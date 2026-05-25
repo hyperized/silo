@@ -14,7 +14,7 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GO_TEST_FLAGS ?= -race -timeout 60s
 GO_PKGS := ./...
 
-.PHONY: help up up-local down restart build test test-cover test-integration lint fmt vet clean logs status check
+.PHONY: help up up-local down restart build test test-cover test-integration lint fmt vet clean logs status check proto
 .DEFAULT_GOAL := up
 
 help: ## Show this help and exit.
@@ -65,19 +65,33 @@ deploy/.env:
 build: ## Build all Go binaries into bin/.
 	@mkdir -p $(BIN)
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/silod ./cmd/silod
-	@printf "Built %s/silod (%s)\n" "$(BIN)" "$(VERSION)"
+	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/siloctl ./cmd/siloctl
+	@printf "Built %s/silod, %s/siloctl (%s)\n" "$(BIN)" "$(BIN)" "$(VERSION)"
 
 test: ## Run unit tests.
 	@go test $(GO_TEST_FLAGS) $(GO_PKGS)
 
-test-cover: ## Run unit tests and print coverage.
-	@go test $(GO_TEST_FLAGS) -coverprofile=coverage.out $(GO_PKGS)
+test-cover: ## Run unit tests and print coverage (excludes generated code).
+	@go test $(GO_TEST_FLAGS) -coverprofile=coverage.out -coverpkg=./internal/...,./cmd/...,./pkg/... $(GO_PKGS)
 	@printf "\nOverall coverage: "
 	@go tool cover -func=coverage.out | awk '/^total:/ {print $$3}'
 	@printf "HTML report: \`go tool cover -html=coverage.out\`\n"
 
 test-integration: ## Run integration tests (require docker, build-tag 'integration').
 	@go test $(GO_TEST_FLAGS) -tags=integration ./test/integration/...
+
+proto: ## Regenerate protobuf and gRPC code. Requires Docker; uses bufbuild/buf.
+	@if ! docker info >/dev/null 2>&1; then \
+	  printf "Docker is not running; start Docker Desktop or the docker daemon first.\nProto regeneration uses the bufbuild/buf image so you do not need protoc installed locally.\n" >&2; \
+	  exit 1; \
+	fi
+	@docker run --rm \
+	  -v "$(PWD):/work" \
+	  -w /work \
+	  --user "$$(id -u):$$(id -g)" \
+	  -e HOME=/tmp \
+	  bufbuild/buf:latest generate
+	@printf "Regenerated *.pb.go under api/proto/. Commit the result.\n"
 
 lint: ## Run golangci-lint (install if missing: https://golangci-lint.run/usage/install/).
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \

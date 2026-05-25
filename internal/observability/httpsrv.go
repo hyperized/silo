@@ -10,23 +10,24 @@ import (
 	"time"
 )
 
-// Server is the silod HTTP listener. It serves health and metrics
-// endpoints for liveness probes and observability tooling.
-//
-// In M0, /healthz reports "ok" if the process is alive. Future milestones
-// will add deeper readiness checks (gossip joined, chunk store mounted,
-// quorum healthy, etc.).
+// Server runs the /healthz and /metrics HTTP endpoints. /healthz reports
+// only "process is alive" today; deeper readiness checks (gossip joined,
+// chunk store mounted, quorum healthy) land as those sub-components do.
+// Health and metrics share one server because they share a lifecycle and
+// listener; splitting them would just add a port for operators to remember.
 type Server struct {
 	nodeID  string
 	version string
 	logger  *slog.Logger
 	srv     *http.Server
 
-	mu sync.Mutex  // guards ln
+	mu sync.Mutex // guards ln; race detector caught a Start/Addr race
 	ln net.Listener
 }
 
-// NewServer wires the HTTP routes. It does not start listening; call Start.
+// NewServer wires the routes but does not bind the socket; call Start
+// for that. The split matters because bind failures should surface
+// during silod startup, not during ServeMux construction in tests.
 func NewServer(addr, nodeID, version string, logger *slog.Logger) *Server {
 	s := &Server{
 		nodeID:  nodeID,
@@ -44,10 +45,9 @@ func NewServer(addr, nodeID, version string, logger *slog.Logger) *Server {
 	return s
 }
 
-// Start blocks until the server stops. The listener is bound synchronously
-// before Serve is called, so callers can wire signal-based shutdown without
-// races. The s.ln field is guarded by s.mu so concurrent Addr/closeListener
-// calls are safe.
+// Start binds the listener and blocks on Serve. Returns nil on a clean
+// Shutdown and an error otherwise — distinguishing the two is what lets
+// silod's Run know whether it can exit normally.
 func (s *Server) Start() error {
 	ln, err := net.Listen("tcp", s.srv.Addr)
 	if err != nil {
@@ -63,8 +63,7 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Addr returns the bound address. Useful in tests that start with ":0".
-// Returns an empty string before Start has bound the socket.
+// Addr returns "" until Start has bound the socket.
 func (s *Server) Addr() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -74,8 +73,8 @@ func (s *Server) Addr() string {
 	return s.ln.Addr().String()
 }
 
-// closeListener forcibly closes the bound listener if any. Intended only
-// for tests that need to exercise the unexpected-listener-close branch.
+// closeListener is a test-only escape hatch that exercises the
+// unexpected-listener-close branch of Start.
 func (s *Server) closeListener() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -85,8 +84,11 @@ func (s *Server) closeListener() error {
 	return s.ln.Close()
 }
 
-// Shutdown stops accepting new requests and waits for in-flight ones,
-// bounded by the context deadline.
+// Shutdown stops accepting new requests and waits for in-flight ones to
+// finish, bounded by the context deadline. Anything still running when
+// the context expires is force-terminated, which is acceptable for the
+// stateless health/metrics handlers but worth revisiting once we serve
+// long-lived streams.
 func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }

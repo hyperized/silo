@@ -1,6 +1,4 @@
-// Command silod is the silo storage daemon. It loads configuration from
-// the environment (12-factor), sets up structured logging, and runs the
-// daemon lifecycle until it receives SIGINT or SIGTERM.
+// Command silod is the silo storage daemon.
 package main
 
 import (
@@ -17,16 +15,15 @@ import (
 	"github.com/hyperized/silo/internal/silod"
 )
 
-// version is set at build time via -ldflags "-X main.version=<value>".
-// Defaults to "dev" for local builds.
+// version is set at build time via -ldflags "-X main.version=…".
 var version = "dev"
 
 func main() {
 	os.Exit(runMain(os.Stdout, os.Stderr))
 }
 
-// runMain is split out from main so its non-zero exit paths can be unit-tested.
-// It returns the process exit code.
+// runMain isolates main's body so error paths can be unit-tested
+// without invoking os.Exit, which would tear the test runner down.
 func runMain(stdout, stderr io.Writer) int {
 	cfg, err := config.LoadFromEnv()
 	if err != nil {

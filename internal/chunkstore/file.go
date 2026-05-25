@@ -1,0 +1,176 @@
+package chunkstore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/hyperized/silo/internal/crypto"
+)
+
+const (
+	chunkExt = ".chunk"
+	tmpExt   = ".chunk.tmp"
+)
+
+// FileStore stores each chunk as a single encrypted-envelope file inside
+// one directory. A flat layout is fine while chunk counts are small;
+// sharding by id prefix will replace it once a single directory becomes
+// inefficient for the kernel's dirent cache.
+type FileStore struct {
+	root   string
+	cipher *crypto.Cipher
+}
+
+// NewFileStore creates the data directory if it does not exist and
+// fails fast on misconfiguration (missing cipher, non-writable root)
+// so the operator gets a startup error instead of a runtime failure on
+// the first Put.
+func NewFileStore(root string, cipher *crypto.Cipher) (*FileStore, error) {
+	if cipher == nil {
+		return nil, errors.New("silo: chunkstore needs a non-nil *crypto.Cipher; build one with crypto.NewCipher(cfg.EncryptionKey)")
+	}
+	if root == "" {
+		return nil, errors.New("silo: chunkstore needs a non-empty data directory; set SILO_DATA_DIR to a writable path, e.g. /var/lib/silo")
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, fmt.Errorf("could not create the chunk data directory %q (%v); check the path is on a writable filesystem and silod has permission", root, err)
+	}
+	return &FileStore{root: root, cipher: cipher}, nil
+}
+
+func (s *FileStore) path(id string) string {
+	return filepath.Join(s.root, id+chunkExt)
+}
+
+func (s *FileStore) Put(_ context.Context, id string, data []byte) (Info, error) {
+	if err := ValidateID(id); err != nil {
+		return Info{}, err
+	}
+	envelope, err := s.cipher.EncryptChunk(data)
+	if err != nil {
+		return Info{}, fmt.Errorf("could not encrypt chunk %q for storage (%v); see silod logs for details", id, err)
+	}
+
+	final := s.path(id)
+	tmp := filepath.Join(s.root, id+tmpExt)
+	if err := writeAtomic(tmp, final, envelope, s.root); err != nil {
+		return Info{}, fmt.Errorf("could not write chunk %q to disk (%v); check %s has free space and silod can write to it", id, err, s.root)
+	}
+
+	return Info{
+		ID:          id,
+		PlainBytes:  int64(len(data)),
+		StoredBytes: int64(len(envelope)),
+		CreatedAt:   time.Now().UTC(),
+	}, nil
+}
+
+func (s *FileStore) Get(_ context.Context, id string) ([]byte, Info, error) {
+	if err := ValidateID(id); err != nil {
+		return nil, Info{}, err
+	}
+	path := s.path(id)
+	envelope, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, Info{}, ErrNotFound
+		}
+		return nil, Info{}, fmt.Errorf("could not read chunk %q (%v); check %s permissions and disk health", id, err, path)
+	}
+	plaintext, err := s.cipher.DecryptChunk(envelope)
+	if err != nil {
+		return nil, Info{}, fmt.Errorf("could not decrypt chunk %q (%v); see internal/crypto error for next steps", id, err)
+	}
+
+	info := Info{
+		ID:          id,
+		PlainBytes:  int64(len(plaintext)),
+		StoredBytes: int64(len(envelope)),
+	}
+	if stat, err := os.Stat(path); err == nil {
+		info.CreatedAt = stat.ModTime().UTC()
+	}
+	return plaintext, info, nil
+}
+
+func (s *FileStore) Delete(_ context.Context, id string) error {
+	if err := ValidateID(id); err != nil {
+		return err
+	}
+	if err := os.Remove(s.path(id)); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("could not delete chunk %q (%v); check filesystem permissions on %s", id, err, s.root)
+	}
+	return fsyncDir(s.root)
+}
+
+func (s *FileStore) Stat(_ context.Context, id string) (Info, error) {
+	if err := ValidateID(id); err != nil {
+		return Info{}, err
+	}
+	stat, err := os.Stat(s.path(id))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Info{}, ErrNotFound
+		}
+		return Info{}, fmt.Errorf("could not stat chunk %q (%v); check %s is accessible", id, err, s.root)
+	}
+	return Info{
+		ID:          id,
+		PlainBytes:  stat.Size() - int64(crypto.OverheadBytes),
+		StoredBytes: stat.Size(),
+		CreatedAt:   stat.ModTime().UTC(),
+	}, nil
+}
+
+// writeAtomic gives crash consistency: write to a tmp file, fsync,
+// rename, fsync the directory. A power loss at any step leaves either
+// the previous chunk (if any) or no chunk, never a half-written one.
+// The fsync on the directory is the step everyone forgets — without it,
+// the rename can be undone by the journal on recovery.
+func writeAtomic(tmp, final string, data []byte, dir string) error {
+	// O_EXCL avoids racing with a concurrent Put of the same id; the second
+	// caller fails fast rather than corrupting the first one's tmp file.
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return fsyncDir(dir)
+}
+
+// fsyncDir flushes the directory entry to make rename/unlink durable.
+// Most "the file was there a moment ago" bugs after a crash come from
+// skipping this step.
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
+}
