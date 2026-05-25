@@ -1,0 +1,31 @@
+# Single-node silo for the fastest iteration loop. No peers, no
+# observability stack — just one silod, rebuilt and restarted on demand.
+#
+# Run with `make up-local` from the repo root.
+
+services:
+  silod:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        VERSION: dev
+    image: silo/silod:dev
+    container_name: silo-local
+    restart: "no"
+    environment:
+      SILO_NODE_ID: silo-local
+      SILO_GRPC_ADDR: 0.0.0.0:7000
+      SILO_HTTP_ADDR: 0.0.0.0:7080
+      SILO_DATA_DIR: /var/lib/silo
+      SILO_ENCRYPTION_KEY: "${SILO_ENCRYPTION_KEY:?Run 'make up-local' from the repo root to generate a development encryption key (it writes deploy/.env for you). To run compose directly, set SILO_ENCRYPTION_KEY to a base64-encoded 32-byte value, e.g. with 'openssl rand -base64 32'.}"
+      SILO_LOG_LEVEL: ${SILO_LOG_LEVEL:-debug}
+      SILO_LOG_FORMAT: text
+    ports:
+      - "7080:7080"
+      - "7000:7000"
+    volumes:
+      - silo-local-data:/var/lib/silo
+
+volumes:
+  silo-local-data:

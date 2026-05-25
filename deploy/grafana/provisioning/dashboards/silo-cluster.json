@@ -1,0 +1,57 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Cluster nodes online",
+      "id": 1,
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "count(silo_build_info)",
+          "legendFormat": "nodes",
+          "refId": "A"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "silo-prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "none"
+      }
+    },
+    {
+      "type": "table",
+      "title": "Build info per node",
+      "id": 2,
+      "gridPos": { "x": 6, "y": 0, "w": 18, "h": 4 },
+      "targets": [
+        {
+          "expr": "silo_build_info",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "datasource": { "type": "prometheus", "uid": "silo-prometheus" },
+      "options": { "showHeader": true }
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["silo"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "silo — cluster",
+  "uid": "silo-cluster",
+  "version": 1,
+  "weekStart": ""
+}

@@ -1,0 +1,40 @@
+# Local environment
+.env
+.env.local
+.env.*.local
+deploy/.env
+deploy/.env.local
+
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.prof
+*.out
+coverage.*
+profile.*
+
+# Local data directories used by docker-compose
+/data/
+/var/
+
+# Editor/IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Generated documentation
+/docs/_build/
+
+# UI artifacts (Vue 3 + Vite)
+/ui/node_modules/
+/ui/dist/
+/ui/.vite/
+/ui/coverage/
+
+# Claude
+CLAUDE.md
+.claude/
