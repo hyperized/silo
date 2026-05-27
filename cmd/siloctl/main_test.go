@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -10,8 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
@@ -82,6 +88,19 @@ func TestRunMain_Version(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "siloctl") {
 		t.Errorf("version output should mention siloctl, got %q", out.String())
+	}
+}
+
+func TestRunMain_AuthDispatches(t *testing.T) {
+	// Top-level dispatch must reach the auth subcommand; without this
+	// branch coverage, adding the case to runMain silently breaks the
+	// dispatcher.
+	var out, errBuf bytes.Buffer
+	if code := runMain([]string{"auth", "help"}, nil, &out, &errBuf); code != 0 {
+		t.Errorf("auth help exit: got %d, want 0; stderr=%q", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "siloctl auth") {
+		t.Errorf("auth help missing usage, got %q", out.String())
 	}
 }
 
@@ -294,5 +313,411 @@ func TestRunChunk_DialFailureSurfacesActionable(t *testing.T) {
 	out2 := errBuf.String()
 	if !strings.Contains(out2, "siloctl") {
 		t.Errorf("stderr should prefix with siloctl, got %q", out2)
+	}
+}
+
+func TestRunChunk_FlagParseErrors(t *testing.T) {
+	// Each subcommand uses flag.ContinueOnError; an unknown flag makes
+	// fs.Parse return non-nil so runChunkX returns 2 early. Covers the
+	// "fs.Parse failed" branch in each.
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"put bad flag", []string{"chunk", "put", "--no-such-flag", "id", "src"}},
+		{"get bad flag", []string{"chunk", "get", "--no-such-flag", "id"}},
+		{"delete bad flag", []string{"chunk", "delete", "--no-such-flag", "id"}},
+		{"stat bad flag", []string{"chunk", "stat", "--no-such-flag", "id"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errBuf bytes.Buffer
+			code := runMain(tc.args, nil, &out, &errBuf)
+			if code != 2 {
+				t.Errorf("got code %d, want 2 (parse error)", code)
+			}
+		})
+	}
+}
+
+func TestRunChunk_GetWriteFailureToUnwritableFile(t *testing.T) {
+	addr, teardown := newTestServer(t)
+	defer teardown()
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.bin")
+	_ = os.WriteFile(src, []byte("payload"), 0o600)
+	_ = runMain([]string{"chunk", "put", "--server", addr, "writefail", src}, nil, new(bytes.Buffer), new(bytes.Buffer))
+
+	// Try to write to a path that cannot be created (parent doesn't exist).
+	dst := filepath.Join(tmp, "missing-parent", "out.bin")
+	var out, errBuf bytes.Buffer
+	code := runMain([]string{"chunk", "get", "--server", addr, "writefail", dst}, nil, &out, &errBuf)
+	if code != 1 {
+		t.Errorf("got %d, want 1 for unwritable destination", code)
+	}
+	if !strings.Contains(errBuf.String(), "could not open") {
+		t.Errorf("stderr should explain the open failure, got %q", errBuf.String())
+	}
+}
+
+func TestRunChunk_DialerSwapErrorPaths(t *testing.T) {
+	// Force every operation through a dialer that returns an error. This
+	// exercises the "could not dial silod" branch in each subcommand,
+	// which is otherwise only hit on a real network failure.
+	prev := dialer
+	t.Cleanup(func() { dialer = prev })
+	dialer = func(string) (*grpc.ClientConn, error) {
+		return nil, errors.New("dialer refused")
+	}
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"put dial fail", []string{"chunk", "put", "--server", "x", "id", "-"}},
+		{"get dial fail", []string{"chunk", "get", "--server", "x", "id"}},
+		{"delete dial fail", []string{"chunk", "delete", "--server", "x", "id"}},
+		{"stat dial fail", []string{"chunk", "stat", "--server", "x", "id"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errBuf bytes.Buffer
+			code := runMain(tc.args, strings.NewReader(""), &out, &errBuf)
+			if code != 1 {
+				t.Errorf("got %d, want 1 (dial failure)", code)
+			}
+			if !strings.Contains(errBuf.String(), "could not dial silod") {
+				t.Errorf("stderr should mention dial failure, got %q", errBuf.String())
+			}
+		})
+	}
+}
+
+func TestReportRPC_CoversAllBranches(t *testing.T) {
+	// Direct unit test on reportRPC since the branches map to gRPC codes
+	// that are awkward to provoke through the full client surface.
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"not found", status.Error(codes.NotFound, "chunk not found"), 1},
+		{"invalid arg", status.Error(codes.InvalidArgument, "bad id"), 2},
+		{"unavailable", status.Error(codes.Unavailable, "no peer"), 1},
+		{"other gRPC code", status.Error(codes.Internal, "boom"), 1},
+		{"non-status error", errors.New("plain go error"), 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var errBuf bytes.Buffer
+			code := reportRPC(&errBuf, "test-op", tc.err)
+			if code != tc.want {
+				t.Errorf("got code %d, want %d (stderr=%q)", code, tc.want, errBuf.String())
+			}
+			if !strings.Contains(errBuf.String(), "test-op") {
+				t.Errorf("stderr should name the operation, got %q", errBuf.String())
+			}
+		})
+	}
+}
+
+func TestEnvDefault(t *testing.T) {
+	// Cover both branches: set vs unset env var.
+	t.Setenv("SILOCTL_TEST_VAR", "set-value")
+	if got := envDefault("SILOCTL_TEST_VAR", "fallback"); got != "set-value" {
+		t.Errorf("set: got %q, want set-value", got)
+	}
+	if got := envDefault("SILOCTL_NO_SUCH_VAR_AT_ALL", "fallback"); got != "fallback" {
+		t.Errorf("unset: got %q, want fallback", got)
+	}
+}
+
+// putToFakeStreamSendFailure exercises the inner Put error paths by
+// forcing the server to close its side before stream.Send is called. We
+// use a real server with an in-process listener, then close the conn
+// after Put opens but before the client tries to send the header.
+// The header-send failure path is mid-stream, so flakes are bounded by
+// the connection being torn down before the goroutine writes.
+func TestRunChunk_PutStdinReadFailure(t *testing.T) {
+	addr, teardown := newTestServer(t)
+	defer teardown()
+
+	// failingReader returns an error after returning zero bytes — drives
+	// runChunkPut into the "could not read from <path>" branch.
+	r := &failingReadCloser{err: errors.New("simulated stdin failure")}
+	var out, errBuf bytes.Buffer
+	code := runMain([]string{"chunk", "put", "--server", addr, "stdin-fail", "-"}, r, &out, &errBuf)
+	if code != 1 {
+		t.Errorf("got %d, want 1 for read failure", code)
+	}
+	if !strings.Contains(errBuf.String(), "could not read from") {
+		t.Errorf("stderr should mention the read failure, got %q", errBuf.String())
+	}
+}
+
+type failingReadCloser struct{ err error }
+
+func (f *failingReadCloser) Read(_ []byte) (int, error) { return 0, f.err }
+func (f *failingReadCloser) Close() error               { return nil }
+
+type failingWriter struct{ err error }
+
+func (f failingWriter) Write(_ []byte) (int, error) { return 0, f.err }
+
+// fakeChunkClient lets tests reach the in-stream Send/Recv error paths
+// of runChunkPut and runChunkGet, which a real gRPC connection only
+// trips on flaky networks. Each method is independently scriptable.
+type fakeChunkClient struct {
+	putOpenErr error
+	putStream  *fakePutStream
+	getOpenErr error
+	getStream  *fakeGetStream
+	deleteErr  error
+	statResp   *chunkv1.StatResponse
+	statErr    error
+}
+
+func (f *fakeChunkClient) Put(_ context.Context, _ ...grpc.CallOption) (chunkv1.ChunkStore_PutClient, error) {
+	if f.putOpenErr != nil {
+		return nil, f.putOpenErr
+	}
+	return f.putStream, nil
+}
+
+func (f *fakeChunkClient) Get(_ context.Context, _ *chunkv1.GetRequest, _ ...grpc.CallOption) (chunkv1.ChunkStore_GetClient, error) {
+	if f.getOpenErr != nil {
+		return nil, f.getOpenErr
+	}
+	return f.getStream, nil
+}
+
+func (f *fakeChunkClient) Delete(_ context.Context, _ *chunkv1.DeleteRequest, _ ...grpc.CallOption) (*chunkv1.DeleteResponse, error) {
+	if f.deleteErr != nil {
+		return nil, f.deleteErr
+	}
+	return &chunkv1.DeleteResponse{}, nil
+}
+
+func (f *fakeChunkClient) Stat(_ context.Context, _ *chunkv1.StatRequest, _ ...grpc.CallOption) (*chunkv1.StatResponse, error) {
+	if f.statErr != nil {
+		return nil, f.statErr
+	}
+	return f.statResp, nil
+}
+
+// fakePutStream and fakeGetStream are minimal implementations of the
+// generated streaming client interfaces. Only the methods runChunkPut
+// and runChunkGet call are filled in; the rest exists to satisfy the
+// embedded grpc.ClientStream contract via ClientStream embedding.
+type fakePutStream struct {
+	grpc.ClientStream
+	headerSendErr error
+	dataSendErr   error
+	closeRecvErr  error
+	closeResp     *chunkv1.PutResponse
+	sends         int
+}
+
+func (s *fakePutStream) Send(req *chunkv1.PutRequest) error {
+	s.sends++
+	if _, isHeader := req.Body.(*chunkv1.PutRequest_Header); isHeader && s.headerSendErr != nil {
+		return s.headerSendErr
+	}
+	if _, isData := req.Body.(*chunkv1.PutRequest_Data); isData && s.dataSendErr != nil {
+		return s.dataSendErr
+	}
+	return nil
+}
+
+func (s *fakePutStream) CloseAndRecv() (*chunkv1.PutResponse, error) {
+	if s.closeRecvErr != nil {
+		return nil, s.closeRecvErr
+	}
+	return s.closeResp, nil
+}
+
+type fakeGetStream struct {
+	grpc.ClientStream
+	msgs    []*chunkv1.GetResponse
+	recvErr error
+	idx     int
+}
+
+func (s *fakeGetStream) Recv() (*chunkv1.GetResponse, error) {
+	if s.recvErr != nil {
+		return nil, s.recvErr
+	}
+	if s.idx >= len(s.msgs) {
+		return nil, io.EOF
+	}
+	m := s.msgs[s.idx]
+	s.idx++
+	return m, nil
+}
+
+// withFakeClient installs a fake chunk client and a no-op dialer for the
+// duration of a test, restoring originals afterwards.
+func withFakeClient(t *testing.T, fc *fakeChunkClient) {
+	t.Helper()
+	prevDial := dialer
+	prevClient := newChunkClient
+	t.Cleanup(func() {
+		dialer = prevDial
+		newChunkClient = prevClient
+	})
+	dialer = func(string) (*grpc.ClientConn, error) {
+		// We never speak to this conn; newChunkClient is also stubbed.
+		// Constructing a NewClient is non-blocking, so the dial never
+		// touches the network.
+		return grpc.NewClient("passthrough:///fake", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	newChunkClient = func(*grpc.ClientConn) chunkv1.ChunkStoreClient { return fc }
+}
+
+func TestRunChunkPut_StreamSendHeaderFails(t *testing.T) {
+	withFakeClient(t, &fakeChunkClient{
+		putStream: &fakePutStream{headerSendErr: errors.New("header send boom")},
+	})
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src")
+	_ = os.WriteFile(src, []byte("data"), 0o600)
+
+	var out, errBuf bytes.Buffer
+	code := runMain([]string{"chunk", "put", "--server", "x", "id", src}, nil, &out, &errBuf)
+	if code != 1 {
+		t.Errorf("got %d, want 1; stderr=%q", code, errBuf.String())
+	}
+}
+
+func TestRunChunkPut_StreamSendDataFails(t *testing.T) {
+	withFakeClient(t, &fakeChunkClient{
+		putStream: &fakePutStream{dataSendErr: errors.New("data send boom")},
+	})
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src")
+	_ = os.WriteFile(src, []byte("data"), 0o600)
+
+	var out, errBuf bytes.Buffer
+	code := runMain([]string{"chunk", "put", "--server", "x", "id", src}, nil, &out, &errBuf)
+	if code != 1 {
+		t.Errorf("got %d, want 1; stderr=%q", code, errBuf.String())
+	}
+}
+
+func TestRunChunkPut_OpenStreamFails(t *testing.T) {
+	withFakeClient(t, &fakeChunkClient{
+		putOpenErr: status.Error(codes.Unavailable, "no peer"),
+	})
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src")
+	_ = os.WriteFile(src, []byte("d"), 0o600)
+
+	var out, errBuf bytes.Buffer
+	code := runMain([]string{"chunk", "put", "--server", "x", "id", src}, nil, &out, &errBuf)
+	if code != 1 {
+		t.Errorf("got %d, want 1", code)
+	}
+}
+
+func TestRunChunkPut_CloseAndRecvFails(t *testing.T) {
+	withFakeClient(t, &fakeChunkClient{
+		putStream: &fakePutStream{closeRecvErr: status.Error(codes.Internal, "store boom")},
+	})
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src")
+	_ = os.WriteFile(src, []byte("d"), 0o600)
+
+	var out, errBuf bytes.Buffer
+	code := runMain([]string{"chunk", "put", "--server", "x", "id", src}, nil, &out, &errBuf)
+	if code != 1 {
+		t.Errorf("got %d, want 1", code)
+	}
+}
+
+func TestRunChunkGet_OpenStreamFails(t *testing.T) {
+	withFakeClient(t, &fakeChunkClient{
+		getOpenErr: status.Error(codes.Unavailable, "no peer"),
+	})
+	var out, errBuf bytes.Buffer
+	code := runMain([]string{"chunk", "get", "--server", "x", "id"}, nil, &out, &errBuf)
+	if code != 1 {
+		t.Errorf("got %d, want 1", code)
+	}
+}
+
+func TestRunChunkGet_RecvFails(t *testing.T) {
+	withFakeClient(t, &fakeChunkClient{
+		getStream: &fakeGetStream{recvErr: status.Error(codes.Internal, "recv boom")},
+	})
+	var out, errBuf bytes.Buffer
+	code := runMain([]string{"chunk", "get", "--server", "x", "id"}, nil, &out, &errBuf)
+	if code != 1 {
+		t.Errorf("got %d, want 1; stderr=%q", code, errBuf.String())
+	}
+}
+
+func TestRunChunk_GetSinkWriteFailure(t *testing.T) {
+	addr, teardown := newTestServer(t)
+	defer teardown()
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if code := runMain([]string{"chunk", "put", "--server", addr, "sinkfail", src}, nil, new(bytes.Buffer), new(bytes.Buffer)); code != 0 {
+		t.Fatalf("put: code=%d", code)
+	}
+
+	// Stream Get to a writer that always fails — exercises the
+	// "could not write chunk data to the destination" branch.
+	sink := failingWriter{err: errors.New("sink boom")}
+	var errBuf bytes.Buffer
+	code := runMain([]string{"chunk", "get", "--server", addr, "sinkfail"}, nil, sink, &errBuf)
+	if code != 1 {
+		t.Errorf("got code %d, want 1 for sink write failure (stderr=%q)", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "could not write chunk data") {
+		t.Errorf("stderr should mention write failure, got %q", errBuf.String())
+	}
+}
+
+// TestRunChunk_RPCFailureMidStream tears the server down between dial
+// and the first RPC, so client.Put / client.Get / client.Delete fail
+// after the dial succeeds. Without this branch coverage, real silod
+// crashes/restarts would surface as untested error paths in production.
+func TestRunChunk_RPCFailureMidStream(t *testing.T) {
+	// Spin up a test server, capture its addr, then kill it before
+	// running the CLI command. Using a tiny rpcTimeout shrinks the
+	// per-call wait so the test stays fast.
+	prev := rpcTimeout
+	t.Cleanup(func() { rpcTimeout = prev })
+	rpcTimeout = 250 * time.Millisecond
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"put against dead server", []string{"chunk", "put", "--server", "DEADSERVER", "id", "-"}},
+		{"get against dead server", []string{"chunk", "get", "--server", "DEADSERVER", "id"}},
+		{"delete against dead server", []string{"chunk", "delete", "--server", "DEADSERVER", "id"}},
+		{"stat against dead server", []string{"chunk", "stat", "--server", "DEADSERVER", "id"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, teardown := newTestServer(t)
+			teardown() // kill immediately so RPCs fail
+			args := make([]string, len(tc.args))
+			copy(args, tc.args)
+			for i, a := range args {
+				if a == "DEADSERVER" {
+					args[i] = addr
+				}
+			}
+			var out, errBuf bytes.Buffer
+			code := runMain(args, strings.NewReader("payload"), &out, &errBuf)
+			if code == 0 {
+				t.Errorf("got code 0, want non-zero against a dead server (stdout=%q stderr=%q)", out.String(), errBuf.String())
+			}
+		})
 	}
 }

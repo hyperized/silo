@@ -353,6 +353,109 @@ func TestFsyncDir_OnMissingDirectory(t *testing.T) {
 	}
 }
 
+// fakeFile implements syncCloser with hook points so tests can fail at
+// any step of writeAtomic without involving the real filesystem.
+type fakeFile struct {
+	writeErr error
+	syncErr  error
+	closeErr error
+	closed   bool
+}
+
+func (f *fakeFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+func (f *fakeFile) Sync() error  { return f.syncErr }
+func (f *fakeFile) Close() error { f.closed = true; return f.closeErr }
+
+// withFakeFile swaps openExclusiveFile for the duration of a test so
+// every post-open branch in writeAtomic becomes reachable. Restoring on
+// cleanup keeps the package-level seam test-only.
+func withFakeFile(t *testing.T, f *fakeFile) {
+	t.Helper()
+	prev := openExclusiveFile
+	t.Cleanup(func() { openExclusiveFile = prev })
+	openExclusiveFile = func(_ string, _ os.FileMode) (syncCloser, error) {
+		return f, nil
+	}
+}
+
+func TestWriteAtomic_WriteFailureRemovesTmp(t *testing.T) {
+	s, dir := newTestStore(t)
+	withFakeFile(t, &fakeFile{writeErr: errors.New("write boom")})
+
+	// Seed the tmp file so we can verify osRemove was called.
+	tmp := filepath.Join(dir, "boom"+tmpExt)
+	if err := os.WriteFile(tmp, []byte("residue"), 0o600); err != nil {
+		t.Fatalf("seed tmp: %v", err)
+	}
+
+	_, err := s.Put(context.Background(), "boom", []byte("data"))
+	if err == nil || !strings.Contains(err.Error(), "write boom") {
+		t.Fatalf("Put: got %v, want write boom", err)
+	}
+	if _, statErr := os.Stat(tmp); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("tmp file should be removed after write failure, stat=%v", statErr)
+	}
+}
+
+func TestWriteAtomic_SyncFailureRemovesTmp(t *testing.T) {
+	s, dir := newTestStore(t)
+	withFakeFile(t, &fakeFile{syncErr: errors.New("sync boom")})
+
+	tmp := filepath.Join(dir, "syncfail"+tmpExt)
+	if err := os.WriteFile(tmp, []byte("residue"), 0o600); err != nil {
+		t.Fatalf("seed tmp: %v", err)
+	}
+	_, err := s.Put(context.Background(), "syncfail", []byte("data"))
+	if err == nil || !strings.Contains(err.Error(), "sync boom") {
+		t.Fatalf("Put: got %v, want sync boom", err)
+	}
+	if _, statErr := os.Stat(tmp); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("tmp file should be removed after sync failure, stat=%v", statErr)
+	}
+}
+
+func TestWriteAtomic_CloseFailureRemovesTmp(t *testing.T) {
+	s, dir := newTestStore(t)
+	withFakeFile(t, &fakeFile{closeErr: errors.New("close boom")})
+
+	tmp := filepath.Join(dir, "closefail"+tmpExt)
+	if err := os.WriteFile(tmp, []byte("residue"), 0o600); err != nil {
+		t.Fatalf("seed tmp: %v", err)
+	}
+	_, err := s.Put(context.Background(), "closefail", []byte("data"))
+	if err == nil || !strings.Contains(err.Error(), "close boom") {
+		t.Fatalf("Put: got %v, want close boom", err)
+	}
+	if _, statErr := os.Stat(tmp); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("tmp file should be removed after close failure, stat=%v", statErr)
+	}
+}
+
+func TestWriteAtomic_RenameFailureRemovesTmp(t *testing.T) {
+	s, dir := newTestStore(t)
+
+	prev := osRename
+	t.Cleanup(func() { osRename = prev })
+	osRename = func(_, _ string) error { return errors.New("rename boom") }
+
+	_, err := s.Put(context.Background(), "renamefail", []byte("data"))
+	if err == nil || !strings.Contains(err.Error(), "rename boom") {
+		t.Fatalf("Put: got %v, want rename boom", err)
+	}
+	// The real file was created and then the rename failed; the tmp
+	// file should have been removed.
+	tmp := filepath.Join(dir, "renamefail"+tmpExt)
+	if _, statErr := os.Stat(tmp); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("tmp file should be removed after rename failure, stat=%v", statErr)
+	}
+}
+
 func TestGet_DetectsCorruption(t *testing.T) {
 	s, dir := newTestStore(t)
 	ctx := context.Background()

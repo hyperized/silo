@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
@@ -21,16 +25,100 @@ const (
 	// putDataFrameSize keeps Put streaming frames well under gRPC's
 	// 4 MiB default message ceiling.
 	putDataFrameSize = 64 * 1024
-
-	// rpcTimeout caps a single chunk operation. Chunks are small (4 MiB
-	// default), so 30s is generous even over slow links.
-	rpcTimeout = 30 * time.Second
 )
 
+// rpcTimeout caps a single chunk operation. Chunks are small (4 MiB
+// default), so 30s is generous even over slow links. A package-level var
+// so tests can shorten it to drive the deadline-expired error paths.
+var rpcTimeout = 30 * time.Second
+
 // dialer is overridable in tests so they can dial a test gRPC server
-// without touching the real network.
-var dialer = func(target string) (*grpc.ClientConn, error) {
-	return grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+// without touching the real network. The production implementation
+// loads mTLS material from the user's config dir; if no credentials
+// are present it falls back to insecure (for the dev loop where
+// silo-local is running without TLS hardening or for unit tests that
+// inject a plaintext gRPC server).
+var dialer = defaultDialer
+
+func defaultDialer(target string) (*grpc.ClientConn, error) {
+	tlsCfg, err := loadClientTLS()
+	if err != nil {
+		return nil, err
+	}
+	if tlsCfg == nil {
+		return grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	return grpc.NewClient(target, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+}
+
+// loadClientTLS reads ca.crt + client.crt + client.key from the per-user
+// config dir (or the env-var override) and assembles a tls.Config wired
+// for mTLS to silod. Returns (nil, nil) when no credentials are on disk
+// — the caller falls back to insecure, which is the right behaviour for
+// `siloctl chunk …` runs against a single-node dev cluster before the
+// operator has claimed credentials. Errors are surfaced when files
+// exist but are unreadable, so a half-broken config doesn't masquerade
+// as "no credentials present".
+func loadClientTLS() (*tls.Config, error) {
+	dir, err := siloctlConfigDir()
+	if err != nil {
+		return nil, err
+	}
+	caPath := envDefault("SILO_CA_CERT", filepath.Join(dir, "ca.crt"))
+	certPath := envDefault("SILO_CLIENT_CERT", filepath.Join(dir, "client.crt"))
+	keyPath := envDefault("SILO_CLIENT_KEY", filepath.Join(dir, "client.key"))
+
+	// All three files must be present for mTLS. The "no creds at all"
+	// case is the common dev-loop pattern, so we treat it as a clean
+	// "fall back to insecure" signal.
+	if !fileReadable(caPath) || !fileReadable(certPath) || !fileReadable(keyPath) {
+		return nil, nil
+	}
+
+	caBytes, err := os.ReadFile(caPath)
+	if err != nil {
+		return nil, fmt.Errorf("siloctl: could not read CA cert at %s (%v); remove the file or fix the path with SILO_CA_CERT", caPath, err)
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("siloctl: could not load client cert+key from %s / %s (%v); regenerate them with 'siloctl auth init'", certPath, keyPath, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caBytes) {
+		return nil, fmt.Errorf("siloctl: CA cert at %s is not valid PEM; remove the file and re-run 'siloctl auth init'", caPath)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      pool,
+		// ServerName is intentionally unset; the caller can override
+		// via tls.Config in fully-mTLS deployments. silod's node cert
+		// includes both the node id (DNS-SAN) and 127.0.0.1 (IP-SAN),
+		// so the default verification picks the right SAN as long as
+		// --server points at one of them.
+		MinVersion: tls.VersionTLS13,
+	}, nil
+}
+
+// siloctlConfigDir is the seam shared between auth.go and chunk.go for
+// locating per-user state. Indirection so tests can swap a temp dir in
+// place of os.UserConfigDir().
+func siloctlConfigDir() (string, error) {
+	return userConfigDir()
+}
+
+func fileReadable(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// newChunkClient is overridable in tests so we can inject a client that
+// fails on Send/Recv mid-stream. Production builds always wrap the
+// generated client over the dialed conn.
+var newChunkClient = func(conn *grpc.ClientConn) chunkv1.ChunkStoreClient {
+	return chunkv1.NewChunkStoreClient(conn)
 }
 
 func runChunk(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -109,7 +197,7 @@ func runChunkPut(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer conn.Close()
-	client := chunkv1.NewChunkStoreClient(conn)
+	client := newChunkClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
@@ -177,7 +265,7 @@ func runChunkGet(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer conn.Close()
-	client := chunkv1.NewChunkStoreClient(conn)
+	client := newChunkClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
@@ -223,7 +311,7 @@ func runChunkDelete(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer conn.Close()
-	client := chunkv1.NewChunkStoreClient(conn)
+	client := newChunkClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
@@ -252,7 +340,7 @@ func runChunkStat(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer conn.Close()
-	client := chunkv1.NewChunkStoreClient(conn)
+	client := newChunkClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()

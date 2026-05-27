@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"errors"
 	"io"
 	"log/slog"
@@ -14,17 +15,52 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
+	"github.com/hyperized/silo/internal/clustertls"
 	"github.com/hyperized/silo/internal/crypto"
 )
+
+// testMTLSPair mints a fresh cluster CA and matching server/client
+// certificates for the lifetime of a single test. Every transport test
+// runs under real mTLS because that is also what production runs —
+// having tests bypass TLS would let a wiring regression slip past.
+func testMTLSPair(t *testing.T) (server, client *tls.Config) {
+	t.Helper()
+	caPEM, keyPEM, err := clustertls.GenerateCA("silo-test", time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	ca, err := clustertls.LoadCA(caPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("LoadCA: %v", err)
+	}
+	serverCert, err := clustertls.MintNodeCert(ca, "server-id", []string{"localhost"}, []net.IP{net.IPv4(127, 0, 0, 1)}, time.Hour)
+	if err != nil {
+		t.Fatalf("MintNodeCert server: %v", err)
+	}
+	clientCert, err := clustertls.MintNodeCert(ca, "client-id", nil, nil, time.Hour)
+	if err != nil {
+		t.Fatalf("MintNodeCert client: %v", err)
+	}
+	server, err = clustertls.ServerConfig(ca, serverCert)
+	if err != nil {
+		t.Fatalf("ServerConfig: %v", err)
+	}
+	client, err = clustertls.ClientConfig(ca, clientCert, "server-id")
+	if err != nil {
+		t.Fatalf("ClientConfig: %v", err)
+	}
+	return server, client
+}
 
 // newTestServer wires a real grpc.Server bound to an ephemeral port,
 // returns a client and a teardown. Single helper because the streaming
 // nature of Put/Get makes pure-stub testing too noisy to be useful.
+// Always runs under mTLS to match production.
 func newTestServer(t *testing.T) (chunkv1.ChunkStoreClient, func()) {
 	t.Helper()
 	key := make([]byte, crypto.ClusterKeyBytes)
@@ -43,17 +79,19 @@ func newTestServer(t *testing.T) (chunkv1.ChunkStoreClient, func()) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := NewChunkService(store, logger)
 
+	serverTLS, clientTLS := testMTLSPair(t)
+
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	s := grpc.NewServer()
+	s := grpc.NewServer(grpc.Creds(credentials.NewTLS(serverTLS)))
 	chunkv1.RegisterChunkStoreServer(s, svc)
 	go func() {
 		_ = s.Serve(ln)
 	}()
 
-	conn, err := grpc.NewClient(ln.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(ln.Addr().String(), grpc.WithTransportCredentials(credentials.NewTLS(clientTLS)))
 	if err != nil {
 		s.Stop()
 		_ = ln.Close()
@@ -104,7 +142,7 @@ func getBytes(t *testing.T, client chunkv1.ChunkStoreClient, id string) ([]byte,
 	var data bytes.Buffer
 	for {
 		msg, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -188,7 +226,7 @@ func TestChunkService_PutValidations(t *testing.T) {
 	}{
 		{
 			name: "no messages sent",
-			send: func(s chunkv1.ChunkStore_PutClient) error { return nil },
+			send: func(_ chunkv1.ChunkStore_PutClient) error { return nil },
 			want: codes.InvalidArgument,
 		},
 		{
@@ -279,6 +317,134 @@ func TestChunkService_InvalidIDMappings(t *testing.T) {
 	}
 }
 
+// fakePutServer drives ChunkService.Put with scripted Recv results and a
+// hook for SendAndClose. Used to reach the non-EOF Recv error path and
+// the default-oneof-case branch that real protobuf decoding cannot reach
+// because the wire format forbids any other body type.
+type fakePutServer struct {
+	chunkv1.ChunkStore_PutServer
+	msgs      []*chunkv1.PutRequest
+	recvErrAt int
+	recvErr   error
+	idx       int
+	sendErr   error
+	ctx       context.Context
+}
+
+func (f *fakePutServer) Recv() (*chunkv1.PutRequest, error) {
+	if f.idx == f.recvErrAt && f.recvErr != nil {
+		return nil, f.recvErr
+	}
+	if f.idx >= len(f.msgs) {
+		return nil, io.EOF
+	}
+	m := f.msgs[f.idx]
+	f.idx++
+	return m, nil
+}
+
+func (f *fakePutServer) SendAndClose(_ *chunkv1.PutResponse) error { return f.sendErr }
+func (f *fakePutServer) Context() context.Context {
+	if f.ctx != nil {
+		return f.ctx
+	}
+	return context.Background()
+}
+
+// fakeGetServer drives ChunkService.Get with a scripted Send hook so the
+// "stream.Send returned an error" branches become reachable from a unit
+// test without tearing down a live gRPC connection mid-stream.
+type fakeGetServer struct {
+	chunkv1.ChunkStore_GetServer
+	sendCalls int
+	failAt    int
+	sendErr   error
+	ctx       context.Context
+}
+
+func (f *fakeGetServer) Send(_ *chunkv1.GetResponse) error {
+	f.sendCalls++
+	if f.sendCalls-1 == f.failAt {
+		return f.sendErr
+	}
+	return nil
+}
+
+func (f *fakeGetServer) Context() context.Context {
+	if f.ctx != nil {
+		return f.ctx
+	}
+	return context.Background()
+}
+
+func TestChunkService_Put_RecvErrorPropagates(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := NewChunkService(nil, logger)
+	stream := &fakePutServer{
+		recvErrAt: 0,
+		recvErr:   errors.New("simulated recv failure"),
+	}
+	if err := svc.Put(stream); err == nil || !strings.Contains(err.Error(), "simulated recv failure") {
+		t.Errorf("got %v, want simulated-recv-failure", err)
+	}
+}
+
+// TestChunkService_Put_UnknownOneOfBody covers the `default:` branch. The
+// protobuf-generated PutRequest carries a oneof; nil Body is the only way
+// to fall through to default. Real clients cannot produce this because
+// the generated code refuses to marshal an unset oneof, but the branch
+// stays as a defensive guard against future schema additions.
+func TestChunkService_Put_UnknownOneOfBody(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := NewChunkService(nil, logger)
+	stream := &fakePutServer{
+		msgs: []*chunkv1.PutRequest{{Body: nil}},
+	}
+	err := svc.Put(stream)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("got %v, want InvalidArgument", err)
+	}
+}
+
+func TestChunkService_Get_SendInfoFails(t *testing.T) {
+	key := make([]byte, crypto.ClusterKeyBytes)
+	_, _ = rand.Read(key)
+	cipher, _ := crypto.NewCipher(key)
+	store, _ := chunkstore.NewFileStore(t.TempDir(), cipher)
+	if _, err := store.Put(context.Background(), "g", []byte("data")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := NewChunkService(store, logger)
+
+	// Fail the very first Send (the info frame).
+	gs := &fakeGetServer{failAt: 0, sendErr: errors.New("info send boom")}
+	if err := svc.Get(&chunkv1.GetRequest{ChunkId: "g"}, gs); err == nil || !strings.Contains(err.Error(), "info send boom") {
+		t.Errorf("got %v, want info-send-boom", err)
+	}
+}
+
+func TestChunkService_Get_SendDataFails(t *testing.T) {
+	key := make([]byte, crypto.ClusterKeyBytes)
+	_, _ = rand.Read(key)
+	cipher, _ := crypto.NewCipher(key)
+	store, _ := chunkstore.NewFileStore(t.TempDir(), cipher)
+	// Need at least one data frame; the data payload triggers the
+	// inner Send loop after the info frame succeeds.
+	if _, err := store.Put(context.Background(), "g", []byte("data")); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := NewChunkService(store, logger)
+
+	gs := &fakeGetServer{failAt: 1, sendErr: errors.New("data send boom")}
+	if err := svc.Get(&chunkv1.GetRequest{ChunkId: "g"}, gs); err == nil || !strings.Contains(err.Error(), "data send boom") {
+		t.Errorf("got %v, want data-send-boom", err)
+	}
+}
+
 func TestMapStoreError(t *testing.T) {
 	cases := []struct {
 		in   error
@@ -303,7 +469,8 @@ func TestGRPCServer_LifecycleAndAddrIsRaceFree(t *testing.T) {
 	store, _ := chunkstore.NewFileStore(t.TempDir(), cipher)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := NewGRPCServer("127.0.0.1:0", store, logger)
+	serverTLS, _ := testMTLSPair(t)
+	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, logger)
 
 	if srv.Addr() != "" {
 		t.Errorf("Addr before Start: got %q, want empty", srv.Addr())
@@ -345,8 +512,9 @@ func TestGRPCServer_StartFailsOnBadAddress(t *testing.T) {
 	cipher, _ := crypto.NewCipher(key)
 	store, _ := chunkstore.NewFileStore(t.TempDir(), cipher)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	serverTLS, _ := testMTLSPair(t)
 
-	srv := NewGRPCServer("not-an-address", store, logger)
+	srv := NewGRPCServer("not-an-address", serverTLS, store, logger)
 	err := srv.Start()
 	if err == nil || !strings.Contains(err.Error(), "SILO_GRPC_ADDR") {
 		t.Errorf("expected SILO_GRPC_ADDR error, got %v", err)
@@ -359,8 +527,9 @@ func TestGRPCServer_ShutdownDeadlineForcesStop(t *testing.T) {
 	cipher, _ := crypto.NewCipher(key)
 	store, _ := chunkstore.NewFileStore(t.TempDir(), cipher)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	serverTLS, clientTLS := testMTLSPair(t)
 
-	srv := NewGRPCServer("127.0.0.1:0", store, logger)
+	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, logger)
 	go func() { _ = srv.Start() }()
 	// Wait until bound.
 	deadline := time.Now().Add(2 * time.Second)
@@ -372,7 +541,7 @@ func TestGRPCServer_ShutdownDeadlineForcesStop(t *testing.T) {
 	}
 
 	// Open a hanging Get RPC so GracefulStop has something to wait for.
-	conn, err := grpc.NewClient(srv.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(srv.Addr(), grpc.WithTransportCredentials(credentials.NewTLS(clientTLS)))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

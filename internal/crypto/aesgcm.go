@@ -150,19 +150,20 @@ func readRandom(n int, purpose string) ([]byte, error) {
 	return buf, nil
 }
 
-// newGCM builds an AES-GCM AEAD. It panics on non-32-byte keys because
-// every caller here passes either the validated cluster key or a
-// freshly-minted 32-byte data key — a failure means silo built a key
-// wrong, not that the input was wrong, and surfacing it as a panic
-// catches that bug loudly.
+// newGCM builds an AES-GCM AEAD. The caller invariant is that key is
+// 16/24/32 bytes; the cluster key is length-checked in NewCipher and
+// data keys are minted internally at exactly dataKeyBytes. The panic on
+// aes.NewCipher is a belt-and-braces guard against future callers that
+// hand in a misshapen key — surfacing it as a panic catches the bug
+// loudly instead of silently substituting an unsigned envelope.
+// cipher.NewGCM cannot fail for an AES block (stdlib only errors on
+// non-AES block ciphers), so the second error path is intentionally
+// not handled.
 func newGCM(key []byte) cipher.AEAD {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		panic(fmt.Sprintf("silo: aes.NewCipher failed for a %d-byte key (%v); please file a bug at https://github.com/hyperized/silo/issues", len(key), err))
 	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		panic(fmt.Sprintf("silo: cipher.NewGCM failed (%v); please file a bug at https://github.com/hyperized/silo/issues", err))
-	}
+	aead, _ := cipher.NewGCM(block)
 	return aead
 }

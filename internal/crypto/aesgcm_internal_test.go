@@ -91,9 +91,9 @@ func TestDecrypt_DetectsTamper(t *testing.T) {
 	}
 
 	cases := []struct {
-		name  string
-		mut   func([]byte) []byte
-		want  error
+		name string
+		mut  func([]byte) []byte
+		want error
 	}{
 		{
 			name: "flip a ciphertext bit",
@@ -238,6 +238,34 @@ func TestEncrypt_RandFailsAtEachStage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// cipher.NewGCM cannot fail for an AES block (stdlib only errors on
+// non-AES block ciphers), so newGCM ignores that error. The only
+// reachable failure is aes.NewCipher rejecting a misshapen key, which
+// TestNewGCM_PanicsOnInvalidKey covers below.
+
+// TestNewGCM_PanicsOnInvalidKey pins the reachable defensive-panic
+// branch in newGCM. Production callers always pass 32-byte keys
+// (cluster key or freshly-minted DEK), so the panic is unreachable in
+// normal flow; the test fires it through direct invocation as a
+// regression guard against future code paths handing in shorter keys
+// silently.
+func TestNewGCM_PanicsOnInvalidKey(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("newGCM with a 7-byte key should panic")
+		}
+		msg, ok := r.(string)
+		if !ok {
+			t.Fatalf("panic value: got %T, want string", r)
+		}
+		if !strings.Contains(msg, "aes.NewCipher failed") {
+			t.Errorf("panic message: got %q, want aes.NewCipher reference", msg)
+		}
+	}()
+	_ = newGCM(make([]byte, 7))
 }
 
 func TestErrSentinels_AreInstructive(t *testing.T) {

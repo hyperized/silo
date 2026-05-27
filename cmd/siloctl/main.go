@@ -35,6 +35,8 @@ func runMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	rest := args[1:]
 
 	switch cmd {
+	case "auth":
+		return runAuth(rest, stdout, stderr)
 	case "chunk":
 		return runChunk(rest, stdin, stdout, stderr)
 	case "version":
@@ -57,6 +59,7 @@ Usage:
   siloctl <command> [args...]
 
 Commands:
+  auth       Claim cluster credentials from silod (run once per machine)
   chunk      Manage individual chunks on a silod node
   version    Print the siloctl version
   help       Show this message

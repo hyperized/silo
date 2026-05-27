@@ -31,19 +31,21 @@ const (
 )
 
 const (
-	DefaultGRPCAddr    = "0.0.0.0:7000"
-	DefaultHTTPAddr    = "0.0.0.0:7080"
-	DefaultDataDir     = "/var/lib/silo"
-	DefaultChunkSize   = 4 * 1024 * 1024
-	DefaultReplication = 3
-	DefaultKeySource   = KeySourceStatic
-	DefaultLogLevel    = "info"
-	DefaultLogFormat   = "text"
+	DefaultGRPCAddr      = "0.0.0.0:7000"
+	DefaultBootstrapAddr = "0.0.0.0:7001"
+	DefaultHTTPAddr      = "0.0.0.0:7080"
+	DefaultDataDir       = "/var/lib/silo"
+	DefaultChunkSize     = 4 * 1024 * 1024
+	DefaultReplication   = 3
+	DefaultKeySource     = KeySourceStatic
+	DefaultLogLevel      = "info"
+	DefaultLogFormat     = "text"
 )
 
 type Config struct {
 	NodeID        string
 	GRPCAddr      string
+	BootstrapAddr string
 	HTTPAddr      string
 	Seeds         []string
 	Domain        string
@@ -55,6 +57,42 @@ type Config struct {
 	KeyPath       string
 	LogLevel      string
 	LogFormat     string
+
+	// TLS material for inter-node and client traffic. All four paths
+	// default to siblings under DataDir so a fresh silod boots without
+	// any TLS env vars: it mints its own cluster CA (ca.crt + ca.key)
+	// and its own node cert (node.crt + node.key) into DataDir on first
+	// run, reusing them on every subsequent boot. Operators who want to
+	// bring their own CA (the production "bring-your-own-CA" path) point
+	// SILO_TLS_CA_CERT and SILO_TLS_CA_KEY at the externally-managed
+	// files instead.
+	CACertPath   string
+	CAKeyPath    string
+	NodeCertPath string
+	NodeKeyPath  string
+
+	// CAExternal is true when the operator explicitly pointed
+	// SILO_TLS_CA_CERT/_KEY at paths outside DataDir — typically a
+	// shared volume (docker-compose) or a Kubernetes secret. silod
+	// treats those paths as authoritative and waits for them to appear
+	// instead of self-minting on first boot, because in a multi-node
+	// deployment self-mint would produce a different CA on each node.
+	CAExternal bool
+
+	// CASeed flips the wait-for-CA behavior into mint-if-missing for
+	// this one node. In docker-compose this is set only on silo-a so
+	// it can write the inaugural CA into the shared volume; silo-b/c
+	// keep CASeed=false and wait. In production Kubernetes you would
+	// pre-populate the secret out-of-band and leave CASeed unset on
+	// every node.
+	CASeed bool
+
+	// PrintBootstrapToken forces silod to mint and print an additional
+	// join token on boot even if a token store already exists. Useful
+	// when an operator has lost the first-boot token; flip the env var,
+	// restart, then unset it. Default false: silod prints a token only
+	// on the very first boot when the store is empty.
+	PrintBootstrapToken bool
 }
 
 // EnvFunc resolves an env-var name to its value. Injected into Load so
@@ -76,16 +114,25 @@ func LoadFromEnv() (*Config, error) {
 // before validation so the operator's reported error always references
 // the value silod would actually use, not the half-built struct.
 func Load(env EnvFunc) (*Config, error) {
+	rawCACert := env("SILO_TLS_CA_CERT")
 	cfg := &Config{
-		NodeID:    env("SILO_NODE_ID"),
-		GRPCAddr:  envDefault(env, "SILO_GRPC_ADDR", DefaultGRPCAddr),
-		HTTPAddr:  envDefault(env, "SILO_HTTP_ADDR", DefaultHTTPAddr),
-		Domain:    env("SILO_DOMAIN"),
-		DataDir:   envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
-		KeySource: KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),
-		KeyPath:   env("SILO_ENCRYPTION_KEY_PATH"),
-		LogLevel:  envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
-		LogFormat: envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
+		NodeID:              env("SILO_NODE_ID"),
+		GRPCAddr:            envDefault(env, "SILO_GRPC_ADDR", DefaultGRPCAddr),
+		BootstrapAddr:       envDefault(env, "SILO_BOOTSTRAP_ADDR", DefaultBootstrapAddr),
+		HTTPAddr:            envDefault(env, "SILO_HTTP_ADDR", DefaultHTTPAddr),
+		Domain:              env("SILO_DOMAIN"),
+		DataDir:             envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
+		KeySource:           KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),
+		KeyPath:             env("SILO_ENCRYPTION_KEY_PATH"),
+		LogLevel:            envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
+		LogFormat:           envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
+		CACertPath:          rawCACert,
+		CAKeyPath:           env("SILO_TLS_CA_KEY"),
+		NodeCertPath:        env("SILO_TLS_NODE_CERT"),
+		NodeKeyPath:         env("SILO_TLS_NODE_KEY"),
+		CAExternal:          rawCACert != "",
+		CASeed:              envBool(env, "SILO_TLS_CA_SEED"),
+		PrintBootstrapToken: envBool(env, "SILO_PRINT_BOOTSTRAP_TOKEN"),
 	}
 
 	cfg.Seeds = parseSeeds(env("SILO_SEEDS"))
@@ -114,6 +161,23 @@ func Load(env EnvFunc) (*Config, error) {
 		cfg.NodeID = h
 	}
 
+	// Default every TLS path inside DataDir. silod self-mints a cluster
+	// CA into ca.{crt,key} on first boot when nothing is on disk yet, so
+	// SILO_TLS_CA_CERT/_KEY only need to be set for the bring-your-own-CA
+	// production path.
+	if cfg.CACertPath == "" {
+		cfg.CACertPath = cfg.DataDir + "/ca.crt"
+	}
+	if cfg.CAKeyPath == "" {
+		cfg.CAKeyPath = cfg.DataDir + "/ca.key"
+	}
+	if cfg.NodeCertPath == "" {
+		cfg.NodeCertPath = cfg.DataDir + "/node.crt"
+	}
+	if cfg.NodeKeyPath == "" {
+		cfg.NodeKeyPath = cfg.DataDir + "/node.key"
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -128,6 +192,9 @@ func (c *Config) Validate() error {
 	}
 	if c.GRPCAddr == "" {
 		return errors.New("SILO_GRPC_ADDR is required; set it to the host:port silod should listen on, e.g. 0.0.0.0:7000 (the default)")
+	}
+	if c.BootstrapAddr == "" {
+		return errors.New("SILO_BOOTSTRAP_ADDR is required; set it to the host:port that serves the one-time join API, e.g. 0.0.0.0:7001 (the default)")
 	}
 	if c.HTTPAddr == "" {
 		return errors.New("SILO_HTTP_ADDR is required; set it to the host:port that serves /healthz and /metrics, e.g. 0.0.0.0:7080 (the default)")
@@ -171,6 +238,20 @@ func envInt(env EnvFunc, key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s must be a whole number, got %q; see .env.example for a working value", key, v)
 	}
 	return n, nil
+}
+
+// envBool reads a boolean env var with a permissive truthy set ("1",
+// "true", "yes", case-insensitive). Missing or "0"/"false"/"no"/"" is
+// false. Strict parsing would force operators to know the exact spelling;
+// a permissive set matches the docker-compose ergonomics they already
+// expect from variables like SILO_LOG_FORMAT.
+func envBool(env EnvFunc, key string) bool {
+	switch strings.ToLower(env(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func envInt64(env EnvFunc, key string, fallback int64) (int64, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -130,34 +131,56 @@ func (s *FileStore) Stat(_ context.Context, id string) (Info, error) {
 	}, nil
 }
 
+// syncCloser is the subset of *os.File writeAtomic needs. Pulled out so
+// tests can swap openExclusiveFile to return a fake that fails Write,
+// Sync, or Close on demand — without those seams the post-OpenFile error
+// paths are unreachable from a unit test and silently rot.
+type syncCloser interface {
+	io.Writer
+	Sync() error
+	Close() error
+}
+
+// File-system seams. Swap in tests; never mutate from production code.
+// Keeping them at package scope (rather than threading through a struct)
+// matches the osHostname pattern in internal/config.
+var (
+	openExclusiveFile = func(path string, mode os.FileMode) (syncCloser, error) {
+		// O_EXCL avoids racing with a concurrent Put of the same id; the
+		// second caller fails fast rather than corrupting the first one's
+		// tmp file.
+		return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, mode)
+	}
+	osRename = os.Rename
+	osRemove = os.Remove
+)
+
 // writeAtomic gives crash consistency: write to a tmp file, fsync,
 // rename, fsync the directory. A power loss at any step leaves either
 // the previous chunk (if any) or no chunk, never a half-written one.
 // The fsync on the directory is the step everyone forgets — without it,
 // the rename can be undone by the journal on recovery.
 func writeAtomic(tmp, final string, data []byte, dir string) error {
-	// O_EXCL avoids racing with a concurrent Put of the same id; the second
-	// caller fails fast rather than corrupting the first one's tmp file.
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, 0o600)
+	f, err := openExclusiveFile(tmp, 0o600)
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
-		_ = os.Remove(tmp)
+		_ = osRemove(tmp)
 		return err
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
-		_ = os.Remove(tmp)
+		_ = osRemove(tmp)
 		return err
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
+		_ = osRemove(tmp)
 		return err
 	}
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.Remove(tmp)
+	if err := osRename(tmp, final); err != nil {
+		_ = osRemove(tmp)
 		return err
 	}
 	return fsyncDir(dir)

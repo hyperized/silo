@@ -18,6 +18,14 @@ import (
 // version is set at build time via -ldflags "-X main.version=…".
 var version = "dev"
 
+// signalContext is swappable so tests can drive runMain past the
+// "wait for shutdown" point with a context that cancels immediately.
+// Production points it at signal.NotifyContext so SIGINT and SIGTERM
+// trigger graceful shutdown.
+var signalContext = func() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
 func main() {
 	os.Exit(runMain(os.Stdout, os.Stderr))
 }
@@ -31,6 +39,10 @@ func runMain(stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// The level/format validation in config.Validate and observability.NewLogger
+	// share the same accept lists, so config.LoadFromEnv has already rejected
+	// any value that would trip this branch. Kept as a defensive guard in case
+	// the two lists drift in the future.
 	logger, err := observability.NewLogger(stdout, cfg.LogLevel, cfg.LogFormat)
 	if err != nil {
 		fmt.Fprintf(stderr, "silod: could not set up the structured logger — %v\n", err)
@@ -38,10 +50,10 @@ func runMain(stdout, stderr io.Writer) int {
 	}
 	slog.SetDefault(logger)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := signalContext()
 	defer cancel()
 
-	if err := silod.Run(ctx, cfg, logger, version); err != nil {
+	if err := silod.Run(ctx, cfg, logger, stdout, version); err != nil {
 		logger.Error("silod stopped with an error", "err", err)
 		return 1
 	}

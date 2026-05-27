@@ -32,6 +32,9 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.GRPCAddr != DefaultGRPCAddr {
 		t.Errorf("GRPCAddr default: got %q, want %q", cfg.GRPCAddr, DefaultGRPCAddr)
 	}
+	if cfg.BootstrapAddr != DefaultBootstrapAddr {
+		t.Errorf("BootstrapAddr default: got %q, want %q", cfg.BootstrapAddr, DefaultBootstrapAddr)
+	}
 	if cfg.HTTPAddr != DefaultHTTPAddr {
 		t.Errorf("HTTPAddr default: got %q, want %q", cfg.HTTPAddr, DefaultHTTPAddr)
 	}
@@ -59,36 +62,64 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if len(cfg.EncryptionKey) != 32 {
 		t.Errorf("EncryptionKey length: got %d, want 32", len(cfg.EncryptionKey))
 	}
+	// TLS paths default to siblings of DataDir when unset.
+	if cfg.CACertPath != DefaultDataDir+"/ca.crt" {
+		t.Errorf("CACertPath default: got %q, want %s/ca.crt", cfg.CACertPath, DefaultDataDir)
+	}
+	if cfg.CAKeyPath != DefaultDataDir+"/ca.key" {
+		t.Errorf("CAKeyPath default: got %q, want %s/ca.key", cfg.CAKeyPath, DefaultDataDir)
+	}
+	if cfg.NodeCertPath != DefaultDataDir+"/node.crt" {
+		t.Errorf("NodeCertPath default: got %q, want %s/node.crt", cfg.NodeCertPath, DefaultDataDir)
+	}
+	if cfg.NodeKeyPath != DefaultDataDir+"/node.key" {
+		t.Errorf("NodeKeyPath default: got %q, want %s/node.key", cfg.NodeKeyPath, DefaultDataDir)
+	}
 }
 
 func TestLoad_OverridesFromEnv(t *testing.T) {
 	cfg, err := Load(envMap(map[string]string{
-		"SILO_NODE_ID":        "alpha",
-		"SILO_GRPC_ADDR":      "127.0.0.1:9000",
-		"SILO_HTTP_ADDR":      "127.0.0.1:9080",
-		"SILO_DOMAIN":         "silo.example",
-		"SILO_DATA_DIR":       "/tmp/silo",
-		"SILO_CHUNK_SIZE":     "1048576",
-		"SILO_REPLICATION":    "5",
-		"SILO_LOG_LEVEL":      "debug",
-		"SILO_LOG_FORMAT":     "json",
-		"SILO_ENCRYPTION_KEY": validBase64Key(t),
+		"SILO_NODE_ID":               "alpha",
+		"SILO_GRPC_ADDR":             "127.0.0.1:9000",
+		"SILO_BOOTSTRAP_ADDR":        "127.0.0.1:9001",
+		"SILO_HTTP_ADDR":             "127.0.0.1:9080",
+		"SILO_DOMAIN":                "silo.example",
+		"SILO_DATA_DIR":              "/tmp/silo",
+		"SILO_CHUNK_SIZE":            "1048576",
+		"SILO_REPLICATION":           "5",
+		"SILO_LOG_LEVEL":             "debug",
+		"SILO_LOG_FORMAT":            "json",
+		"SILO_ENCRYPTION_KEY":        validBase64Key(t),
+		"SILO_TLS_CA_CERT":           "/etc/silo/ca.crt",
+		"SILO_TLS_CA_KEY":            "/etc/silo/ca.key",
+		"SILO_TLS_NODE_CERT":         "/etc/silo/node.crt",
+		"SILO_TLS_NODE_KEY":          "/etc/silo/node.key",
+		"SILO_PRINT_BOOTSTRAP_TOKEN": "yes",
+		"SILO_TLS_CA_SEED":           "true",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	want := &Config{
-		NodeID:        "alpha",
-		GRPCAddr:      "127.0.0.1:9000",
-		HTTPAddr:      "127.0.0.1:9080",
-		Domain:        "silo.example",
-		DataDir:       "/tmp/silo",
-		ChunkSize:     1 << 20,
-		Replication:   5,
-		KeySource:     KeySourceStatic,
-		LogLevel:      "debug",
-		LogFormat:     "json",
-		EncryptionKey: cfg.EncryptionKey, // compared by length below
+		NodeID:              "alpha",
+		GRPCAddr:            "127.0.0.1:9000",
+		BootstrapAddr:       "127.0.0.1:9001",
+		HTTPAddr:            "127.0.0.1:9080",
+		Domain:              "silo.example",
+		DataDir:             "/tmp/silo",
+		ChunkSize:           1 << 20,
+		Replication:         5,
+		KeySource:           KeySourceStatic,
+		LogLevel:            "debug",
+		LogFormat:           "json",
+		EncryptionKey:       cfg.EncryptionKey, // compared by length below
+		CACertPath:          "/etc/silo/ca.crt",
+		CAKeyPath:           "/etc/silo/ca.key",
+		NodeCertPath:        "/etc/silo/node.crt",
+		NodeKeyPath:         "/etc/silo/node.key",
+		CAExternal:          true,
+		CASeed:              true,
+		PrintBootstrapToken: true,
 	}
 	got := *cfg
 	got.Seeds = nil
@@ -246,6 +277,32 @@ func TestLoad_ValidationErrorAfterParse(t *testing.T) {
 	}
 }
 
+func TestEnvBool(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"1", true},
+		{"true", true},
+		{"True", true},
+		{"YES", true},
+		{"on", true},
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"no", false},
+		{"definitely", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.val, func(t *testing.T) {
+			env := func(string) string { return tc.val }
+			if got := envBool(env, "X"); got != tc.want {
+				t.Errorf("envBool(%q): got %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoad_BadReplication(t *testing.T) {
 	_, err := Load(envMap(map[string]string{
 		"SILO_NODE_ID":        "n1",
@@ -259,14 +316,15 @@ func TestLoad_BadReplication(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	base := Config{
-		NodeID:      "n1",
-		GRPCAddr:    "0:0",
-		HTTPAddr:    "0:0",
-		DataDir:     "/d",
-		ChunkSize:   1,
-		Replication: 1,
-		LogLevel:    "info",
-		LogFormat:   "text",
+		NodeID:        "n1",
+		GRPCAddr:      "0:0",
+		BootstrapAddr: "0:1",
+		HTTPAddr:      "0:0",
+		DataDir:       "/d",
+		ChunkSize:     1,
+		Replication:   1,
+		LogLevel:      "info",
+		LogFormat:     "text",
 	}
 
 	cases := []struct {
@@ -276,6 +334,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{"missing node id", func(c *Config) { c.NodeID = "" }, "node id is empty"},
 		{"missing grpc addr", func(c *Config) { c.GRPCAddr = "" }, "SILO_GRPC_ADDR"},
+		{"missing bootstrap addr", func(c *Config) { c.BootstrapAddr = "" }, "SILO_BOOTSTRAP_ADDR"},
 		{"missing http addr", func(c *Config) { c.HTTPAddr = "" }, "SILO_HTTP_ADDR"},
 		{"missing data dir", func(c *Config) { c.DataDir = "" }, "SILO_DATA_DIR"},
 		{"zero chunk", func(c *Config) { c.ChunkSize = 0 }, "SILO_CHUNK_SIZE"},

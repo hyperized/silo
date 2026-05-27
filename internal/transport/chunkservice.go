@@ -40,8 +40,8 @@ func NewChunkService(store chunkstore.Store, logger *slog.Logger) *ChunkService 
 
 func (s *ChunkService) Put(stream chunkv1.ChunkStore_PutServer) error {
 	var (
-		chunkID string
-		buf     []byte
+		chunkID   string
+		buf       []byte
 		gotHeader bool
 	)
 

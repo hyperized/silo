@@ -2,12 +2,14 @@ package transport
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
 	"sync"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
@@ -26,10 +28,13 @@ type GRPCServer struct {
 	ln net.Listener
 }
 
-// NewGRPCServer wires the chunk service onto a fresh grpc.Server.
-// Additional services (replication, namespace) register here later.
-func NewGRPCServer(addr string, store chunkstore.Store, logger *slog.Logger) *GRPCServer {
-	s := grpc.NewServer()
+// NewGRPCServer wires the chunk service onto a fresh grpc.Server. The
+// tlsCfg is required: silod runs every gRPC surface under mTLS so peer
+// identity is part of the wire protocol, not a hope-for-the-best
+// network ACL. Pass clustertls.ServerConfig(ca, nodeCert).
+func NewGRPCServer(addr string, tlsCfg *tls.Config, store chunkstore.Store, logger *slog.Logger) *GRPCServer {
+	creds := credentials.NewTLS(tlsCfg)
+	s := grpc.NewServer(grpc.Creds(creds))
 	chunkv1.RegisterChunkStoreServer(s, NewChunkService(store, logger))
 	return &GRPCServer{
 		addr:   addr,

@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("silo: chunk not found at this node — the chunk may live on a different replica or have been deleted; try another node, or restore from a healthy replica")
+	ErrNotFound  = errors.New("silo: chunk not found at this node — the chunk may live on a different replica or have been deleted; try another node, or restore from a healthy replica")
 	ErrInvalidID = errors.New("silo: chunk id is invalid — chunk ids must be 1-128 characters consisting of ASCII letters, digits, dashes, and underscores")
 )
 

@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package silo.bootstrap.v1;
+
+option go_package = "github.com/hyperized/silo/api/proto/silo/bootstrap/v1;bootstrapv1";
+
+// Bootstrap is the one silod service that runs without mutual TLS.
+// Operators use it once to redeem a join token for a client certificate
+// signed by the cluster CA; from then on every other silod surface is
+// mTLS-only. The listener is intentionally separate from the main gRPC
+// server (different port, different tls.Config) so the trust boundary
+// is obvious from the wire even before any token has been exchanged.
+service Bootstrap {
+  // Join exchanges a one-time token for a freshly-signed client
+  // certificate plus the cluster CA cert. The server uses the principal
+  // as the certificate subject so operator-attributed audit logs are
+  // possible once authentication is in place.
+  rpc Join(JoinRequest) returns (JoinResponse);
+}
+
+message JoinRequest {
+  // token: the plaintext join token the operator was handed when the
+  // cluster came up. Server compares its sha256 against the token store
+  // in constant time, refuses the request, and consumes the entry on
+  // success (single-use tokens become invalid after this call).
+  string token = 1;
+  // principal identifies the human or system requesting the cert. Folded
+  // into the issued certificate's CommonName so future audit logs can
+  // attribute actions back to a person, not just to "some operator".
+  // A sensible default is "<os-user>@<hostname>".
+  string principal = 2;
+}
+
+message JoinResponse {
+  // ca_cert_pem is the cluster CA the operator's siloctl should pin for
+  // future mTLS connections.
+  bytes ca_cert_pem = 1;
+  // client_cert_pem is a fresh certificate signed by the cluster CA,
+  // valid for the lifetime configured on silod. The operator stores it
+  // alongside ca_cert_pem and presents it on every subsequent RPC.
+  bytes client_cert_pem = 2;
+  // client_key_pem is the private key matching client_cert_pem. silod
+  // returns it once; lose it and the operator must redeem a new token.
+  bytes client_key_pem = 3;
+}

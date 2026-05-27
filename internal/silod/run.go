@@ -4,11 +4,18 @@ package silod
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
+	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/hyperized/silo/internal/bootstraptoken"
 	"github.com/hyperized/silo/internal/chunkstore"
+	"github.com/hyperized/silo/internal/clustertls"
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
 	"github.com/hyperized/silo/internal/observability"
@@ -36,24 +43,213 @@ var (
 	newHTTPSubsystem = func(cfg *config.Config, version string, logger *slog.Logger) subsystem {
 		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger)}
 	}
-	newGRPCSubsystem = func(cfg *config.Config, store chunkstore.Store, logger *slog.Logger) subsystem {
-		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, store, logger)}
+	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, store chunkstore.Store, logger *slog.Logger) subsystem {
+		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, logger)}
+	}
+	newBootstrapSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokens transport.TokenRedeemer, minter transport.ClientCertMinter, logger *slog.Logger) subsystem {
+		svc := transport.NewBootstrapService(tokens, minter, logger)
+		return &bootstrapSub{srv: transport.NewBootstrapServer(cfg.BootstrapAddr, tlsCfg, svc, logger)}
 	}
 	newChunkStore = func(cfg *config.Config, cipher *crypto.Cipher) (chunkstore.Store, error) {
 		return chunkstore.NewFileStore(cfg.DataDir, cipher)
 	}
+	// loadClusterTLS loads (and bootstraps if needed) the cluster CA
+	// and this node's TLS material. Swappable so tests can inject a
+	// minimal in-memory pair without writing files.
+	loadClusterTLS = defaultLoadClusterTLS
+	// openTokenStore is the seam through which silod opens the bootstrap
+	// token list. Tests substitute a constructor that hands back a
+	// no-op redeemer so they don't have to touch the filesystem.
+	openTokenStore = defaultOpenTokenStore
 )
+
+// defaultOpenTokenStore opens the bootstrap-token list at the
+// conventional path under DataDir. Pulled out into a seam so unit tests
+// for Run can inject a fake redeemer without writing JSON files; the
+// production path is one ReadFile-plus-JSON-Unmarshal away.
+func defaultOpenTokenStore(cfg *config.Config) (*bootstraptoken.Store, error) {
+	return bootstraptoken.Open(filepath.Join(cfg.DataDir, bootstraptoken.DefaultStoreName()))
+}
+
+// defaultClusterCALifetime is the validity window silod requests when it
+// mints its own cluster CA at first boot. Long enough to outlive
+// expected hardware refresh cycles, short enough that operators upgrading
+// from a self-bootstrapped dev cluster to a production deployment have a
+// natural moment to swap in a real CA.
+const defaultClusterCALifetime = 10 * 365 * 24 * time.Hour
+
+// clusterCAJoinTimeout caps how long a non-seed silod waits for the
+// shared CA cert + key to appear at the configured paths. 30s matches
+// the worst-case docker-compose cold-start time on a busy laptop;
+// kubernetes deployments with slow secret provisioning may want to
+// tune this upward once that becomes a real constraint. Declared as a
+// var so unit tests can shorten the wait without spawning real
+// 30-second delays.
+var clusterCAJoinTimeout = 30 * time.Second
+
+// clusterCAJoinPoll is how often waitForCA re-stats the files while
+// waiting. Short enough that a fast docker-compose boot completes
+// without measurable extra latency.
+var clusterCAJoinPoll = 250 * time.Millisecond
+
+// waitForCA blocks until the cert+key at the operator-supplied paths
+// both exist, or until clusterCAJoinTimeout elapses. The function
+// returns immediately when the cert file is already on disk — even if
+// the key isn't — so a verifier-only node (operator distributed the
+// cert but not the key) is not stuck waiting for a key that will never
+// arrive. The timeout error is actionable: it names the paths and
+// points operators at the seed node's logs.
+func waitForCA(certPath, keyPath string) error {
+	deadline := time.Now().Add(clusterCAJoinTimeout)
+	for time.Now().Before(deadline) {
+		// Cert alone is enough to leave the wait; LoadCA will fail
+		// loudly later if the cert is malformed, and the verifier-only
+		// case is handled by the caller.
+		if fileExists(certPath) {
+			return nil
+		}
+		// Key without cert is the inverse race: the seed has flushed
+		// the key but not the cert yet. Wait until the cert lands too.
+		if fileExists(keyPath) && !fileExists(certPath) {
+			time.Sleep(clusterCAJoinPoll)
+			continue
+		}
+		time.Sleep(clusterCAJoinPoll)
+	}
+	return fmt.Errorf("silod: waited %s for the shared cluster CA to appear at %s and %s; check that the seed node has written them (in docker-compose, silo-a is the implicit seed — view its logs with 'docker compose logs silo-a')", clusterCAJoinTimeout, certPath, keyPath)
+}
+
+// defaultLoadClusterTLS reads (or mints) the cluster CA and this node's
+// TLS material. The behavior depends on what is already on disk and on
+// whether the operator explicitly set SILO_TLS_CA_CERT:
+//
+//   - CA cert + CA key both present at the configured paths: load them.
+//   - Operator set SILO_TLS_CA_CERT but the files are not (yet) on disk:
+//     wait up to clusterCAJoinTimeout for the seed node to write them.
+//     This is the docker-compose / Kubernetes pattern where node-a
+//     mints into a shared volume and node-b/c just load.
+//   - SILO_TLS_CA_CERT not set and nothing on disk: mint a fresh
+//     self-signed CA into the default DataDir/ca.{crt,key} location.
+//     This is the zero-configuration single-node path.
+//   - Cert present without key: load cert-only (verifier-only mode).
+//     The node refuses to mint a new node cert in this mode.
+//
+// Operators who want to share a CA across nodes point SILO_TLS_CA_CERT
+// and SILO_TLS_CA_KEY at a shared location (a Kubernetes secret, an NFS
+// mount, the docker-compose named volume) so every node loads the same
+// material instead of minting its own.
+func defaultLoadClusterTLS(cfg *config.Config) (*clustertls.CA, *clustertls.NodeCert, error) {
+	switch {
+	case cfg.CAExternal && cfg.CASeed:
+		// Seed node in a shared-volume deployment: mint into the
+		// external path on first boot, load on every subsequent boot.
+		if !fileExists(cfg.CACertPath) && !fileExists(cfg.CAKeyPath) {
+			if err := mintClusterCA(cfg.CACertPath, cfg.CAKeyPath, cfg.NodeID); err != nil {
+				return nil, nil, err
+			}
+		}
+	case cfg.CAExternal:
+		// Non-seed node: wait for the seed to publish the CA. This
+		// path is what makes the docker-compose three-node cluster
+		// work without an external PKI.
+		if err := waitForCA(cfg.CACertPath, cfg.CAKeyPath); err != nil {
+			return nil, nil, err
+		}
+	default:
+		// Single-node dev path: mint into the default DataDir/ca.* if
+		// nothing is there yet.
+		if !fileExists(cfg.CACertPath) && !fileExists(cfg.CAKeyPath) {
+			if err := mintClusterCA(cfg.CACertPath, cfg.CAKeyPath, cfg.NodeID); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	caKeyPresent := fileExists(cfg.CAKeyPath)
+
+	certPEM, err := os.ReadFile(cfg.CACertPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not read the cluster CA certificate at %s (%v); delete the file so silod can mint a fresh one, or point SILO_TLS_CA_CERT at a CA cert generated elsewhere", cfg.CACertPath, err)
+	}
+	var keyPEM []byte
+	if caKeyPresent {
+		keyPEM, err = os.ReadFile(cfg.CAKeyPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("could not read the cluster CA key at %s (%v); either remove SILO_TLS_CA_KEY (this silod will not be able to mint its own node cert) or point it at a readable key file", cfg.CAKeyPath, err)
+		}
+	}
+	ca, err := clustertls.LoadCA(certPEM, keyPEM)
+	if err != nil {
+		return nil, nil, err
+	}
+	// IPs in the node cert SAN: the loopback plus any host IPs we can
+	// discover. This keeps gRPC verification happy when the operator
+	// dials by IP from siloctl or another container on the same bridge.
+	ips := []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}
+	nodeCert, err := clustertls.LoadOrMintNode(cfg.DataDir, ca, cfg.NodeID, []string{"localhost"}, ips)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ca, nodeCert, nil
+}
+
+// mintClusterCA writes a fresh self-signed CA at (certPath, keyPath).
+// Used only when neither file is on disk yet. nodeID is folded into the
+// CA common name so an operator inspecting two clusters can tell them
+// apart without having to read the certificate serials.
+func mintClusterCA(certPath, keyPath, nodeID string) error {
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
+		return fmt.Errorf("could not create the directory for the cluster CA at %s (%v); check the parent path is on a writable filesystem and silod has permission", certPath, err)
+	}
+	certPEM, keyPEM, err := generateCA("silo-"+nodeID, defaultClusterCALifetime)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		return fmt.Errorf("could not write the newly-minted cluster CA cert to %s (%v); check the data directory is writable", certPath, err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		_ = os.Remove(certPath)
+		return fmt.Errorf("could not write the newly-minted cluster CA key to %s (%v); the partial cert at %s was removed", keyPath, err, certPath)
+	}
+	return nil
+}
+
+// fileExists distinguishes "file is on disk" from "file is missing"
+// without surfacing every Stat error to callers. The self-mint path
+// treats a missing file as a trigger to mint, not an error to propagate.
+// Package-level var so tests can substitute it for the unusual "Stat
+// returns a non-IsNotExist error" branch.
+var fileExists = func(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// generateCA is the seam mintClusterCA calls through so tests can
+// exercise the "could not generate" branch without depleting host
+// entropy. Production points at clustertls.GenerateCA.
+var generateCA = clustertls.GenerateCA
 
 // Run blocks until ctx is cancelled or any subsystem fails. It returns
 // nil on graceful shutdown. Future sub-components plug into this single
 // select loop so silod has exactly one place where the lifecycle decision
 // is made.
-func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, version string) error {
+//
+// announce is where silod prints the inaugural bootstrap token + server
+// fingerprint on first boot. Production wires it to os.Stdout; tests
+// can pass a bytes.Buffer to assert on the operator-facing handshake
+// string without grepping process output.
+func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce io.Writer, version string) error {
 	if cfg == nil {
 		return fmt.Errorf("silod.Run: cfg is nil; pass a *config.Config loaded from config.LoadFromEnv or constructed in tests")
 	}
 	if logger == nil {
 		return fmt.Errorf("silod.Run: logger is nil; pass an *slog.Logger built with observability.NewLogger")
+	}
+	if announce == nil {
+		announce = io.Discard
 	}
 
 	cipher, err := crypto.NewCipher(cfg.EncryptionKey)
@@ -66,10 +262,41 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, version s
 		return fmt.Errorf("silod.Run: could not open the chunk store (%v); check SILO_DATA_DIR is on a writable filesystem and silod has permission", err)
 	}
 
+	ca, nodeCert, err := loadClusterTLS(cfg)
+	if err != nil {
+		return fmt.Errorf("silod.Run: could not load the cluster TLS material (%w)", err)
+	}
+	serverTLS, err := clustertls.ServerConfig(ca, nodeCert)
+	if err != nil {
+		return fmt.Errorf("silod.Run: could not build the gRPC TLS server config (%w)", err)
+	}
+	// ServerOnlyConfig cannot fail here: ServerConfig already parsed the
+	// same NodeCert via tls.X509KeyPair above, so any error in the cert
+	// pair would have surfaced on the previous line. Asserting the
+	// invariant here keeps a stray nil-NodeCert refactor from silently
+	// landing.
+	bootstrapTLS, err := clustertls.ServerOnlyConfig(nodeCert)
+	if err != nil {
+		return fmt.Errorf("silod.Run: unexpected bootstrap TLS server config failure after ServerConfig succeeded (%w); please file a bug at https://github.com/hyperized/silo/issues", err)
+	}
+
+	tokenStorePath := filepath.Join(cfg.DataDir, bootstraptoken.DefaultStoreName())
+	firstBoot := !fileExists(tokenStorePath)
+	tokens, err := openTokenStore(cfg)
+	if err != nil {
+		return fmt.Errorf("silod.Run: could not open the bootstrap-token store (%w)", err)
+	}
+	if firstBoot || cfg.PrintBootstrapToken {
+		if err := announceBootstrap(announce, tokens, nodeCert, cfg); err != nil {
+			return fmt.Errorf("silod.Run: could not mint the inaugural bootstrap token (%w)", err)
+		}
+	}
+
 	logger.Info("silo starting",
 		"version", version,
 		"node_id", cfg.NodeID,
 		"grpc_addr", cfg.GRPCAddr,
+		"bootstrap_addr", cfg.BootstrapAddr,
 		"http_addr", cfg.HTTPAddr,
 		"seeds", cfg.Seeds,
 		"domain", cfg.Domain,
@@ -81,7 +308,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, version s
 
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger),
-		newGRPCSubsystem(cfg, store, logger),
+		newGRPCSubsystem(cfg, serverTLS, store, logger),
+		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 	}
 
 	type subResult struct {
@@ -141,14 +369,59 @@ type httpSub struct {
 	srv *observability.Server
 }
 
-func (h *httpSub) Name() string                          { return "http" }
-func (h *httpSub) Start() error                          { return h.srv.Start() }
-func (h *httpSub) Shutdown(ctx context.Context) error    { return h.srv.Shutdown(ctx) }
+func (h *httpSub) Name() string                       { return "http" }
+func (h *httpSub) Start() error                       { return h.srv.Start() }
+func (h *httpSub) Shutdown(ctx context.Context) error { return h.srv.Shutdown(ctx) }
 
 type grpcSub struct {
 	srv *transport.GRPCServer
 }
 
-func (g *grpcSub) Name() string                          { return "grpc" }
-func (g *grpcSub) Start() error                          { return g.srv.Start() }
-func (g *grpcSub) Shutdown(ctx context.Context) error    { return g.srv.Shutdown(ctx) }
+func (g *grpcSub) Name() string                       { return "grpc" }
+func (g *grpcSub) Start() error                       { return g.srv.Start() }
+func (g *grpcSub) Shutdown(ctx context.Context) error { return g.srv.Shutdown(ctx) }
+
+type bootstrapSub struct {
+	srv *transport.BootstrapServer
+}
+
+func (b *bootstrapSub) Name() string                       { return "bootstrap" }
+func (b *bootstrapSub) Start() error                       { return b.srv.Start() }
+func (b *bootstrapSub) Shutdown(ctx context.Context) error { return b.srv.Shutdown(ctx) }
+
+// announceBootstrap mints a fresh single-use join token and writes the
+// operator-facing handshake string to w. The token is generated, hashed,
+// persisted, and surfaced exactly once — silod never prints it again,
+// even on the next boot. The handshake names the variable, gives the
+// fingerprint to pin, and shows the exact siloctl invocation the
+// operator should run next, matching the project's "errors are
+// instructions" doctrine.
+func announceBootstrap(w io.Writer, tokens *bootstraptoken.Store, nodeCert *clustertls.NodeCert, cfg *config.Config) error {
+	plaintext, err := tokens.Mint(bootstraptoken.DefaultTTL, bootstraptoken.DefaultSingleUse)
+	if err != nil {
+		return err
+	}
+	fp, err := nodeCert.LeafFingerprint()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, `
+========================================================================
+silo cluster bootstrap token (valid for 24h, single-use)
+
+  token:               %s
+  server fingerprint:  %s
+
+Run this on the operator host to claim a client certificate:
+
+  siloctl auth init \
+    --token %s \
+    --server %s \
+    --server-fingerprint %s
+
+To mint another token later, restart silod with SILO_PRINT_BOOTSTRAP_TOKEN=1.
+========================================================================
+
+`, plaintext, fp, plaintext, cfg.BootstrapAddr, fp)
+	return nil
+}
