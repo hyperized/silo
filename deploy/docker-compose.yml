@@ -15,8 +15,17 @@ x-silod: &silod
   restart: unless-stopped
   environment: &silod-env
     SILO_GRPC_ADDR: 0.0.0.0:7000
+    SILO_BOOTSTRAP_ADDR: 0.0.0.0:7001
     SILO_HTTP_ADDR: 0.0.0.0:7080
     SILO_DATA_DIR: /var/lib/silo
+    # Sharing /var/lib/silo/cluster across nodes via the silo-ca named
+    # volume means all three silods load the same CA cert + key, which
+    # is what makes cluster-internal mTLS work without an external PKI.
+    # SILO_TLS_CA_CERT/_KEY point at that shared location explicitly so
+    # the self-mint-on-first-boot logic produces the CA in the shared
+    # volume rather than in each node's private data dir.
+    SILO_TLS_CA_CERT: /var/lib/silo/cluster/ca.crt
+    SILO_TLS_CA_KEY: /var/lib/silo/cluster/ca.key
     SILO_ENCRYPTION_KEY: "${SILO_ENCRYPTION_KEY:?Run 'make up' from the repo root to generate a development encryption key (it writes deploy/.env for you). To run compose by hand, set SILO_ENCRYPTION_KEY to a base64-encoded 32-byte value, e.g. with 'openssl rand -base64 32'.}"
     SILO_LOG_LEVEL: ${SILO_LOG_LEVEL:-info}
     SILO_LOG_FORMAT: ${SILO_LOG_FORMAT:-text}
@@ -37,10 +46,17 @@ services:
       <<: *silod-env
       SILO_NODE_ID: silo-a
       SILO_SEEDS: silo-b:7000,silo-c:7000
+      # silo-a is the implicit CA seed: it mints the cluster CA into
+      # the shared volume on first boot. silo-b and silo-c wait for
+      # silo-a's healthcheck to pass before they start, by which time
+      # the CA is already on disk.
+      SILO_TLS_CA_SEED: "1"
     volumes:
       - silo-a-data:/var/lib/silo
+      - silo-ca:/var/lib/silo/cluster
     ports:
       - "7080:7080" # HTTP (healthz, metrics) on the host
+      - "7001:7001" # Bootstrap join API — point siloctl auth init here
 
   silo-b:
     <<: *silod
@@ -51,8 +67,12 @@ services:
       SILO_SEEDS: silo-a:7000,silo-c:7000
     volumes:
       - silo-b-data:/var/lib/silo
+      - silo-ca:/var/lib/silo/cluster
     ports:
       - "7081:7080"
+    depends_on:
+      silo-a:
+        condition: service_healthy
 
   silo-c:
     <<: *silod
@@ -63,8 +83,12 @@ services:
       SILO_SEEDS: silo-a:7000,silo-b:7000
     volumes:
       - silo-c-data:/var/lib/silo
+      - silo-ca:/var/lib/silo/cluster
     ports:
       - "7082:7080"
+    depends_on:
+      silo-a:
+        condition: service_healthy
 
   prometheus:
     image: prom/prometheus:v3.0.1
@@ -106,6 +130,10 @@ volumes:
   silo-a-data:
   silo-b-data:
   silo-c-data:
+  # silo-ca holds the cluster CA cert+key and is shared across every
+  # node. node silo-a creates it on first boot (self-mint); silo-b and
+  # silo-c wait for the seed via depends_on and then load it from disk.
+  silo-ca:
   prometheus-data:
   grafana-data:
 

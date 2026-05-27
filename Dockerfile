@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ---- Build stage ------------------------------------------------------------
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /src
 
 # Dependencies first for layer caching.
@@ -28,12 +28,13 @@ FROM alpine:3.21
 # ca-certificates lets silod talk TLS once we add it in later milestones.
 RUN apk add --no-cache ca-certificates tini && \
     addgroup -S silo && adduser -S -G silo silo && \
-    mkdir -p /var/lib/silo && chown silo:silo /var/lib/silo
+    mkdir -p /var/lib/silo /var/lib/silo/cluster && \
+    chown -R silo:silo /var/lib/silo
 
 COPY --from=builder /out/silod /usr/local/bin/silod
 
 USER silo
 VOLUME ["/var/lib/silo"]
-EXPOSE 7000 7080
+EXPOSE 7000 7001 7080
 
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/silod"]
