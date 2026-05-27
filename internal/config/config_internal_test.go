@@ -35,6 +35,9 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.BootstrapAddr != DefaultBootstrapAddr {
 		t.Errorf("BootstrapAddr default: got %q, want %q", cfg.BootstrapAddr, DefaultBootstrapAddr)
 	}
+	if cfg.GossipAddr != DefaultGossipAddr {
+		t.Errorf("GossipAddr default: got %q, want %q", cfg.GossipAddr, DefaultGossipAddr)
+	}
 	if cfg.HTTPAddr != DefaultHTTPAddr {
 		t.Errorf("HTTPAddr default: got %q, want %q", cfg.HTTPAddr, DefaultHTTPAddr)
 	}
@@ -82,6 +85,8 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_NODE_ID":               "alpha",
 		"SILO_GRPC_ADDR":             "127.0.0.1:9000",
 		"SILO_BOOTSTRAP_ADDR":        "127.0.0.1:9001",
+		"SILO_GOSSIP_ADDR":           "127.0.0.1:9100",
+		"SILO_GOSSIP_ADVERTISE":      "node-host:9100",
 		"SILO_HTTP_ADDR":             "127.0.0.1:9080",
 		"SILO_DOMAIN":                "silo.example",
 		"SILO_DATA_DIR":              "/tmp/silo",
@@ -104,6 +109,8 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		NodeID:              "alpha",
 		GRPCAddr:            "127.0.0.1:9000",
 		BootstrapAddr:       "127.0.0.1:9001",
+		GossipAddr:          "127.0.0.1:9100",
+		GossipAdvertise:     "node-host:9100",
 		HTTPAddr:            "127.0.0.1:9080",
 		Domain:              "silo.example",
 		DataDir:             "/tmp/silo",
@@ -319,6 +326,7 @@ func TestValidate(t *testing.T) {
 		NodeID:        "n1",
 		GRPCAddr:      "0:0",
 		BootstrapAddr: "0:1",
+		GossipAddr:    "0:2",
 		HTTPAddr:      "0:0",
 		DataDir:       "/d",
 		ChunkSize:     1,
@@ -335,6 +343,7 @@ func TestValidate(t *testing.T) {
 		{"missing node id", func(c *Config) { c.NodeID = "" }, "node id is empty"},
 		{"missing grpc addr", func(c *Config) { c.GRPCAddr = "" }, "SILO_GRPC_ADDR"},
 		{"missing bootstrap addr", func(c *Config) { c.BootstrapAddr = "" }, "SILO_BOOTSTRAP_ADDR"},
+		{"missing gossip addr", func(c *Config) { c.GossipAddr = "" }, "SILO_GOSSIP_ADDR"},
 		{"missing http addr", func(c *Config) { c.HTTPAddr = "" }, "SILO_HTTP_ADDR"},
 		{"missing data dir", func(c *Config) { c.DataDir = "" }, "SILO_DATA_DIR"},
 		{"zero chunk", func(c *Config) { c.ChunkSize = 0 }, "SILO_CHUNK_SIZE"},

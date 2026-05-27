@@ -16,6 +16,7 @@ x-silod: &silod
   environment: &silod-env
     SILO_GRPC_ADDR: 0.0.0.0:7000
     SILO_BOOTSTRAP_ADDR: 0.0.0.0:7001
+    SILO_GOSSIP_ADDR: 0.0.0.0:7100
     SILO_HTTP_ADDR: 0.0.0.0:7080
     SILO_DATA_DIR: /var/lib/silo
     # Sharing /var/lib/silo/cluster across nodes via the silo-ca named
@@ -45,7 +46,13 @@ services:
     environment:
       <<: *silod-env
       SILO_NODE_ID: silo-a
-      SILO_SEEDS: silo-b:7000,silo-c:7000
+      # Bind on 0.0.0.0 (default in *silod-env) but advertise the
+      # routable container hostname so peers learn the right dial
+      # address instead of "0.0.0.0:7100".
+      SILO_GOSSIP_ADVERTISE: silo-a:7100
+      # Seeds point at peer gossip listeners (port 7100), not the gRPC
+      # data port — gossip is the membership channel.
+      SILO_SEEDS: silo-b:7100,silo-c:7100
       # silo-a is the implicit CA seed: it mints the cluster CA into
       # the shared volume on first boot. silo-b and silo-c wait for
       # silo-a's healthcheck to pass before they start, by which time
@@ -64,7 +71,8 @@ services:
     environment:
       <<: *silod-env
       SILO_NODE_ID: silo-b
-      SILO_SEEDS: silo-a:7000,silo-c:7000
+      SILO_GOSSIP_ADVERTISE: silo-b:7100
+      SILO_SEEDS: silo-a:7100,silo-c:7100
     volumes:
       - silo-b-data:/var/lib/silo
       - silo-ca:/var/lib/silo/cluster
@@ -80,7 +88,8 @@ services:
     environment:
       <<: *silod-env
       SILO_NODE_ID: silo-c
-      SILO_SEEDS: silo-a:7000,silo-b:7000
+      SILO_GOSSIP_ADVERTISE: silo-c:7100
+      SILO_SEEDS: silo-a:7100,silo-b:7100
     volumes:
       - silo-c-data:/var/lib/silo
       - silo-ca:/var/lib/silo/cluster

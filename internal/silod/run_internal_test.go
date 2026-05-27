@@ -19,6 +19,7 @@ import (
 	"github.com/hyperized/silo/internal/clustertls"
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
+	"github.com/hyperized/silo/internal/membership"
 	"github.com/hyperized/silo/internal/transport"
 )
 
@@ -29,6 +30,7 @@ func testConfig(t *testing.T) *config.Config {
 		NodeID:        "test-node",
 		GRPCAddr:      "127.0.0.1:0",
 		BootstrapAddr: "127.0.0.1:0",
+		GossipAddr:    "127.0.0.1:0",
 		HTTPAddr:      "127.0.0.1:0",
 		DataDir:       t.TempDir(),
 		ChunkSize:     4 * 1024 * 1024,
@@ -78,6 +80,7 @@ func (f *fakeSubsystem) Start() error {
 	<-f.shutdown
 	return f.startErr
 }
+
 func (f *fakeSubsystem) Shutdown(_ context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -93,17 +96,19 @@ func (f *fakeSubsystem) Shutdown(_ context.Context) error {
 // token-store opener for the duration of a test, restoring the
 // originals on cleanup. All four legs are stubbed at once so Run never
 // touches the filesystem or real entropy from a unit test.
-func installFakes(t *testing.T, httpSub, grpcSub, bootSub *fakeSubsystem) {
+func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSubsystem) {
 	t.Helper()
 	prevHTTP := newHTTPSubsystem
 	prevGRPC := newGRPCSubsystem
 	prevBoot := newBootstrapSubsystem
+	prevGossip := newGossipSubsystem
 	prevTLS := loadClusterTLS
 	prevTokens := openTokenStore
 	t.Cleanup(func() {
 		newHTTPSubsystem = prevHTTP
 		newGRPCSubsystem = prevGRPC
 		newBootstrapSubsystem = prevBoot
+		newGossipSubsystem = prevGossip
 		loadClusterTLS = prevTLS
 		openTokenStore = prevTokens
 	})
@@ -113,6 +118,9 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub *fakeSubsystem) {
 	}
 	newBootstrapSubsystem = func(_ *config.Config, _ *tls.Config, _ transport.TokenRedeemer, _ transport.ClientCertMinter, _ *slog.Logger) subsystem {
 		return bootSub
+	}
+	newGossipSubsystem = func(_ *config.Config, _ *tls.Config, _ *tls.Config, _ *membership.Membership, _ *slog.Logger) (subsystem, error) {
+		return gossipSubFake, nil
 	}
 	loadClusterTLS = stubLoadClusterTLS
 	openTokenStore = stubOpenTokenStore
@@ -190,7 +198,8 @@ func TestRun_NilAnnounceFallsBackToDiscard(t *testing.T) {
 	httpSub := newFakeSubsystem("http", nil, nil, true)
 	grpcSub := newFakeSubsystem("grpc", nil, nil, true)
 	bootSub := newFakeSubsystem("bootstrap", nil, nil, true)
-	installFakes(t, httpSub, grpcSub, bootSub)
+	gossipSub := newFakeSubsystem("gossip", nil, nil, true)
+	installFakes(t, httpSub, grpcSub, bootSub, gossipSub)
 
 	cfg := testConfig(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -199,6 +208,7 @@ func TestRun_NilAnnounceFallsBackToDiscard(t *testing.T) {
 	<-httpSub.startCh
 	<-grpcSub.startCh
 	<-bootSub.startCh
+	<-gossipSub.startCh
 	cancel()
 	select {
 	case err := <-done:
@@ -254,6 +264,54 @@ func TestRun_AnnounceFailureSurfacesActionable(t *testing.T) {
 	}
 }
 
+func TestRun_MembershipInitFailure(t *testing.T) {
+	prevTLS := loadClusterTLS
+	t.Cleanup(func() { loadClusterTLS = prevTLS })
+	loadClusterTLS = stubLoadClusterTLS
+	prev := newMembership
+	t.Cleanup(func() { newMembership = prev })
+	newMembership = func(string, string) (*membership.Membership, error) {
+		return nil, errors.New("simulated membership init failure")
+	}
+	err := Run(context.Background(), testConfig(t), discardLogger(), io.Discard, "v0")
+	if err == nil || !strings.Contains(err.Error(), "membership table") {
+		t.Errorf("got %v, want membership-init failure", err)
+	}
+}
+
+func TestRun_GossipSubsystemRejectsSelfSeed(t *testing.T) {
+	// Production-shaped test: when SILO_SEEDS contains the node's own
+	// gossip address, gossip.New refuses to start. Run must surface
+	// that as an instruction-shaped error before any subsystem boots.
+	prevTLS := loadClusterTLS
+	t.Cleanup(func() { loadClusterTLS = prevTLS })
+	loadClusterTLS = stubLoadClusterTLS
+
+	cfg := testConfig(t)
+	cfg.GossipAddr = "127.0.0.1:7100"
+	cfg.Seeds = []string{"127.0.0.1:7100"}
+	err := Run(context.Background(), cfg, discardLogger(), io.Discard, "v0")
+	if err == nil || !strings.Contains(err.Error(), "own identity") {
+		t.Errorf("got %v, want self-seed error", err)
+	}
+}
+
+func TestRun_GossipSubsystemInitFailure(t *testing.T) {
+	prevTLS := loadClusterTLS
+	t.Cleanup(func() { loadClusterTLS = prevTLS })
+	loadClusterTLS = stubLoadClusterTLS
+
+	prevGossip := newGossipSubsystem
+	t.Cleanup(func() { newGossipSubsystem = prevGossip })
+	newGossipSubsystem = func(_ *config.Config, _ *tls.Config, _ *tls.Config, _ *membership.Membership, _ *slog.Logger) (subsystem, error) {
+		return nil, errors.New("simulated gossip init failure")
+	}
+	err := Run(context.Background(), testConfig(t), discardLogger(), io.Discard, "v0")
+	if err == nil || !strings.Contains(err.Error(), "gossip subsystem") {
+		t.Errorf("got %v, want gossip-init failure", err)
+	}
+}
+
 func TestRun_TLSServerConfigFailure(t *testing.T) {
 	prevTLS := loadClusterTLS
 	t.Cleanup(func() { loadClusterTLS = prevTLS })
@@ -284,7 +342,8 @@ func TestRun_GracefulShutdownOnContextCancel(t *testing.T) {
 	httpSub := newFakeSubsystem("http", nil, nil, true)
 	grpcSub := newFakeSubsystem("grpc", nil, nil, true)
 	bootSub := newFakeSubsystem("bootstrap", nil, nil, true)
-	installFakes(t, httpSub, grpcSub, bootSub)
+	gossipSub := newFakeSubsystem("gossip", nil, nil, true)
+	installFakes(t, httpSub, grpcSub, bootSub, gossipSub)
 
 	cfg := testConfig(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -295,6 +354,7 @@ func TestRun_GracefulShutdownOnContextCancel(t *testing.T) {
 	<-httpSub.startCh
 	<-grpcSub.startCh
 	<-bootSub.startCh
+	<-gossipSub.startCh
 
 	cancel()
 
@@ -312,7 +372,8 @@ func TestRun_HTTPSubsystemStartFails(t *testing.T) {
 	httpSub := newFakeSubsystem("http", errors.New("simulated bind failure"), nil, false)
 	grpcSub := newFakeSubsystem("grpc", nil, nil, true)
 	bootSub := newFakeSubsystem("bootstrap", nil, nil, true)
-	installFakes(t, httpSub, grpcSub, bootSub)
+	gossipSub := newFakeSubsystem("gossip", nil, nil, true)
+	installFakes(t, httpSub, grpcSub, bootSub, gossipSub)
 
 	err := Run(context.Background(), testConfig(t), discardLogger(), io.Discard, "v0")
 	if err == nil || !strings.Contains(err.Error(), "http") || !strings.Contains(err.Error(), "before silod was fully running") {
@@ -327,7 +388,8 @@ func TestRun_SubsystemExitsCleanlyWithoutSignal(t *testing.T) {
 	httpSub := newFakeSubsystem("http", nil, nil, false)
 	grpcSub := newFakeSubsystem("grpc", nil, nil, true)
 	bootSub := newFakeSubsystem("bootstrap", nil, nil, true)
-	installFakes(t, httpSub, grpcSub, bootSub)
+	gossipSub := newFakeSubsystem("gossip", nil, nil, true)
+	installFakes(t, httpSub, grpcSub, bootSub, gossipSub)
 
 	err := Run(context.Background(), testConfig(t), discardLogger(), io.Discard, "v0")
 	if err == nil || !strings.Contains(err.Error(), "without a shutdown signal") {
@@ -339,7 +401,8 @@ func TestRun_ShutdownErrorIsLoggedAndReturned(t *testing.T) {
 	httpSub := newFakeSubsystem("http", nil, errors.New("simulated http shutdown failure"), true)
 	grpcSub := newFakeSubsystem("grpc", nil, nil, true)
 	bootSub := newFakeSubsystem("bootstrap", nil, nil, true)
-	installFakes(t, httpSub, grpcSub, bootSub)
+	gossipSub := newFakeSubsystem("gossip", nil, nil, true)
+	installFakes(t, httpSub, grpcSub, bootSub, gossipSub)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -348,6 +411,7 @@ func TestRun_ShutdownErrorIsLoggedAndReturned(t *testing.T) {
 	<-httpSub.startCh
 	<-grpcSub.startCh
 	<-bootSub.startCh
+	<-gossipSub.startCh
 	cancel()
 
 	select {
@@ -374,6 +438,7 @@ func TestRun_ServesHealthAndMetricsWhileRunning(t *testing.T) {
 	cfg.HTTPAddr = "127.0.0.1:" + port
 	cfg.GRPCAddr = "127.0.0.1:" + freeTCPPort(t)
 	cfg.BootstrapAddr = "127.0.0.1:" + freeTCPPort(t)
+	cfg.GossipAddr = "127.0.0.1:" + freeTCPPort(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

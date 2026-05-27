@@ -198,6 +198,121 @@ func TestTLSConfigs_ValidateInputs(t *testing.T) {
 	}
 }
 
+func TestPeerConfig_ValidateInputs(t *testing.T) {
+	_, _, ca := newCA(t)
+	nc := mustMint(t, ca, "n1")
+
+	if _, err := PeerConfig(nil, nc); err == nil || !strings.Contains(err.Error(), "loaded cluster CA") {
+		t.Errorf("PeerConfig nil ca: %v", err)
+	}
+	if _, err := PeerConfig(ca, nil); err == nil || !strings.Contains(err.Error(), "node certificate") {
+		t.Errorf("PeerConfig nil cert: %v", err)
+	}
+	bad := &NodeCert{CertPEM: nc.CertPEM, KeyPEM: pem.EncodeToMemory(&pem.Block{Type: pemTypePrivateKey, Bytes: []byte{0x00}})}
+	if _, err := PeerConfig(ca, bad); err == nil || !strings.Contains(err.Error(), "do not pair") {
+		t.Errorf("PeerConfig bad pair: %v", err)
+	}
+}
+
+func TestPeerConfig_VerifyPeerCertificate(t *testing.T) {
+	// Build a PeerConfig and exercise its custom VerifyPeerCertificate
+	// callback. The callback should accept certs signed by the cluster
+	// CA and reject everything else, regardless of ServerName.
+	_, _, ca := newCA(t)
+	nc := mustMint(t, ca, "n1")
+	cfg, err := PeerConfig(ca, nc)
+	if err != nil {
+		t.Fatalf("PeerConfig: %v", err)
+	}
+	if cfg.VerifyPeerCertificate == nil {
+		t.Fatal("PeerConfig must set VerifyPeerCertificate")
+	}
+
+	// Empty rawCerts: reject.
+	if err := cfg.VerifyPeerCertificate(nil, nil); err == nil {
+		t.Error("empty rawCerts: expected reject")
+	}
+
+	// Garbage rawCerts: reject.
+	if err := cfg.VerifyPeerCertificate([][]byte{[]byte("not a cert")}, nil); err == nil {
+		t.Error("garbage rawCerts: expected reject")
+	}
+
+	// Real peer cert signed by the same CA: accept.
+	peer := mustMint(t, ca, "peer")
+	block, _ := pem.Decode(peer.CertPEM)
+	if err := cfg.VerifyPeerCertificate([][]byte{block.Bytes}, nil); err != nil {
+		t.Errorf("legit peer cert: %v", err)
+	}
+
+	// Cert signed by a different CA: reject.
+	_, _, otherCA := newCA(t)
+	rogue := mustMint(t, otherCA, "rogue")
+	rblock, _ := pem.Decode(rogue.CertPEM)
+	if err := cfg.VerifyPeerCertificate([][]byte{rblock.Bytes}, nil); err == nil {
+		t.Error("rogue cert: expected reject")
+	}
+}
+
+func TestPeerConfig_VerifyHandlesIntermediates(t *testing.T) {
+	// VerifyPeerCertificate iterates rawCerts[1:] adding parseable
+	// intermediates. We feed it a real leaf followed by an unparseable
+	// blob (the intermediate branch) and one real intermediate so both
+	// halves of the loop body run.
+	_, _, ca := newCA(t)
+	nc := mustMint(t, ca, "n1")
+	cfg, _ := PeerConfig(ca, nc)
+	peer := mustMint(t, ca, "peer")
+	leaf, _ := pem.Decode(peer.CertPEM)
+	garbage := []byte("not a der cert")
+	if err := cfg.VerifyPeerCertificate([][]byte{leaf.Bytes, garbage, leaf.Bytes}, nil); err != nil {
+		t.Errorf("real leaf with garbage intermediate: %v", err)
+	}
+}
+
+func TestPeerConfig_EndToEndHandshakeAcrossPeers(t *testing.T) {
+	// Two peers minted by the same CA should mTLS-handshake successfully
+	// using PeerConfig on both sides even though neither sets ServerName.
+	_, _, ca := newCA(t)
+	a := mustMint(t, ca, "a")
+	b := mustMint(t, ca, "b")
+	srv, err := PeerConfig(ca, a)
+	if err != nil {
+		t.Fatalf("PeerConfig server: %v", err)
+	}
+	srv.ClientAuth = tls.RequireAndVerifyClientCert
+	srv.ClientCAs = srv.RootCAs
+	cli, err := PeerConfig(ca, b)
+	if err != nil {
+		t.Fatalf("PeerConfig client: %v", err)
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", srv)
+	if err != nil {
+		t.Fatalf("tls.Listen: %v", err)
+	}
+	defer ln.Close()
+	done := make(chan error, 1)
+	go func() {
+		c, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			done <- acceptErr
+			return
+		}
+		if tc, ok := c.(*tls.Conn); ok {
+			done <- tc.HandshakeContext(testContext(t))
+		}
+		_ = c.Close()
+	}()
+	conn, err := tls.Dial("tcp", ln.Addr().String(), cli)
+	if err != nil {
+		t.Fatalf("tls.Dial: %v", err)
+	}
+	_ = conn.Close()
+	if err := <-done; err != nil {
+		t.Errorf("server handshake: %v", err)
+	}
+}
+
 func TestTLSConfigs_EndToEndHandshake(t *testing.T) {
 	_, _, ca := newCA(t)
 	server := mustMint(t, ca, "server-id")

@@ -18,6 +18,8 @@ import (
 	"github.com/hyperized/silo/internal/clustertls"
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
+	"github.com/hyperized/silo/internal/gossip"
+	"github.com/hyperized/silo/internal/membership"
 	"github.com/hyperized/silo/internal/observability"
 	"github.com/hyperized/silo/internal/transport"
 )
@@ -50,9 +52,31 @@ var (
 		svc := transport.NewBootstrapService(tokens, minter, logger)
 		return &bootstrapSub{srv: transport.NewBootstrapServer(cfg.BootstrapAddr, tlsCfg, svc, logger)}
 	}
+	// newGossipSubsystem constructs the gossip subsystem. Returns
+	// (nil, error) when the configuration is rejected at construction
+	// time — typically a self-seed misconfiguration that the operator
+	// must fix before silod can start.
+	newGossipSubsystem = func(cfg *config.Config, serverTLS, clientTLS *tls.Config, members *membership.Membership, logger *slog.Logger) (subsystem, error) {
+		s, err := gossip.New(members, gossip.Options{
+			Addr:      cfg.GossipAddr,
+			Advertise: cfg.GossipAdvertise,
+			Seeds:     cfg.Seeds,
+			ServerTLS: serverTLS,
+			ClientTLS: clientTLS,
+		}, logger)
+		if err != nil {
+			return nil, err
+		}
+		return &gossipSub{srv: s}, nil
+	}
 	newChunkStore = func(cfg *config.Config, cipher *crypto.Cipher) (chunkstore.Store, error) {
 		return chunkstore.NewFileStore(cfg.DataDir, cipher)
 	}
+	// newMembership is the seam Run goes through to construct the
+	// shared membership table. Defaults to membership.New; tests
+	// substitute it to exercise the "could not initialise" branch
+	// without smuggling an invalid NodeID past the config validator.
+	newMembership = membership.New
 	// loadClusterTLS loads (and bootstraps if needed) the cluster CA
 	// and this node's TLS material. Swappable so tests can inject a
 	// minimal in-memory pair without writing files.
@@ -270,6 +294,15 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not build the gRPC TLS server config (%w)", err)
 	}
+	// PeerConfig cannot fail here for the same reason ServerOnlyConfig
+	// can't: both helpers re-parse the NodeCert that ServerConfig just
+	// accepted, so any malformed pair would have surfaced two lines up.
+	// Defensive guard kept against a future refactor that swaps the
+	// shared parse path for two divergent ones.
+	peerTLS, err := clustertls.PeerConfig(ca, nodeCert)
+	if err != nil {
+		return fmt.Errorf("silod.Run: unexpected peer TLS config failure after ServerConfig succeeded (%w); please file a bug at https://github.com/hyperized/silo/issues", err)
+	}
 	// ServerOnlyConfig cannot fail here: ServerConfig already parsed the
 	// same NodeCert via tls.X509KeyPair above, so any error in the cert
 	// pair would have surfaced on the previous line. Asserting the
@@ -297,6 +330,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		"node_id", cfg.NodeID,
 		"grpc_addr", cfg.GRPCAddr,
 		"bootstrap_addr", cfg.BootstrapAddr,
+		"gossip_addr", cfg.GossipAddr,
 		"http_addr", cfg.HTTPAddr,
 		"seeds", cfg.Seeds,
 		"domain", cfg.Domain,
@@ -306,10 +340,20 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		"encryption_key_source", cfg.KeySource,
 	)
 
+	members, err := newMembership(cfg.NodeID, cfg.GossipAddr)
+	if err != nil {
+		return fmt.Errorf("silod.Run: could not initialise the membership table (%w)", err)
+	}
+	gossipSubsys, err := newGossipSubsystem(cfg, serverTLS, peerTLS, members, logger)
+	if err != nil {
+		return fmt.Errorf("silod.Run: could not initialise the gossip subsystem (%w)", err)
+	}
+
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger),
 		newGRPCSubsystem(cfg, serverTLS, store, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
+		gossipSubsys,
 	}
 
 	type subResult struct {
@@ -388,6 +432,14 @@ type bootstrapSub struct {
 func (b *bootstrapSub) Name() string                       { return "bootstrap" }
 func (b *bootstrapSub) Start() error                       { return b.srv.Start() }
 func (b *bootstrapSub) Shutdown(ctx context.Context) error { return b.srv.Shutdown(ctx) }
+
+type gossipSub struct {
+	srv *gossip.Subsystem
+}
+
+func (g *gossipSub) Name() string                       { return "gossip" }
+func (g *gossipSub) Start() error                       { return g.srv.Start() }
+func (g *gossipSub) Shutdown(ctx context.Context) error { return g.srv.Shutdown(ctx) }
 
 // announceBootstrap mints a fresh single-use join token and writes the
 // operator-facing handshake string to w. The token is generated, hashed,

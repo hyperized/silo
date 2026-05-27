@@ -33,6 +33,7 @@ const (
 const (
 	DefaultGRPCAddr      = "0.0.0.0:7000"
 	DefaultBootstrapAddr = "0.0.0.0:7001"
+	DefaultGossipAddr    = "0.0.0.0:7100"
 	DefaultHTTPAddr      = "0.0.0.0:7080"
 	DefaultDataDir       = "/var/lib/silo"
 	DefaultChunkSize     = 4 * 1024 * 1024
@@ -43,20 +44,22 @@ const (
 )
 
 type Config struct {
-	NodeID        string
-	GRPCAddr      string
-	BootstrapAddr string
-	HTTPAddr      string
-	Seeds         []string
-	Domain        string
-	DataDir       string
-	ChunkSize     int64
-	Replication   int
-	KeySource     KeySource
-	EncryptionKey []byte
-	KeyPath       string
-	LogLevel      string
-	LogFormat     string
+	NodeID          string
+	GRPCAddr        string
+	BootstrapAddr   string
+	GossipAddr      string
+	GossipAdvertise string
+	HTTPAddr        string
+	Seeds           []string
+	Domain          string
+	DataDir         string
+	ChunkSize       int64
+	Replication     int
+	KeySource       KeySource
+	EncryptionKey   []byte
+	KeyPath         string
+	LogLevel        string
+	LogFormat       string
 
 	// TLS material for inter-node and client traffic. All four paths
 	// default to siblings under DataDir so a fresh silod boots without
@@ -119,6 +122,8 @@ func Load(env EnvFunc) (*Config, error) {
 		NodeID:              env("SILO_NODE_ID"),
 		GRPCAddr:            envDefault(env, "SILO_GRPC_ADDR", DefaultGRPCAddr),
 		BootstrapAddr:       envDefault(env, "SILO_BOOTSTRAP_ADDR", DefaultBootstrapAddr),
+		GossipAddr:          envDefault(env, "SILO_GOSSIP_ADDR", DefaultGossipAddr),
+		GossipAdvertise:     env("SILO_GOSSIP_ADVERTISE"),
 		HTTPAddr:            envDefault(env, "SILO_HTTP_ADDR", DefaultHTTPAddr),
 		Domain:              env("SILO_DOMAIN"),
 		DataDir:             envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
@@ -195,6 +200,9 @@ func (c *Config) Validate() error {
 	}
 	if c.BootstrapAddr == "" {
 		return errors.New("SILO_BOOTSTRAP_ADDR is required; set it to the host:port that serves the one-time join API, e.g. 0.0.0.0:7001 (the default)")
+	}
+	if c.GossipAddr == "" {
+		return errors.New("SILO_GOSSIP_ADDR is required; set it to the host:port silod uses for cluster gossip, e.g. 0.0.0.0:7100 (the default)")
 	}
 	if c.HTTPAddr == "" {
 		return errors.New("SILO_HTTP_ADDR is required; set it to the host:port that serves /healthz and /metrics, e.g. 0.0.0.0:7080 (the default)")
