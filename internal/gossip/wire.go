@@ -60,6 +60,10 @@ type Message struct {
 	TargetAddress     string             `json:"target_address,omitempty"`
 	Piggyback         []membership.Event `json:"piggyback,omitempty"`
 	MembershipView    []membership.Event `json:"membership_view,omitempty"`
+	// Extension carries opaque reconcilable state for a subsystem riding
+	// the anti-entropy exchange (the namespace). gossip ferries the bytes
+	// during a sync without interpreting them.
+	Extension []byte `json:"extension,omitempty"`
 }
 
 // writeMessage serialises msg as length-prefixed JSON and writes it.

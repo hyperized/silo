@@ -92,6 +92,20 @@ type Options struct {
 	// the same node cert as ServerTLS so peers can pin our identity
 	// either way.
 	ClientTLS *tls.Config
+
+	// Extension, if set, rides the anti-entropy exchange to reconcile a
+	// subsystem's own state (the CRDT namespace). gossip ferries its opaque
+	// bytes during each sync without interpreting them. Optional.
+	Extension SyncExtension
+}
+
+// SyncExtension lets a subsystem piggyback its reconcilable state on the
+// gossip anti-entropy exchange. gossip calls LocalState to obtain the bytes
+// to send a peer and MergeRemote to fold in the bytes a peer sent back.
+// Implementations must be safe for concurrent use.
+type SyncExtension interface {
+	LocalState() ([]byte, error)
+	MergeRemote([]byte) error
 }
 
 // Subsystem is the gossip lifecycle wrapper, shaped to fit silod's
@@ -378,6 +392,31 @@ func (s *Subsystem) selfEnvelope(kind MessageKind, target string) *Message {
 		SenderIncarn:      self.Incarnation,
 		Target:            target,
 		Piggyback:         s.piggybackSnapshot(),
+	}
+}
+
+// extLocalState returns the sync extension's bytes to attach to an outbound
+// sync message, or nil when no extension is configured or it errors (a
+// failed reconciliation must not break membership gossip).
+func (s *Subsystem) extLocalState() []byte {
+	if s.opts.Extension == nil {
+		return nil
+	}
+	b, err := s.opts.Extension.LocalState()
+	if err != nil {
+		s.logger.Warn("gossip sync extension could not produce local state; skipping this round", "err", err)
+		return nil
+	}
+	return b
+}
+
+// extMergeRemote folds a peer's extension bytes into the local subsystem.
+func (s *Subsystem) extMergeRemote(b []byte) {
+	if s.opts.Extension == nil || len(b) == 0 {
+		return
+	}
+	if err := s.opts.Extension.MergeRemote(b); err != nil {
+		s.logger.Warn("gossip sync extension could not merge a peer's state", "err", err)
 	}
 }
 

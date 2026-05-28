@@ -99,6 +99,7 @@ func (s *Subsystem) syncWith(addr string) bool {
 	}
 	req := s.selfEnvelope(KindSyncReq, "")
 	req.MembershipView = s.viewSnapshot()
+	req.Extension = s.extLocalState()
 	if err := writeMessage(conn, req); err != nil {
 		return false
 	}
@@ -109,6 +110,7 @@ func (s *Subsystem) syncWith(addr string) bool {
 	if resp.Kind != KindSyncResp {
 		return false
 	}
+	s.extMergeRemote(resp.Extension)
 	// applyIncoming logs and re-broadcasts state changes; we want full
 	// MembershipView contents to flow through it so each newly-learned
 	// peer surfaces as a single "alive" log line on first encounter.

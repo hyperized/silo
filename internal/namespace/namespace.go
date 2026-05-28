@@ -6,6 +6,7 @@
 package namespace
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -232,6 +233,69 @@ func (n *Namespace) snapshot() map[string]*Inode {
 		out[id] = cp
 	}
 	return out
+}
+
+// wireNamespace is the JSON shape exchanged between replicas during
+// anti-entropy. It carries full inode state — ACL register plus the
+// directory OR-Set's add/remove tags — which is enough for Merge to
+// reconcile two replicas.
+type wireNamespace struct {
+	Inodes []wireInode `json:"inodes"`
+}
+
+type wireInode struct {
+	ID       string                    `json:"id"`
+	Type     InodeType                 `json:"type"`
+	ACLValue string                    `json:"acl_value,omitempty"`
+	ACLTS    hlc.Timestamp             `json:"acl_ts"`
+	Adds     []crdt.ElementTags[Entry] `json:"adds,omitempty"`
+	Removes  []crdt.ElementTags[Entry] `json:"removes,omitempty"`
+}
+
+// Snapshot serializes the whole namespace for an anti-entropy exchange.
+func (n *Namespace) Snapshot() ([]byte, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	w := wireNamespace{Inodes: make([]wireInode, 0, len(n.inodes))}
+	for _, in := range n.inodes {
+		wi := wireInode{ID: in.ID, Type: in.Type, ACLValue: in.ACL.Value, ACLTS: in.ACL.TS}
+		if in.children != nil {
+			wi.Adds, wi.Removes = in.children.Export()
+		}
+		w.Inodes = append(w.Inodes, wi)
+	}
+	return json.Marshal(w)
+}
+
+// MergeBytes decodes a peer's snapshot and merges it. Because Merge is
+// commutative and idempotent, applying a peer's state any number of times
+// and in any order converges both replicas.
+func (n *Namespace) MergeBytes(b []byte) error {
+	var w wireNamespace
+	if err := json.Unmarshal(b, &w); err != nil {
+		return fmt.Errorf("namespace: could not decode a peer's state (%w); both nodes must run the same silo version", err)
+	}
+	n.Merge(fromWire(w))
+	return nil
+}
+
+// fromWire rebuilds a clock-less namespace from its wire form. It is only
+// ever used as a Merge source, which never touches the clock.
+func fromWire(w wireNamespace) *Namespace {
+	ns := &Namespace{inodes: make(map[string]*Inode, len(w.Inodes))}
+	for _, wi := range w.Inodes {
+		in := &Inode{
+			ID:   wi.ID,
+			Type: wi.Type,
+			ACL:  crdt.LWWRegister[string]{Value: wi.ACLValue, TS: wi.ACLTS},
+		}
+		if wi.Type == Dir {
+			in.children = crdt.NewORSet[Entry]()
+			in.children.Import(wi.Adds, wi.Removes)
+		}
+		ns.inodes[wi.ID] = in
+	}
+	return ns
 }
 
 // resolveDirLocked walks segments from the root, following the primary

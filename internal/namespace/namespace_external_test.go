@@ -206,6 +206,44 @@ func TestNamespace_MergeIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestNamespace_SnapshotMergeBytesConverges(t *testing.T) {
+	var clkA int64 = 100
+	a := nsAt("a", &clkA)
+	clkA++
+	a.Mkdir("/dir")
+	clkA++
+	a.Touch("/dir/file")
+	clkA++
+	a.Touch("/top")
+
+	state, err := a.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// A fresh replica that only ever sees the serialized bytes converges.
+	b := nsAt("b", new(int64))
+	if err := b.MergeBytes(state); err != nil {
+		t.Fatalf("MergeBytes: %v", err)
+	}
+
+	ra := names(mustList(t, a, "/"))
+	rb := names(mustList(t, b, "/"))
+	if strings.Join(ra, ",") != strings.Join(rb, ",") {
+		t.Fatalf("root diverged after byte merge: %v vs %v", ra, rb)
+	}
+	if got := names(mustList(t, b, "/dir")); len(got) != 1 || got[0] != "file" {
+		t.Errorf("nested dir not reconstructed from bytes: %v", got)
+	}
+}
+
+func TestNamespace_MergeBytesRejectsGarbage(t *testing.T) {
+	b := nsAt("b", new(int64))
+	if err := b.MergeBytes([]byte("not json")); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("got %v, want a decode error", err)
+	}
+}
+
 func TestInodeType_String(t *testing.T) {
 	if namespace.Dir.String() != "dir" || namespace.File.String() != "file" {
 		t.Errorf("type strings: dir=%q file=%q", namespace.Dir.String(), namespace.File.String())

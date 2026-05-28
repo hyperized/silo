@@ -108,6 +108,24 @@ func TestORSet_AddWinsOverConcurrentRemove(t *testing.T) {
 	}
 }
 
+func TestORSet_ExportImportRoundTrip(t *testing.T) {
+	src := crdt.NewORSet[string]()
+	src.Add("keep", ts(1, "a"))
+	src.Add("drop", ts(2, "a"))
+	src.Remove("drop")
+
+	adds, removes := src.Export()
+	dst := crdt.NewORSet[string]()
+	dst.Import(adds, removes)
+
+	if !dst.Contains("keep") {
+		t.Error("keep should survive an export/import round-trip")
+	}
+	if dst.Contains("drop") {
+		t.Error("a removed element must stay removed after import (tombstone carried)")
+	}
+}
+
 func TestORSet_MergeConverges(t *testing.T) {
 	a := crdt.NewORSet[string]()
 	a.Add("keep", ts(1, "a"))

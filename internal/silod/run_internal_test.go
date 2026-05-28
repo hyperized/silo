@@ -19,7 +19,10 @@ import (
 	"github.com/hyperized/silo/internal/clustertls"
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
+	"github.com/hyperized/silo/internal/gossip"
+	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/membership"
+	"github.com/hyperized/silo/internal/namespace"
 	"github.com/hyperized/silo/internal/replication"
 	"github.com/hyperized/silo/internal/transport"
 )
@@ -122,7 +125,7 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 	newBootstrapSubsystem = func(_ *config.Config, _ *tls.Config, _ transport.TokenRedeemer, _ transport.ClientCertMinter, _ *slog.Logger) subsystem {
 		return bootSub
 	}
-	newGossipSubsystem = func(_ *config.Config, _ *tls.Config, _ *tls.Config, _ *membership.Membership, _ *slog.Logger) (subsystem, error) {
+	newGossipSubsystem = func(_ *config.Config, _ *tls.Config, _ *tls.Config, _ *membership.Membership, _ gossip.SyncExtension, _ *slog.Logger) (subsystem, error) {
 		return gossipSubFake, nil
 	}
 	// The scrubber is stubbed with a blocking no-op so it behaves like a
@@ -312,7 +315,7 @@ func TestRun_GossipSubsystemInitFailure(t *testing.T) {
 
 	prevGossip := newGossipSubsystem
 	t.Cleanup(func() { newGossipSubsystem = prevGossip })
-	newGossipSubsystem = func(_ *config.Config, _ *tls.Config, _ *tls.Config, _ *membership.Membership, _ *slog.Logger) (subsystem, error) {
+	newGossipSubsystem = func(_ *config.Config, _ *tls.Config, _ *tls.Config, _ *membership.Membership, _ gossip.SyncExtension, _ *slog.Logger) (subsystem, error) {
 		return nil, errors.New("simulated gossip init failure")
 	}
 	err := Run(context.Background(), testConfig(t), discardLogger(), io.Discard, "v0")
@@ -1032,4 +1035,19 @@ func waitForServer(url string, timeout time.Duration) bool {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return false
+}
+
+func TestNamespaceSyncExt_RoundTrips(t *testing.T) {
+	ns := namespace.New(hlc.New("self"))
+	if _, err := ns.Mkdir("/d"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	ext := namespaceSyncExt{ns: ns}
+	state, err := ext.LocalState()
+	if err != nil {
+		t.Fatalf("LocalState: %v", err)
+	}
+	if err := ext.MergeRemote(state); err != nil {
+		t.Fatalf("MergeRemote: %v", err)
+	}
 }

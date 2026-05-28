@@ -19,13 +19,22 @@ import (
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
 	"github.com/hyperized/silo/internal/gossip"
+	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/membership"
+	"github.com/hyperized/silo/internal/namespace"
 	"github.com/hyperized/silo/internal/observability"
 	"github.com/hyperized/silo/internal/replication"
 	"github.com/hyperized/silo/internal/transport"
 
 	"google.golang.org/grpc/credentials"
 )
+
+// namespaceSyncExt adapts the CRDT namespace to gossip's SyncExtension so
+// it reconciles across nodes on the existing anti-entropy exchange.
+type namespaceSyncExt struct{ ns *namespace.Namespace }
+
+func (e namespaceSyncExt) LocalState() ([]byte, error) { return e.ns.Snapshot() }
+func (e namespaceSyncExt) MergeRemote(b []byte) error  { return e.ns.MergeBytes(b) }
 
 // shutdownTimeout bounds graceful shutdown of every sub-component. Tuned
 // to outlast the slowest expected in-flight HTTP handler / gRPC stream
@@ -62,13 +71,14 @@ var (
 	// (nil, error) when the configuration is rejected at construction
 	// time — typically a self-seed misconfiguration that the operator
 	// must fix before silod can start.
-	newGossipSubsystem = func(cfg *config.Config, serverTLS, clientTLS *tls.Config, members *membership.Membership, logger *slog.Logger) (subsystem, error) {
+	newGossipSubsystem = func(cfg *config.Config, serverTLS, clientTLS *tls.Config, members *membership.Membership, ext gossip.SyncExtension, logger *slog.Logger) (subsystem, error) {
 		s, err := gossip.New(members, gossip.Options{
 			Addr:      cfg.GossipAddr,
 			Advertise: cfg.GossipAdvertise,
 			Seeds:     cfg.Seeds,
 			ServerTLS: serverTLS,
 			ClientTLS: clientTLS,
+			Extension: ext,
 		}, logger)
 		if err != nil {
 			return nil, err
@@ -350,7 +360,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not initialise the membership table (%w)", err)
 	}
-	gossipSubsys, err := newGossipSubsystem(cfg, serverTLS, peerTLS, members, logger)
+	// The namespace is this node's replica of the cluster filesystem tree.
+	// It rides the gossip anti-entropy exchange to converge with peers.
+	ns := namespace.New(hlc.New(cfg.NodeID))
+	gossipSubsys, err := newGossipSubsystem(cfg, serverTLS, peerTLS, members, namespaceSyncExt{ns: ns}, logger)
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not initialise the gossip subsystem (%w)", err)
 	}

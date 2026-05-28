@@ -7,11 +7,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"math/big"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +79,10 @@ func (s *sharedTLS) client() *tls.Config {
 // seeds. The returned cleanup function tears the subsystem down. The
 // id and address are set up so test peers can recognise each other.
 func startNode(t *testing.T, shared *sharedTLS, id string, seeds []string) (*gossip.Subsystem, string, func()) {
+	return startNodeExt(t, shared, id, seeds, nil)
+}
+
+func startNodeExt(t *testing.T, shared *sharedTLS, id string, seeds []string, ext gossip.SyncExtension) (*gossip.Subsystem, string, func()) {
 	t.Helper()
 	// Advertise a distinct, recognisable data-plane address per node so
 	// tests can assert it propagates over gossip. It is never dialed here
@@ -99,6 +105,7 @@ func startNode(t *testing.T, shared *sharedTLS, id string, seeds []string) (*gos
 		Timeout:             200 * time.Millisecond,
 		PiggybackCap:        16,
 		IndirectK:           2,
+		Extension:           ext,
 	}, logger)
 	if err != nil {
 		t.Fatalf("gossip.New: %v", err)
@@ -144,6 +151,68 @@ func TestGossip_TwoNodesConverge(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("a did not see b as Alive within 3s; a=%+v b=%+v", a.Members().Members(), b.Members().Members())
+}
+
+// setExt is a tiny mergeable SyncExtension — a grow-only set of strings —
+// used to prove the gossip anti-entropy exchange ferries and converges an
+// extension's state across nodes.
+type setExt struct {
+	mu    sync.Mutex
+	items map[string]bool
+}
+
+func newSetExt(seed string) *setExt { return &setExt{items: map[string]bool{seed: true}} }
+
+func (e *setExt) LocalState() ([]byte, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	keys := make([]string, 0, len(e.items))
+	for k := range e.items {
+		keys = append(keys, k)
+	}
+	return json.Marshal(keys)
+}
+
+func (e *setExt) MergeRemote(b []byte) error {
+	var keys []string
+	if err := json.Unmarshal(b, &keys); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, k := range keys {
+		e.items[k] = true
+	}
+	return nil
+}
+
+func (e *setExt) has(k string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.items[k]
+}
+
+// TestGossip_SyncExtensionConverges proves the anti-entropy exchange
+// carries an extension's state in both directions: two nodes seeded with
+// different data end up holding the union once they have synced.
+func TestGossip_SyncExtensionConverges(t *testing.T) {
+	shared := newSharedTLS(t)
+	extA := newSetExt("a-data")
+	extB := newSetExt("b-data")
+
+	_, aAddr, aClose := startNodeExt(t, shared, "a", nil, extA)
+	defer aClose()
+	_, _, bClose := startNodeExt(t, shared, "b", []string{aAddr}, extB)
+	defer bClose()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if extA.has("b-data") && extB.has("a-data") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("sync extensions did not converge within 3s")
 }
 
 // TestGossip_DeadNodeDetected starts two nodes, shuts the second one

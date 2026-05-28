@@ -85,8 +85,13 @@ func (s *Subsystem) handleConn(c net.Conn) {
 			extra := &Message{Piggyback: msg.MembershipView}
 			s.applyIncoming(extra)
 		}
+		// Merge the initiator's extension state before computing our reply
+		// so the reply already reflects it, letting the initiator converge
+		// in this single round-trip.
+		s.extMergeRemote(msg.Extension)
 		reply := s.selfEnvelope(KindSyncResp, msg.SenderID)
 		reply.MembershipView = s.viewSnapshot()
+		reply.Extension = s.extLocalState()
 		_ = writeMessage(c, reply)
 	case KindAck, KindSyncResp:
 		// Stray ack or sync-resp on an inbound connection — these are

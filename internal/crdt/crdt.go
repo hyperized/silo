@@ -147,3 +147,47 @@ func (s *ORSet[T]) Clone() *ORSet[T] {
 	c.Merge(s)
 	return c
 }
+
+// ElementTags pairs an element with its tag set. It is the flat,
+// serializable shape of the set used to ferry state to a peer.
+type ElementTags[T comparable] struct {
+	Elem T               `json:"elem"`
+	Tags []hlc.Timestamp `json:"tags"`
+}
+
+// Export returns the set's adds and removes as flat slices suitable for
+// serialization. Order is unspecified.
+func (s *ORSet[T]) Export() (adds, removes []ElementTags[T]) {
+	return flatten(s.adds), flatten(s.removes)
+}
+
+func flatten[T comparable](m map[T]map[hlc.Timestamp]struct{}) []ElementTags[T] {
+	out := make([]ElementTags[T], 0, len(m))
+	for elem, tags := range m {
+		et := ElementTags[T]{Elem: elem, Tags: make([]hlc.Timestamp, 0, len(tags))}
+		for tag := range tags {
+			et.Tags = append(et.Tags, tag)
+		}
+		out = append(out, et)
+	}
+	return out
+}
+
+// Import folds serialized adds and removes into the set with the same union
+// semantics as Merge, so reconstructing a peer's set and importing it
+// converges exactly as a direct Merge would.
+func (s *ORSet[T]) Import(adds, removes []ElementTags[T]) {
+	absorb(s.adds, adds)
+	absorb(s.removes, removes)
+}
+
+func absorb[T comparable](m map[T]map[hlc.Timestamp]struct{}, in []ElementTags[T]) {
+	for _, et := range in {
+		if m[et.Elem] == nil {
+			m[et.Elem] = map[hlc.Timestamp]struct{}{}
+		}
+		for _, tag := range et.Tags {
+			m[et.Elem][tag] = struct{}{}
+		}
+	}
+}
