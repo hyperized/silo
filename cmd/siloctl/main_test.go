@@ -38,6 +38,14 @@ func (c storeCoord) Read(ctx context.Context, id string) ([]byte, chunkstore.Inf
 	return c.store.Get(ctx, id)
 }
 
+func (c storeCoord) Delete(ctx context.Context, id string) error {
+	return c.store.Delete(ctx, id)
+}
+
+func (c storeCoord) Stat(ctx context.Context, id string) (chunkstore.Info, error) {
+	return c.store.Stat(ctx, id)
+}
+
 // newTestServer mirrors the transport test helper: real gRPC server, real
 // chunk store under a tempdir, returned address ready for --server=.
 // Each test starts with an empty per-user config dir so credentials the

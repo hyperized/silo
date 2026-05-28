@@ -420,8 +420,13 @@ func (*GetResponse_Info) isGetResponse_Body() {}
 func (*GetResponse_Data) isGetResponse_Body() {}
 
 type DeleteRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChunkId       string                 `protobuf:"bytes,1,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ChunkId string                 `protobuf:"bytes,1,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
+	// local_only deletes the chunk from the receiving node's local store
+	// only. The replication coordinator sets it when fanning a delete out to
+	// a peer so the peer does not coordinate its own delete; a normal client
+	// delete leaves it false so the receiving node removes every replica.
+	LocalOnly     bool `protobuf:"varint,2,opt,name=local_only,json=localOnly,proto3" json:"local_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -463,6 +468,13 @@ func (x *DeleteRequest) GetChunkId() string {
 	return ""
 }
 
+func (x *DeleteRequest) GetLocalOnly() bool {
+	if x != nil {
+		return x.LocalOnly
+	}
+	return false
+}
+
 type DeleteResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -500,8 +512,13 @@ func (*DeleteResponse) Descriptor() ([]byte, []int) {
 }
 
 type StatRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChunkId       string                 `protobuf:"bytes,1,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ChunkId string                 `protobuf:"bytes,1,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
+	// local_only restricts the stat to the receiving node's local store. The
+	// coordinator (and the scrubber's existence probe) set it so a stat does
+	// not fan out across the ring; a normal client stat leaves it false so
+	// the chunk is found on whichever replica holds it.
+	LocalOnly     bool `protobuf:"varint,2,opt,name=local_only,json=localOnly,proto3" json:"local_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -541,6 +558,13 @@ func (x *StatRequest) GetChunkId() string {
 		return x.ChunkId
 	}
 	return ""
+}
+
+func (x *StatRequest) GetLocalOnly() bool {
+	if x != nil {
+		return x.LocalOnly
+	}
+	return false
 }
 
 type StatResponse struct {
@@ -617,12 +641,16 @@ const file_silo_chunk_v1_chunk_proto_rawDesc = "" +
 	"\vGetResponse\x12.\n" +
 	"\x04info\x18\x01 \x01(\v2\x18.silo.chunk.v1.ChunkInfoH\x00R\x04info\x12\x14\n" +
 	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\x06\n" +
-	"\x04body\"*\n" +
+	"\x04body\"I\n" +
 	"\rDeleteRequest\x12\x19\n" +
-	"\bchunk_id\x18\x01 \x01(\tR\achunkId\"\x10\n" +
-	"\x0eDeleteResponse\"(\n" +
+	"\bchunk_id\x18\x01 \x01(\tR\achunkId\x12\x1d\n" +
+	"\n" +
+	"local_only\x18\x02 \x01(\bR\tlocalOnly\"\x10\n" +
+	"\x0eDeleteResponse\"G\n" +
 	"\vStatRequest\x12\x19\n" +
-	"\bchunk_id\x18\x01 \x01(\tR\achunkId\"<\n" +
+	"\bchunk_id\x18\x01 \x01(\tR\achunkId\x12\x1d\n" +
+	"\n" +
+	"local_only\x18\x02 \x01(\bR\tlocalOnly\"<\n" +
 	"\fStatResponse\x12,\n" +
 	"\x04info\x18\x01 \x01(\v2\x18.silo.chunk.v1.ChunkInfoR\x04info2\x94\x02\n" +
 	"\n" +

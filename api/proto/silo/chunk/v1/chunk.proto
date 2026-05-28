@@ -71,12 +71,22 @@ message GetResponse {
 
 message DeleteRequest {
   string chunk_id = 1;
+  // local_only deletes the chunk from the receiving node's local store
+  // only. The replication coordinator sets it when fanning a delete out to
+  // a peer so the peer does not coordinate its own delete; a normal client
+  // delete leaves it false so the receiving node removes every replica.
+  bool local_only = 2;
 }
 
 message DeleteResponse {}
 
 message StatRequest {
   string chunk_id = 1;
+  // local_only restricts the stat to the receiving node's local store. The
+  // coordinator (and the scrubber's existence probe) set it so a stat does
+  // not fan out across the ring; a normal client stat leaves it false so
+  // the chunk is found on whichever replica holds it.
+  bool local_only = 2;
 }
 
 message StatResponse {

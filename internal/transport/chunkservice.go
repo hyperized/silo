@@ -30,6 +30,8 @@ const dataFrameSize = 64 * 1024
 type Coordinator interface {
 	Write(ctx context.Context, chunkID string, data []byte) (chunkstore.Info, error)
 	Read(ctx context.Context, chunkID string) ([]byte, chunkstore.Info, error)
+	Delete(ctx context.Context, chunkID string) error
+	Stat(ctx context.Context, chunkID string) (chunkstore.Info, error)
 }
 
 // ChunkService adapts a chunkstore.Store and the replication coordinator to
@@ -153,17 +155,35 @@ func (s *ChunkService) getChunk(ctx context.Context, chunkID string, localOnly b
 	return s.coord.Read(ctx, chunkID)
 }
 
-// Delete removes a chunk by id. A missing chunk surfaces as NotFound.
+// Delete removes a chunk. A client delete fans out across the chunk's
+// replicas through the coordinator; a peer's local_only delete removes just
+// the local copy (the loop guard). A missing chunk surfaces as NotFound.
 func (s *ChunkService) Delete(ctx context.Context, req *chunkv1.DeleteRequest) (*chunkv1.DeleteResponse, error) {
-	if err := s.store.Delete(ctx, req.GetChunkId()); err != nil {
+	var err error
+	if req.GetLocalOnly() {
+		err = s.store.Delete(ctx, req.GetChunkId())
+	} else {
+		err = s.coord.Delete(ctx, req.GetChunkId())
+	}
+	if err != nil {
 		return nil, mapStoreError(err, req.GetChunkId())
 	}
 	return &chunkv1.DeleteResponse{}, nil
 }
 
-// Stat returns chunk metadata without transferring the payload.
+// Stat returns chunk metadata without transferring the payload. A client
+// stat resolves through the coordinator (local replica first, then peers);
+// a peer's local_only stat answers only for its local store.
 func (s *ChunkService) Stat(ctx context.Context, req *chunkv1.StatRequest) (*chunkv1.StatResponse, error) {
-	info, err := s.store.Stat(ctx, req.GetChunkId())
+	var (
+		info chunkstore.Info
+		err  error
+	)
+	if req.GetLocalOnly() {
+		info, err = s.store.Stat(ctx, req.GetChunkId())
+	} else {
+		info, err = s.coord.Stat(ctx, req.GetChunkId())
+	}
 	if err != nil {
 		return nil, mapStoreError(err, req.GetChunkId())
 	}

@@ -36,6 +36,8 @@ type Placement interface {
 type Local interface {
 	Put(ctx context.Context, id string, data []byte) (chunkstore.Info, error)
 	Get(ctx context.Context, id string) ([]byte, chunkstore.Info, error)
+	Delete(ctx context.Context, id string) error
+	Stat(ctx context.Context, id string) (chunkstore.Info, error)
 }
 
 // Peers stores and fetches replicas on other nodes over the mTLS data
@@ -46,6 +48,8 @@ type Local interface {
 type Peers interface {
 	Store(ctx context.Context, addr, id string, data []byte) (chunkstore.Info, error)
 	Fetch(ctx context.Context, addr, id string) ([]byte, chunkstore.Info, error)
+	Delete(ctx context.Context, addr, id string) error
+	Stat(ctx context.Context, addr, id string) (chunkstore.Info, error)
 }
 
 // Coordinator turns a single Put/Get into the fan-out and fall-back logic
@@ -188,4 +192,75 @@ func (c *Coordinator) Read(ctx context.Context, chunkID string) ([]byte, chunkst
 		errs = append(errs, fmt.Errorf("peer %s: %w", target, err))
 	}
 	return nil, chunkstore.Info{}, fmt.Errorf("replication: chunk %q could not be read from any of its %d replicas; the chunk may be under-replicated or those nodes are unreachable: %w", chunkID, len(targets), errors.Join(errs...))
+}
+
+// Delete removes chunkID from every replica. It must reach them all: a
+// copy that survives would be re-replicated by the scrubber, resurrecting
+// the chunk. A replica that already lacks the chunk counts as deleted.
+// Note: a node that was down during the delete and later rejoins still
+// holds its copy and can resurrect it — durable deletion across a partition
+// needs tombstones, which arrive with the namespace work.
+func (c *Coordinator) Delete(ctx context.Context, chunkID string) error {
+	targets := c.place.Replicas(chunkID, c.rf)
+	if len(targets) == 0 {
+		return fmt.Errorf("replication: no live node holds chunk %q to delete; the cluster view is empty — check gossip connectivity", chunkID)
+	}
+	self := c.place.SelfID()
+	var errs []error
+	for _, target := range targets {
+		var err error
+		if target == self {
+			err = c.local.Delete(ctx, chunkID)
+		} else if addr, ok := c.place.DataAddr(target); ok {
+			err = c.peers.Delete(ctx, addr, chunkID)
+		} else {
+			err = fmt.Errorf("node %q has no advertised data address", target)
+		}
+		if err != nil && !errors.Is(err, chunkstore.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("replica %s: %w", target, err))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("replication: delete of chunk %q did not reach every replica (it may resurrect from a surviving copy); retry once the cluster is healthy: %w", chunkID, errors.Join(errs...))
+	}
+	return nil
+}
+
+// Stat returns chunk metadata from the nearest replica: the local copy
+// first when this node is a replica, then each peer replica in ring order.
+// It fails only when no replica holds the chunk.
+func (c *Coordinator) Stat(ctx context.Context, chunkID string) (chunkstore.Info, error) {
+	targets := c.place.Replicas(chunkID, c.rf)
+	if len(targets) == 0 {
+		return chunkstore.Info{}, fmt.Errorf("replication: no live node holds chunk %q; the cluster view is empty — check gossip connectivity", chunkID)
+	}
+
+	var errs []error
+	self := c.place.SelfID()
+	for _, target := range targets {
+		if target != self {
+			continue
+		}
+		info, err := c.local.Stat(ctx, chunkID)
+		if err == nil {
+			return info, nil
+		}
+		errs = append(errs, fmt.Errorf("local: %w", err))
+	}
+	for _, target := range targets {
+		if target == self {
+			continue
+		}
+		addr, ok := c.place.DataAddr(target)
+		if !ok {
+			errs = append(errs, fmt.Errorf("node %q has no advertised data address", target))
+			continue
+		}
+		info, err := c.peers.Stat(ctx, addr, chunkID)
+		if err == nil {
+			return info, nil
+		}
+		errs = append(errs, fmt.Errorf("peer %s: %w", target, err))
+	}
+	return chunkstore.Info{}, fmt.Errorf("replication: chunk %q not found on any of its %d replicas: %w", chunkID, len(targets), errors.Join(errs...))
 }

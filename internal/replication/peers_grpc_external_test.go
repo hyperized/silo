@@ -29,6 +29,14 @@ func (errCoordinator) Read(context.Context, string) ([]byte, chunkstore.Info, er
 	return nil, chunkstore.Info{}, errors.New("coordinator must not be used for peer replica traffic")
 }
 
+func (errCoordinator) Delete(context.Context, string) error {
+	return errors.New("coordinator must not be used for peer replica traffic")
+}
+
+func (errCoordinator) Stat(context.Context, string) (chunkstore.Info, error) {
+	return chunkstore.Info{}, errors.New("coordinator must not be used for peer replica traffic")
+}
+
 // startReplicaServer runs a real ChunkStore over insecure gRPC backed by a
 // fresh encrypted FileStore, returning its dial address and a stopper.
 func startReplicaServer(t *testing.T) string {
@@ -98,6 +106,43 @@ func TestGRPCPeers_StoreFetchRoundTrip(t *testing.T) {
 	}
 	if _, err := peers.Stat(context.Background(), addr, "ghost"); err == nil {
 		t.Error("Stat of a missing chunk should error")
+	}
+}
+
+func TestGRPCPeers_DeleteRoundTrip(t *testing.T) {
+	addr := startReplicaServer(t)
+	peers := replication.NewGRPCPeers(insecure.NewCredentials(), discardLogger())
+	t.Cleanup(func() { _ = peers.Close() })
+
+	if _, err := peers.Store(context.Background(), addr, "c1", []byte("bytes")); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	if err := peers.Delete(context.Background(), addr, "c1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := peers.Stat(context.Background(), addr, "c1"); err == nil {
+		t.Error("chunk should be gone after Delete")
+	}
+}
+
+func TestGRPCPeers_DeleteMissingMapsToErrNotFound(t *testing.T) {
+	addr := startReplicaServer(t)
+	peers := replication.NewGRPCPeers(insecure.NewCredentials(), discardLogger())
+	t.Cleanup(func() { _ = peers.Close() })
+
+	// A delete of an absent chunk must come back as the sentinel so the
+	// coordinator can treat it as already-deleted.
+	if err := peers.Delete(context.Background(), addr, "ghost"); !errors.Is(err, chunkstore.ErrNotFound) {
+		t.Fatalf("got %v, want chunkstore.ErrNotFound", err)
+	}
+}
+
+func TestGRPCPeers_DeleteUnreachablePeer(t *testing.T) {
+	peers := replication.NewGRPCPeers(insecure.NewCredentials(), discardLogger())
+	t.Cleanup(func() { _ = peers.Close() })
+
+	if err := peers.Delete(context.Background(), "127.0.0.1:1", "c1"); err == nil || errors.Is(err, chunkstore.ErrNotFound) {
+		t.Fatalf("got %v, want a non-NotFound transport error", err)
 	}
 }
 

@@ -71,6 +71,14 @@ func (c storeCoordinator) Read(ctx context.Context, id string) ([]byte, chunksto
 	return c.store.Get(ctx, id)
 }
 
+func (c storeCoordinator) Delete(ctx context.Context, id string) error {
+	return c.store.Delete(ctx, id)
+}
+
+func (c storeCoordinator) Stat(ctx context.Context, id string) (chunkstore.Info, error) {
+	return c.store.Stat(ctx, id)
+}
+
 // newTestServer wires a real grpc.Server bound to an ephemeral port,
 // returns a client and a teardown. Single helper because the streaming
 // nature of Put/Get makes pure-stub testing too noisy to be useful.
@@ -259,6 +267,22 @@ func TestChunkService_ReplicaWriteAndLocalRead(t *testing.T) {
 	}
 	if !bytes.Equal(got.Bytes(), payload) {
 		t.Errorf("replica round-trip mismatch: got %q, want %q", got.Bytes(), payload)
+	}
+
+	// local_only Stat and Delete also bypass the coordinator and act on the
+	// local store directly.
+	stat, err := client.Stat(context.Background(), &chunkv1.StatRequest{ChunkId: "rep", LocalOnly: true})
+	if err != nil {
+		t.Fatalf("local_only Stat: %v", err)
+	}
+	if stat.Info.PlainBytes != int64(len(payload)) {
+		t.Errorf("Stat plain_bytes: got %d, want %d", stat.Info.PlainBytes, len(payload))
+	}
+	if _, err := client.Delete(context.Background(), &chunkv1.DeleteRequest{ChunkId: "rep", LocalOnly: true}); err != nil {
+		t.Fatalf("local_only Delete: %v", err)
+	}
+	if _, err := client.Stat(context.Background(), &chunkv1.StatRequest{ChunkId: "rep", LocalOnly: true}); status.Code(err) != codes.NotFound {
+		t.Errorf("Stat after local Delete: got %v, want NotFound", err)
 	}
 }
 

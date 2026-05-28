@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
@@ -147,11 +149,32 @@ func (p *GRPCPeers) Stat(ctx context.Context, addr, id string) (chunkstore.Info,
 	ctx, cancel := context.WithTimeout(ctx, peerCallTimeout)
 	defer cancel()
 
-	resp, err := cli.Stat(ctx, &chunkv1.StatRequest{ChunkId: id})
+	resp, err := cli.Stat(ctx, &chunkv1.StatRequest{ChunkId: id, LocalOnly: true})
 	if err != nil {
 		return chunkstore.Info{}, fmt.Errorf("replication: could not stat chunk %q on peer %s (%w)", id, addr, err)
 	}
 	return infoFromProto(resp.GetInfo()), nil
+}
+
+// Delete removes a chunk from addr's local store (local_only so the peer
+// does not coordinate its own fan-out). A NotFound is mapped to
+// chunkstore.ErrNotFound so the coordinator can treat an already-absent
+// replica as a successful delete.
+func (p *GRPCPeers) Delete(ctx context.Context, addr, id string) error {
+	cli, err := p.client(addr)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, peerCallTimeout)
+	defer cancel()
+
+	if _, err := cli.Delete(ctx, &chunkv1.DeleteRequest{ChunkId: id, LocalOnly: true}); err != nil {
+		if status.Code(err) == codes.NotFound {
+			return chunkstore.ErrNotFound
+		}
+		return fmt.Errorf("replication: could not delete replica of chunk %q on peer %s (%w)", id, addr, err)
+	}
+	return nil
 }
 
 // Close shuts every cached peer connection. Called on silod shutdown so

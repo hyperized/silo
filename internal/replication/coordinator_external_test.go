@@ -60,8 +60,13 @@ type fakeLocal struct {
 	getInfo chunkstore.Info
 	getErr  error
 
-	mu   sync.Mutex
-	puts int
+	delErr   error
+	statInfo chunkstore.Info
+	statErr  error
+
+	mu      sync.Mutex
+	puts    int
+	deletes int
 }
 
 func (l *fakeLocal) Put(_ context.Context, _ string, _ []byte) (chunkstore.Info, error) {
@@ -75,15 +80,30 @@ func (l *fakeLocal) Get(_ context.Context, _ string) ([]byte, chunkstore.Info, e
 	return l.getData, l.getInfo, l.getErr
 }
 
+func (l *fakeLocal) Delete(_ context.Context, _ string) error {
+	l.mu.Lock()
+	l.deletes++
+	l.mu.Unlock()
+	return l.delErr
+}
+
+func (l *fakeLocal) Stat(_ context.Context, _ string) (chunkstore.Info, error) {
+	return l.statInfo, l.statErr
+}
+
 type fakePeers struct {
 	storeInfo chunkstore.Info
 	storeErr  map[string]error // keyed by addr; nil/absent means success
 	fetchData []byte
 	fetchInfo chunkstore.Info
 	fetchErr  map[string]error // keyed by addr; nil/absent means success
+	deleteErr map[string]error // keyed by addr; nil/absent means success
+	statInfo  chunkstore.Info
+	statErr   map[string]error // keyed by addr; nil/absent means present
 
 	mu      sync.Mutex
 	fetched []string
+	deleted []string
 }
 
 func (p *fakePeers) Store(_ context.Context, addr, _ string, _ []byte) (chunkstore.Info, error) {
@@ -100,10 +120,30 @@ func (p *fakePeers) Fetch(_ context.Context, addr, _ string) ([]byte, chunkstore
 	return p.fetchData, p.fetchInfo, nil
 }
 
+func (p *fakePeers) Delete(_ context.Context, addr, _ string) error {
+	p.mu.Lock()
+	p.deleted = append(p.deleted, addr)
+	p.mu.Unlock()
+	return p.deleteErr[addr]
+}
+
+func (p *fakePeers) Stat(_ context.Context, addr, _ string) (chunkstore.Info, error) {
+	if err := p.statErr[addr]; err != nil {
+		return chunkstore.Info{}, err
+	}
+	return p.statInfo, nil
+}
+
 func (p *fakePeers) fetchCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.fetched)
+}
+
+func (p *fakePeers) deletedAddrs() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.deleted...)
 }
 
 func TestWrite_QuorumSuccess(t *testing.T) {
@@ -230,6 +270,132 @@ func TestRead_NoLiveNodes(t *testing.T) {
 
 	if _, _, err := c.Read(context.Background(), "c1"); err == nil || !strings.Contains(err.Error(), "no live node") {
 		t.Fatalf("got %v, want a no-live-node error", err)
+	}
+}
+
+func TestDelete_FansOutToAllReplicas(t *testing.T) {
+	place := &recordingPlace{
+		self:     "self",
+		replicas: []string{"self", "b", "c"},
+		addrs:    map[string]string{"b": "b:7000", "c": "c:7000"},
+	}
+	local := &fakeLocal{}
+	peers := &fakePeers{deleteErr: map[string]error{}}
+	c := replication.New(place, local, peers, 3, discardLogger())
+
+	if err := c.Delete(context.Background(), "c1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if local.deletes != 1 {
+		t.Errorf("local replica not deleted (deletes=%d)", local.deletes)
+	}
+	if got := peers.deletedAddrs(); len(got) != 2 {
+		t.Errorf("expected deletes to b and c, got %v", got)
+	}
+}
+
+func TestDelete_TreatsMissingReplicaAsDeleted(t *testing.T) {
+	place := &recordingPlace{
+		self:     "self",
+		replicas: []string{"self", "b"},
+		addrs:    map[string]string{"b": "b:7000"},
+	}
+	local := &fakeLocal{delErr: chunkstore.ErrNotFound}
+	peers := &fakePeers{deleteErr: map[string]error{"b:7000": chunkstore.ErrNotFound}}
+	c := replication.New(place, local, peers, 2, discardLogger())
+
+	if err := c.Delete(context.Background(), "c1"); err != nil {
+		t.Fatalf("a replica that already lacks the chunk must count as deleted: %v", err)
+	}
+}
+
+func TestDelete_FailsWhenAReplicaErrors(t *testing.T) {
+	place := &recordingPlace{
+		self:     "self",
+		replicas: []string{"self", "b"},
+		addrs:    map[string]string{"b": "b:7000"},
+	}
+	peers := &fakePeers{deleteErr: map[string]error{"b:7000": context.DeadlineExceeded}}
+	c := replication.New(place, &fakeLocal{}, peers, 2, discardLogger())
+
+	if err := c.Delete(context.Background(), "c1"); err == nil || !strings.Contains(err.Error(), "did not reach every replica") {
+		t.Fatalf("got %v, want a partial-delete error", err)
+	}
+}
+
+func TestDelete_NoLiveNodes(t *testing.T) {
+	c := replication.New(&recordingPlace{self: "self"}, &fakeLocal{}, &fakePeers{}, 3, discardLogger())
+	if err := c.Delete(context.Background(), "c1"); err == nil || !strings.Contains(err.Error(), "no live node") {
+		t.Fatalf("got %v, want a no-live-node error", err)
+	}
+}
+
+func TestDelete_ReplicaMissingDataAddress(t *testing.T) {
+	place := &recordingPlace{self: "self", replicas: []string{"self", "b"}, addrs: map[string]string{}}
+	c := replication.New(place, &fakeLocal{}, &fakePeers{}, 2, discardLogger())
+	if err := c.Delete(context.Background(), "c1"); err == nil || !strings.Contains(err.Error(), "data address") {
+		t.Fatalf("got %v, want a missing-data-address error", err)
+	}
+}
+
+func TestStat_PrefersLocal(t *testing.T) {
+	place := &recordingPlace{
+		self:     "self",
+		replicas: []string{"self", "b"},
+		addrs:    map[string]string{"b": "b:7000"},
+	}
+	local := &fakeLocal{statInfo: chunkstore.Info{ID: "c1", PlainBytes: 7}}
+	peers := &fakePeers{statErr: map[string]error{"b:7000": context.DeadlineExceeded}}
+	c := replication.New(place, local, peers, 3, discardLogger())
+
+	info, err := c.Stat(context.Background(), "c1")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.PlainBytes != 7 {
+		t.Errorf("Stat info: got %+v, want PlainBytes=7 from local", info)
+	}
+}
+
+func TestStat_FallsBackToPeer(t *testing.T) {
+	place := &recordingPlace{
+		self:     "self",
+		replicas: []string{"self", "b"},
+		addrs:    map[string]string{"b": "b:7000"},
+	}
+	local := &fakeLocal{statErr: chunkstore.ErrNotFound}
+	peers := &fakePeers{statInfo: chunkstore.Info{ID: "c1", PlainBytes: 9}, statErr: map[string]error{}}
+	c := replication.New(place, local, peers, 3, discardLogger())
+
+	info, err := c.Stat(context.Background(), "c1")
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.PlainBytes != 9 {
+		t.Errorf("Stat info: got %+v, want PlainBytes=9 from peer", info)
+	}
+}
+
+func TestStat_NoLiveNodes(t *testing.T) {
+	c := replication.New(&recordingPlace{self: "self"}, &fakeLocal{}, &fakePeers{}, 3, discardLogger())
+	if _, err := c.Stat(context.Background(), "c1"); err == nil || !strings.Contains(err.Error(), "no live node") {
+		t.Fatalf("got %v, want a no-live-node error", err)
+	}
+}
+
+func TestStat_AllReplicasMissing(t *testing.T) {
+	// self is not a replica, so the local fast-path is skipped; one peer
+	// has no address, the other reports the chunk absent.
+	place := &recordingPlace{
+		self:     "self",
+		replicas: []string{"b", "c"},
+		addrs:    map[string]string{"c": "c:7000"},
+	}
+	peers := &fakePeers{statErr: map[string]error{"c:7000": chunkstore.ErrNotFound}}
+	c := replication.New(place, &fakeLocal{}, peers, 3, discardLogger())
+
+	if _, err := c.Stat(context.Background(), "c1"); err == nil || !strings.Contains(err.Error(), "not found on any") {
+		t.Fatalf("got %v, want an all-replicas-missing error", err)
 	}
 }
 
