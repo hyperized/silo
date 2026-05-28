@@ -107,7 +107,25 @@ Locked in. These shape the implementation from M0 onward.
 
 Each milestone is a usable, demoable, shippable artifact.
 
-### M0 — Foundation
+### Progress at a glance
+
+| Milestone | Status | Notes |
+|---|---|---|
+| M0  | done        | scaffold, `/healthz`, docker-compose, CI |
+| M1  | done        | encrypted file-backed chunk store, gRPC, `siloctl` |
+| M2  | done        | mTLS, token-based operator join, SWIM gossip; bootstrap UX paper-cuts fixed |
+| M3  | next        | distributed chunk placement + replication (chunks currently single-node only) |
+| M4  | not started | CRDT namespace |
+| M5  | not started | writer-owned chunks |
+| M6  | not started | block volume surface |
+| M7  | not started | CSI driver |
+| M8  | not started | FUSE filesystem integration (gated on F1) |
+| M9  | not started | observability + ops |
+| M10 | not started | production hardening |
+
+The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI track (§6) is eligible since M0; U1 cluster-view work needs the M2 gossip data, which is now available.
+
+### M0 — Foundation  [done]
 
 - Repo scaffold, Go module (`github.com/hyperized/silo`), `Makefile`, `docker-compose.yml`, `.env.example`, `.gitignore`
 - GitLab CI: lint (`golangci-lint`), unit tests, integration tests behind build tag, container build
@@ -117,7 +135,7 @@ Each milestone is a usable, demoable, shippable artifact.
 
 **Demo:** `make up` boots a 3-node cluster locally; each node logs "alive."
 
-### M1 — Local chunk engine (encrypted)
+### M1 — Local chunk engine (encrypted)  [done]
 
 - File-backed chunk store on each node (one chunk = one file)
 - Every chunk is AES-GCM encrypted with a per-chunk data key; the data key is wrapped by the cluster encryption key
@@ -128,7 +146,7 @@ Each milestone is a usable, demoable, shippable artifact.
 
 **Demo:** `siloctl chunk put <id> <file>` / `get <id>` against one node; chunk file on disk is ciphertext, unreadable without the cluster encryption key.
 
-### M2 — Cluster membership
+### M2 — Cluster membership  [done]
 
 - SWIM-style gossip (probe, indirect probe, suspect, dead) on stdlib `net`
 - Each node advertises: address, capacity, used bytes, version, region/zone hint
@@ -137,7 +155,7 @@ Each milestone is a usable, demoable, shippable artifact.
 
 **Demo:** kill/start nodes randomly; cluster view converges within seconds on every node.
 
-### M3 — Distributed chunk placement + replication
+### M3 — Distributed chunk placement + replication  [next]
 
 - Consistent hash ring over live members
 - `Chunk.Put` to any node → forwarded to primary → synchronously replicated to N-1 secondaries (default N=3)
@@ -225,7 +243,7 @@ This milestone integrates the FUSE protocol implementation from the parallel FUS
 
 Writing the FUSE protocol from scratch on stdlib is roughly 3 months of focused work. It can run in parallel with the core track because the FUSE protocol is independent of silo's data plane — it talks to the Linux `/dev/fuse` character device. We develop it against a noop backend (in-memory FS), then plug in the silo writer/reader SDK at M8.
 
-### F0 — FUSE protocol scaffolding (starts after M2)
+### F0 — FUSE protocol scaffolding (starts after M2)  [eligible — not started]
 
 - Protocol decoding/encoding for FUSE wire format (linux/fuse.h `fuse_in_header`, `fuse_out_header`, opcodes)
 - Connection to `/dev/fuse` with `mount(2)` syscall wiring
@@ -262,7 +280,7 @@ The FUSE library is published as a sub-package (`github.com/hyperized/silo/pkg/f
 
 `silo-ui` is a Vue 3 + Composition API + TypeScript + Tailwind v4 SPA. Served by `silod` itself from an embedded `fs.FS` (Go's `embed` package); no separate web-server deployment. Reads cluster state via a small read-mostly REST + WebSocket API on `silod`.
 
-### U0 — Scaffolding (starts after M0)
+### U0 — Scaffolding (starts after M0)  [eligible — not started]
 
 - Vue 3 + Vite + TS project setup in `ui/`
 - Tailwind v4 with CSS-first config
@@ -270,7 +288,7 @@ The FUSE library is published as a sub-package (`github.com/hyperized/silo/pkg/f
 - API client codegen from OpenAPI spec produced by `silod`
 - E2E smoke test (Playwright)
 
-### U1 — Cluster view (after M2 ships gossip)
+### U1 — Cluster view (after M2 ships gossip)  [eligible — not started]
 
 - Live cluster topology graph (node list + state colors)
 - Per-node detail panel (capacity, version, uptime, gossip neighbors)
