@@ -53,6 +53,7 @@ type Config struct {
 	NodeID             string
 	GRPCAddr           string
 	GRPCAdvertise      string
+	GRPCPeerAdvertise  string
 	BootstrapAddr      string
 	BootstrapAdvertise string
 	GossipAddr         string
@@ -130,6 +131,7 @@ func Load(env EnvFunc) (*Config, error) {
 		NodeID:              env("SILO_NODE_ID"),
 		GRPCAddr:            envDefault(env, "SILO_GRPC_ADDR", DefaultGRPCAddr),
 		GRPCAdvertise:       env("SILO_GRPC_ADVERTISE"),
+		GRPCPeerAdvertise:   env("SILO_GRPC_PEER_ADVERTISE"),
 		BootstrapAddr:       envDefault(env, "SILO_BOOTSTRAP_ADDR", DefaultBootstrapAddr),
 		BootstrapAdvertise:  env("SILO_BOOTSTRAP_ADVERTISE"),
 		GossipAddr:          envDefault(env, "SILO_GOSSIP_ADDR", DefaultGossipAddr),
@@ -201,6 +203,17 @@ func Load(env EnvFunc) (*Config, error) {
 	// with the container's routable hostname.
 	if cfg.GRPCAdvertise == "" {
 		cfg.GRPCAdvertise = advertiseFallback(cfg.GRPCAddr)
+	}
+	// GRPCAdvertise is the operator-facing dial target (what siloctl learns
+	// from the Join response); GRPCPeerAdvertise is the data address peers
+	// dial for replication. They differ whenever operators reach a node by
+	// a different route than peers do — e.g. docker-compose publishes silo-a
+	// to the host on 127.0.0.1 while peers reach it on the bridge network.
+	// Default the peer address to the loopback fallback so single-node dev
+	// works untouched; multi-node deployments set SILO_GRPC_PEER_ADVERTISE
+	// to the node's cluster-routable host:port.
+	if cfg.GRPCPeerAdvertise == "" {
+		cfg.GRPCPeerAdvertise = advertiseFallback(cfg.GRPCAddr)
 	}
 	if cfg.BootstrapAdvertise == "" {
 		cfg.BootstrapAdvertise = advertiseFallback(cfg.BootstrapAddr)

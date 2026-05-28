@@ -2,7 +2,7 @@
 
 A symmetric, partition-tolerant distributed storage system in Go, designed for Kubernetes workloads on commodity hardware.
 
-> **Status:** pre-alpha. M2 cluster mTLS + token-based operator join. See [PLAN.md](PLAN.md) for the full design and roadmap.
+> **Status:** pre-alpha. M3 distributed chunk placement + replication (quorum writes, replica-preferring reads). See [PLAN.md](PLAN.md) for the full design and roadmap.
 
 ## Design at a glance
 
@@ -43,6 +43,8 @@ Run this on the operator host to claim a client certificate:
 Copy that command and run it on the host where you'll be using `siloctl`. It writes the cluster CA, your client certificate, and the matching key into `~/.config/silo/` (or the platform-specific user config dir), and records the cluster's mTLS gRPC address in `config.json`. From then on every `siloctl chunk …` call authenticates over mTLS automatically and targets the right port — no further flags or env vars required.
 
 In the bundled docker-compose stack the bootstrap join API is published on `127.0.0.1:7001` and the mTLS gRPC data plane on `127.0.0.1:7900` (port 7000 collides with macOS AirPlay Receiver — override with `SILO_GRPC_HOST_PORT` if needed).
+
+A node has two gRPC dial targets: `SILO_GRPC_ADVERTISE` is what operators (siloctl) use and is returned in the Join response, while `SILO_GRPC_PEER_ADVERTISE` is the cluster-routable address peers use to replicate chunks. They differ in docker-compose because operators reach silo-a over the host's loopback while peers reach each other over the bridge network (`silo-a:7000`). Both default to the loopback rewrite of `SILO_GRPC_ADDR`, so single-node runs need neither.
 
 To mint another token later (e.g. for a colleague's machine), restart `silod` with `SILO_PRINT_BOOTSTRAP_TOKEN=1` set. The new token is printed on the next boot.
 

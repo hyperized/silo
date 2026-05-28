@@ -61,6 +61,11 @@ services:
       # data plane gets a different host-side port; the container still
       # listens on 7000 internally.
       SILO_GRPC_ADVERTISE: 127.0.0.1:${SILO_GRPC_HOST_PORT:-7900}
+      # Peers replicate over the bridge network, where this node is reached
+      # as silo-a:7000 — distinct from the 127.0.0.1 host route operators
+      # use above. Each node advertises its own peer data address so the
+      # others learn a routable replication target via gossip.
+      SILO_GRPC_PEER_ADVERTISE: silo-a:7000
       # Seeds point at peer gossip listeners (port 7100), not the gRPC
       # data port — gossip is the membership channel.
       SILO_SEEDS: silo-b:7100,silo-c:7100
@@ -84,6 +89,7 @@ services:
       <<: *silod-env
       SILO_NODE_ID: silo-b
       SILO_GOSSIP_ADVERTISE: silo-b:7100
+      SILO_GRPC_PEER_ADVERTISE: silo-b:7000
       SILO_SEEDS: silo-a:7100,silo-c:7100
     volumes:
       - silo-b-data:/var/lib/silo
@@ -101,6 +107,7 @@ services:
       <<: *silod-env
       SILO_NODE_ID: silo-c
       SILO_GOSSIP_ADVERTISE: silo-c:7100
+      SILO_GRPC_PEER_ADVERTISE: silo-c:7000
       SILO_SEEDS: silo-a:7100,silo-b:7100
     volumes:
       - silo-c-data:/var/lib/silo

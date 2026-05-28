@@ -343,7 +343,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		"encryption_key_source", cfg.KeySource,
 	)
 
-	members, err := newMembership(cfg.NodeID, cfg.GossipAddr, cfg.GRPCAdvertise)
+	members, err := newMembership(cfg.NodeID, cfg.GossipAddr, cfg.GRPCPeerAdvertise)
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not initialise the membership table (%w)", err)
 	}

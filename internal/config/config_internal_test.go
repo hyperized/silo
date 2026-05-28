@@ -78,6 +78,14 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.NodeKeyPath != DefaultDataDir+"/node.key" {
 		t.Errorf("NodeKeyPath default: got %q, want %s/node.key", cfg.NodeKeyPath, DefaultDataDir)
 	}
+	// Both advertise addresses default to the loopback rewrite of the
+	// 0.0.0.0 listen address so single-node dev needs no advertise config.
+	if cfg.GRPCAdvertise != "127.0.0.1:7000" {
+		t.Errorf("GRPCAdvertise default: got %q, want 127.0.0.1:7000", cfg.GRPCAdvertise)
+	}
+	if cfg.GRPCPeerAdvertise != "127.0.0.1:7000" {
+		t.Errorf("GRPCPeerAdvertise default: got %q, want 127.0.0.1:7000", cfg.GRPCPeerAdvertise)
+	}
 }
 
 func TestLoad_OverridesFromEnv(t *testing.T) {
@@ -109,6 +117,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		NodeID:              "alpha",
 		GRPCAddr:            "127.0.0.1:9000",
 		GRPCAdvertise:       "127.0.0.1:9000",
+		GRPCPeerAdvertise:   "127.0.0.1:9000",
 		BootstrapAddr:       "127.0.0.1:9001",
 		BootstrapAdvertise:  "127.0.0.1:9001",
 		GossipAddr:          "127.0.0.1:9100",
