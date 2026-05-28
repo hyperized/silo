@@ -4,11 +4,79 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/hyperized/silo/internal/chunkstore"
 	"github.com/hyperized/silo/internal/crypto"
 )
+
+func newTestStore(t *testing.T) (*chunkstore.FileStore, string) {
+	t.Helper()
+	key := make([]byte, crypto.ClusterKeyBytes)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand: %v", err)
+	}
+	c, err := crypto.NewCipher(key)
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
+	}
+	dir := t.TempDir()
+	fs, err := chunkstore.NewFileStore(dir, c)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	return fs, dir
+}
+
+func TestFileStore_List(t *testing.T) {
+	fs, dir := newTestStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"alpha", "beta", "gamma"} {
+		if _, err := fs.Put(ctx, id, []byte(id)); err != nil {
+			t.Fatalf("Put %s: %v", id, err)
+		}
+	}
+	// A half-written temp file and a non-chunk file must both be ignored.
+	if err := os.WriteFile(filepath.Join(dir, "partial.chunk.tmp"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write tmp: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write txt: %v", err)
+	}
+	// A subdirectory must be skipped, not mistaken for a chunk.
+	if err := os.Mkdir(filepath.Join(dir, "subdir"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	ids, err := fs.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := map[string]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	for _, want := range []string{"alpha", "beta", "gamma"} {
+		if !got[want] {
+			t.Errorf("List missing %q; got %v", want, ids)
+		}
+	}
+	if len(ids) != 3 {
+		t.Errorf("List returned %d ids, want 3 (tmp + non-chunk excluded): %v", len(ids), ids)
+	}
+}
+
+func TestFileStore_ListReadDirError(t *testing.T) {
+	fs, dir := newTestStore(t)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("rm: %v", err)
+	}
+	if _, err := fs.List(context.Background()); err == nil {
+		t.Fatal("List should error when the data directory is gone")
+	}
+}
 
 // TestStore_InterfaceContract pins the public surface: FileStore must
 // satisfy Store and round-trip via the interface, not just the struct.

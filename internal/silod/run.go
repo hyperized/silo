@@ -51,6 +51,9 @@ var (
 	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, store chunkstore.Store, coord transport.Coordinator, logger *slog.Logger) subsystem {
 		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, coord, logger)}
 	}
+	newScrubberSubsystem = func(cfg *config.Config, place replication.Placement, catalog replication.ChunkCatalog, probe replication.ReplicaProbe, logger *slog.Logger) subsystem {
+		return replication.NewScrubber(place, catalog, probe, cfg.Replication, cfg.ScrubInterval, logger)
+	}
 	newBootstrapSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokens transport.TokenRedeemer, minter transport.ClientCertMinter, logger *slog.Logger) subsystem {
 		svc := transport.NewBootstrapService(tokens, minter, cfg.GRPCAdvertise, logger)
 		return &bootstrapSub{srv: transport.NewBootstrapServer(cfg.BootstrapAddr, tlsCfg, svc, logger)}
@@ -355,15 +358,19 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// The replication coordinator turns each client Put/Get into a fan-out
 	// across the chunk's ring replicas. It dials peers over the same mTLS
 	// material gossip uses; peers.Close releases those connections on exit.
+	// The scrubber shares the same ring view and peer client to re-form
+	// replicas that a write missed or a node loss dropped.
+	router := replication.NewRouter(members)
 	peers := replication.NewGRPCPeers(credentials.NewTLS(peerTLS), logger)
 	defer func() { _ = peers.Close() }()
-	coord := replication.New(replication.NewRouter(members), store, peers, cfg.Replication, logger)
+	coord := replication.New(router, store, peers, cfg.Replication, logger)
 
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger),
 		newGRPCSubsystem(cfg, serverTLS, store, coord, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
+		newScrubberSubsystem(cfg, router, store, peers, logger),
 	}
 
 	type subResult struct {

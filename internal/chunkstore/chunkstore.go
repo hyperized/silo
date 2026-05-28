@@ -40,6 +40,10 @@ type Store interface {
 	Get(ctx context.Context, id string) (data []byte, info Info, err error)
 	Delete(ctx context.Context, id string) error
 	Stat(ctx context.Context, id string) (Info, error)
+	// List returns the ids of every chunk held on this node. The
+	// re-replication scrubber walks it to find chunks whose replica set is
+	// incomplete. Order is unspecified.
+	List(ctx context.Context) ([]string, error)
 }
 
 // idPattern keeps ids filesystem-safe (no path separators, no dots, no

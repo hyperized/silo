@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hyperized/silo/internal/crypto"
@@ -139,6 +140,28 @@ func (s *FileStore) Stat(_ context.Context, id string) (Info, error) {
 		StoredBytes: stat.Size(),
 		CreatedAt:   stat.ModTime().UTC(),
 	}, nil
+}
+
+// List returns the id of every fully-written chunk in the store. In-flight
+// temp files (id.chunk.tmp) end in .tmp, not .chunk, so they are skipped —
+// the scrubber must never treat a half-written chunk as a replica.
+func (s *FileStore) List(_ context.Context) ([]string, error) {
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return nil, fmt.Errorf("could not list chunks in %s (%w); check the data directory is readable", s.root, err)
+	}
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, chunkExt) {
+			continue
+		}
+		ids = append(ids, strings.TrimSuffix(name, chunkExt))
+	}
+	return ids, nil
 }
 
 // syncCloser is the subset of *os.File writeAtomic needs. Pulled out so

@@ -90,6 +90,15 @@ func TestGRPCPeers_StoreFetchRoundTrip(t *testing.T) {
 	if _, _, err := peers.Fetch(context.Background(), addr, "c1"); err != nil {
 		t.Fatalf("second Fetch: %v", err)
 	}
+
+	// Stat reports the chunk present, and reports an error for one that is
+	// absent — the scrubber relies on both.
+	if _, err := peers.Stat(context.Background(), addr, "c1"); err != nil {
+		t.Errorf("Stat of an existing chunk: %v", err)
+	}
+	if _, err := peers.Stat(context.Background(), addr, "ghost"); err == nil {
+		t.Error("Stat of a missing chunk should error")
+	}
 }
 
 func TestGRPCPeers_FetchMissingChunk(t *testing.T) {

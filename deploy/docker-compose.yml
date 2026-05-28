@@ -30,6 +30,9 @@ x-silod: &silod
     SILO_ENCRYPTION_KEY: "${SILO_ENCRYPTION_KEY:?Run 'make up' from the repo root to generate a development encryption key (it writes deploy/.env for you). To run compose by hand, set SILO_ENCRYPTION_KEY to a base64-encoded 32-byte value, e.g. with 'openssl rand -base64 32'.}"
     SILO_LOG_LEVEL: ${SILO_LOG_LEVEL:-info}
     SILO_LOG_FORMAT: ${SILO_LOG_FORMAT:-text}
+    # Scrub often in the local stack so re-replication after a node loss is
+    # observable within seconds; production paces this much slower.
+    SILO_SCRUB_INTERVAL: ${SILO_SCRUB_INTERVAL:-5s}
   healthcheck:
     test: ["CMD", "wget", "-qO-", "http://localhost:7080/healthz"]
     interval: 5s

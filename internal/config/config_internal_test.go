@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // envMap turns a map into an EnvFunc for the tests below.
@@ -86,6 +87,33 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.GRPCPeerAdvertise != "127.0.0.1:7000" {
 		t.Errorf("GRPCPeerAdvertise default: got %q, want 127.0.0.1:7000", cfg.GRPCPeerAdvertise)
 	}
+	// Zero means "let the scrubber apply its own default"; Load does not
+	// bake one in so there is a single source of truth.
+	if cfg.ScrubInterval != 0 {
+		t.Errorf("ScrubInterval default: got %v, want 0", cfg.ScrubInterval)
+	}
+}
+
+func TestLoad_BadScrubInterval(t *testing.T) {
+	_, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":        "n",
+		"SILO_ENCRYPTION_KEY": validBase64Key(t),
+		"SILO_SCRUB_INTERVAL": "soon",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "SILO_SCRUB_INTERVAL") {
+		t.Fatalf("got %v, want a SILO_SCRUB_INTERVAL parse error", err)
+	}
+}
+
+func TestLoad_NegativeScrubInterval(t *testing.T) {
+	_, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":        "n",
+		"SILO_ENCRYPTION_KEY": validBase64Key(t),
+		"SILO_SCRUB_INTERVAL": "-5s",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "negative") {
+		t.Fatalf("got %v, want a negative-duration error", err)
+	}
 }
 
 func TestLoad_OverridesFromEnv(t *testing.T) {
@@ -100,6 +128,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_DATA_DIR":              "/tmp/silo",
 		"SILO_CHUNK_SIZE":            "1048576",
 		"SILO_REPLICATION":           "5",
+		"SILO_SCRUB_INTERVAL":        "5s",
 		"SILO_LOG_LEVEL":             "debug",
 		"SILO_LOG_FORMAT":            "json",
 		"SILO_ENCRYPTION_KEY":        validBase64Key(t),
@@ -127,6 +156,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		DataDir:             "/tmp/silo",
 		ChunkSize:           1 << 20,
 		Replication:         5,
+		ScrubInterval:       5 * time.Second,
 		KeySource:           KeySourceStatic,
 		LogLevel:            "debug",
 		LogFormat:           "json",

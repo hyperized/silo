@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // KeySource selects where silod reads the cluster encryption key from.
@@ -64,11 +65,15 @@ type Config struct {
 	DataDir            string
 	ChunkSize          int64
 	Replication        int
-	KeySource          KeySource
-	EncryptionKey      []byte
-	KeyPath            string
-	LogLevel           string
-	LogFormat          string
+	// ScrubInterval paces the re-replication scrubber. Zero means "use the
+	// scrubber's built-in default"; set SILO_SCRUB_INTERVAL to a Go
+	// duration (e.g. 5s, 1m) to override.
+	ScrubInterval time.Duration
+	KeySource     KeySource
+	EncryptionKey []byte
+	KeyPath       string
+	LogLevel      string
+	LogFormat     string
 
 	// TLS material for inter-node and client traffic. All four paths
 	// default to siblings under DataDir so a fresh silod boots without
@@ -165,6 +170,12 @@ func Load(env EnvFunc) (*Config, error) {
 		return nil, err
 	}
 	cfg.Replication = repl
+
+	scrubInterval, err := envDuration(env, "SILO_SCRUB_INTERVAL")
+	if err != nil {
+		return nil, err
+	}
+	cfg.ScrubInterval = scrubInterval
 
 	if err := loadEncryptionKey(env, cfg); err != nil {
 		return nil, err
@@ -328,6 +339,24 @@ func envInt64(env EnvFunc, key string, fallback int64) (int64, error) {
 		return 0, fmt.Errorf("%s must be a whole number of bytes, got %q; see .env.example for a working value", key, v)
 	}
 	return n, nil
+}
+
+// envDuration parses a Go duration from env, returning 0 when unset so the
+// consumer can apply its own default. Negative values are rejected: a
+// negative scrub interval is always a misconfiguration.
+func envDuration(env EnvFunc, key string) (time.Duration, error) {
+	v := env(key)
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a Go duration like 30s or 5m, got %q", key, v)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s must not be negative, got %q", key, v)
+	}
+	return d, nil
 }
 
 func parseSeeds(raw string) []string {

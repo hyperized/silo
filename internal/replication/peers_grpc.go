@@ -135,6 +135,25 @@ func (p *GRPCPeers) Fetch(ctx context.Context, addr, id string) ([]byte, chunkst
 	return data, info, nil
 }
 
+// Stat asks addr whether it already holds id, reading only that peer's
+// local store (the scrubber uses it to decide whether a replica is
+// missing before sending the chunk). A NotFound from the peer surfaces as
+// an error, which the scrubber treats as "replica absent".
+func (p *GRPCPeers) Stat(ctx context.Context, addr, id string) (chunkstore.Info, error) {
+	cli, err := p.client(addr)
+	if err != nil {
+		return chunkstore.Info{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, peerCallTimeout)
+	defer cancel()
+
+	resp, err := cli.Stat(ctx, &chunkv1.StatRequest{ChunkId: id})
+	if err != nil {
+		return chunkstore.Info{}, fmt.Errorf("replication: could not stat chunk %q on peer %s (%w)", id, addr, err)
+	}
+	return infoFromProto(resp.GetInfo()), nil
+}
+
 // Close shuts every cached peer connection. Called on silod shutdown so
 // the data-plane clients do not outlive the daemon.
 func (p *GRPCPeers) Close() error {

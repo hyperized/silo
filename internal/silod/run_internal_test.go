@@ -20,6 +20,7 @@ import (
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
 	"github.com/hyperized/silo/internal/membership"
+	"github.com/hyperized/silo/internal/replication"
 	"github.com/hyperized/silo/internal/transport"
 )
 
@@ -102,6 +103,7 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 	prevGRPC := newGRPCSubsystem
 	prevBoot := newBootstrapSubsystem
 	prevGossip := newGossipSubsystem
+	prevScrub := newScrubberSubsystem
 	prevTLS := loadClusterTLS
 	prevTokens := openTokenStore
 	t.Cleanup(func() {
@@ -109,6 +111,7 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 		newGRPCSubsystem = prevGRPC
 		newBootstrapSubsystem = prevBoot
 		newGossipSubsystem = prevGossip
+		newScrubberSubsystem = prevScrub
 		loadClusterTLS = prevTLS
 		openTokenStore = prevTokens
 	})
@@ -121,6 +124,12 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 	}
 	newGossipSubsystem = func(_ *config.Config, _ *tls.Config, _ *tls.Config, _ *membership.Membership, _ *slog.Logger) (subsystem, error) {
 		return gossipSubFake, nil
+	}
+	// The scrubber is stubbed with a blocking no-op so it behaves like a
+	// healthy running subsystem and never spuriously trips the
+	// "exited without a shutdown signal" path under test.
+	newScrubberSubsystem = func(_ *config.Config, _ replication.Placement, _ replication.ChunkCatalog, _ replication.ReplicaProbe, _ *slog.Logger) subsystem {
+		return newFakeSubsystem("scrubber", nil, nil, true)
 	}
 	loadClusterTLS = stubLoadClusterTLS
 	openTokenStore = stubOpenTokenStore
