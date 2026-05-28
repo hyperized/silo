@@ -14,7 +14,12 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GO_TEST_FLAGS ?= -race -timeout 60s
 GO_PKGS := ./...
 
-.PHONY: help up up-local down restart build test test-cover test-integration lint fmt vet clean logs status check proto
+# Default to an execs budget (Nx) so `make fuzz` stops deterministically and
+# exits cleanly; override with a duration for a longer run, e.g.
+# `make fuzz FUZZTIME=60s` per target.
+FUZZTIME ?= 1000000x
+
+.PHONY: help up up-local down restart build test test-cover test-integration fuzz lint fmt vet clean logs status check proto
 .DEFAULT_GOAL := up
 
 help: ## Show this help and exit.
@@ -79,6 +84,14 @@ test-cover: ## Run unit tests and print coverage (excludes generated code).
 
 test-integration: ## Run integration tests (require docker, build-tag 'integration').
 	@go test $(GO_TEST_FLAGS) -tags=integration ./test/integration/...
+
+fuzz: ## Fuzz the parse/merge/placement boundaries on demand (override: make fuzz FUZZTIME=60s).
+	@go test -run='^$$' -fuzz='^FuzzReadMessage$$'  -fuzztime=$(FUZZTIME) ./internal/gossip/
+	@go test -run='^$$' -fuzz='^FuzzDecryptChunk$$' -fuzztime=$(FUZZTIME) ./internal/crypto/
+	@go test -run='^$$' -fuzz='^FuzzValidateID$$'   -fuzztime=$(FUZZTIME) ./internal/chunkstore/
+	@go test -run='^$$' -fuzz='^FuzzMerge$$'        -fuzztime=$(FUZZTIME) ./internal/membership/
+	@go test -run='^$$' -fuzz='^FuzzReplicas$$'     -fuzztime=$(FUZZTIME) ./internal/placement/
+	@go test -run='^$$' -fuzz='^FuzzLoadCA$$'       -fuzztime=$(FUZZTIME) ./internal/clustertls/
 
 proto: ## Regenerate protobuf and gRPC code. Requires Docker; uses bufbuild/buf.
 	@if ! docker info >/dev/null 2>&1; then \
