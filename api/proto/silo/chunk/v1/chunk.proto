@@ -38,6 +38,12 @@ message PutRequest {
 
 message PutHeader {
   string chunk_id = 1;
+  // replica marks a peer-to-peer replica write: the receiving node stores
+  // the chunk on its local disk only and does NOT coordinate further
+  // replication. The replication coordinator sets this when fanning a
+  // chunk out to a peer; a normal client write leaves it false so the
+  // receiving node coordinates placement across the ring.
+  bool replica = 2;
 }
 
 message PutResponse {
@@ -46,6 +52,11 @@ message PutResponse {
 
 message GetRequest {
   string chunk_id = 1;
+  // local_only restricts the read to the receiving node's local store and
+  // suppresses the ring fall-back. The replication coordinator sets this
+  // when fetching a replica from a specific peer so the fetch cannot
+  // bounce back across the ring; a normal client read leaves it false.
+  bool local_only = 2;
 }
 
 // GetResponse: server sends one info frame first, then any number of

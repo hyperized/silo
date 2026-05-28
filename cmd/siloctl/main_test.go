@@ -25,6 +25,19 @@ import (
 	"github.com/hyperized/silo/internal/transport"
 )
 
+// storeCoord is a single-node Coordinator that delegates to the local
+// store, so siloctl's chunk commands (which the daemon routes through the
+// replication coordinator) round-trip against the test server.
+type storeCoord struct{ store chunkstore.Store }
+
+func (c storeCoord) Write(ctx context.Context, id string, data []byte) (chunkstore.Info, error) {
+	return c.store.Put(ctx, id, data)
+}
+
+func (c storeCoord) Read(ctx context.Context, id string) ([]byte, chunkstore.Info, error) {
+	return c.store.Get(ctx, id)
+}
+
 // newTestServer mirrors the transport test helper: real gRPC server, real
 // chunk store under a tempdir, returned address ready for --server=.
 // Each test starts with an empty per-user config dir so credentials the
@@ -50,7 +63,7 @@ func newTestServer(t *testing.T) (addr string, teardown func()) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := transport.NewChunkService(store, logger)
+	svc := transport.NewChunkService(store, storeCoord{store: store}, logger)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

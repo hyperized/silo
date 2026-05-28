@@ -21,7 +21,10 @@ import (
 	"github.com/hyperized/silo/internal/gossip"
 	"github.com/hyperized/silo/internal/membership"
 	"github.com/hyperized/silo/internal/observability"
+	"github.com/hyperized/silo/internal/replication"
 	"github.com/hyperized/silo/internal/transport"
+
+	"google.golang.org/grpc/credentials"
 )
 
 // shutdownTimeout bounds graceful shutdown of every sub-component. Tuned
@@ -45,8 +48,8 @@ var (
 	newHTTPSubsystem = func(cfg *config.Config, version string, logger *slog.Logger) subsystem {
 		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger)}
 	}
-	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, store chunkstore.Store, logger *slog.Logger) subsystem {
-		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, logger)}
+	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, store chunkstore.Store, coord transport.Coordinator, logger *slog.Logger) subsystem {
+		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, coord, logger)}
 	}
 	newBootstrapSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokens transport.TokenRedeemer, minter transport.ClientCertMinter, logger *slog.Logger) subsystem {
 		svc := transport.NewBootstrapService(tokens, minter, cfg.GRPCAdvertise, logger)
@@ -349,9 +352,16 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		return fmt.Errorf("silod.Run: could not initialise the gossip subsystem (%w)", err)
 	}
 
+	// The replication coordinator turns each client Put/Get into a fan-out
+	// across the chunk's ring replicas. It dials peers over the same mTLS
+	// material gossip uses; peers.Close releases those connections on exit.
+	peers := replication.NewGRPCPeers(credentials.NewTLS(peerTLS), logger)
+	defer func() { _ = peers.Close() }()
+	coord := replication.New(replication.NewRouter(members), store, peers, cfg.Replication, logger)
+
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger),
-		newGRPCSubsystem(cfg, serverTLS, store, logger),
+		newGRPCSubsystem(cfg, serverTLS, store, coord, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
 	}

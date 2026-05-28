@@ -178,8 +178,14 @@ func (*PutRequest_Header) isPutRequest_Body() {}
 func (*PutRequest_Data) isPutRequest_Body() {}
 
 type PutHeader struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChunkId       string                 `protobuf:"bytes,1,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ChunkId string                 `protobuf:"bytes,1,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
+	// replica marks a peer-to-peer replica write: the receiving node stores
+	// the chunk on its local disk only and does NOT coordinate further
+	// replication. The replication coordinator sets this when fanning a
+	// chunk out to a peer; a normal client write leaves it false so the
+	// receiving node coordinates placement across the ring.
+	Replica       bool `protobuf:"varint,2,opt,name=replica,proto3" json:"replica,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -219,6 +225,13 @@ func (x *PutHeader) GetChunkId() string {
 		return x.ChunkId
 	}
 	return ""
+}
+
+func (x *PutHeader) GetReplica() bool {
+	if x != nil {
+		return x.Replica
+	}
+	return false
 }
 
 type PutResponse struct {
@@ -266,8 +279,13 @@ func (x *PutResponse) GetInfo() *ChunkInfo {
 }
 
 type GetRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ChunkId       string                 `protobuf:"bytes,1,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	ChunkId string                 `protobuf:"bytes,1,opt,name=chunk_id,json=chunkId,proto3" json:"chunk_id,omitempty"`
+	// local_only restricts the read to the receiving node's local store and
+	// suppresses the ring fall-back. The replication coordinator sets this
+	// when fetching a replica from a specific peer so the fetch cannot
+	// bounce back across the ring; a normal client read leaves it false.
+	LocalOnly     bool `protobuf:"varint,2,opt,name=local_only,json=localOnly,proto3" json:"local_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -307,6 +325,13 @@ func (x *GetRequest) GetChunkId() string {
 		return x.ChunkId
 	}
 	return ""
+}
+
+func (x *GetRequest) GetLocalOnly() bool {
+	if x != nil {
+		return x.LocalOnly
+	}
+	return false
 }
 
 // GetResponse: server sends one info frame first, then any number of
@@ -578,14 +603,17 @@ const file_silo_chunk_v1_chunk_proto_rawDesc = "" +
 	"PutRequest\x122\n" +
 	"\x06header\x18\x01 \x01(\v2\x18.silo.chunk.v1.PutHeaderH\x00R\x06header\x12\x14\n" +
 	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\x06\n" +
-	"\x04body\"&\n" +
+	"\x04body\"@\n" +
 	"\tPutHeader\x12\x19\n" +
-	"\bchunk_id\x18\x01 \x01(\tR\achunkId\";\n" +
+	"\bchunk_id\x18\x01 \x01(\tR\achunkId\x12\x18\n" +
+	"\areplica\x18\x02 \x01(\bR\areplica\";\n" +
 	"\vPutResponse\x12,\n" +
-	"\x04info\x18\x01 \x01(\v2\x18.silo.chunk.v1.ChunkInfoR\x04info\"'\n" +
+	"\x04info\x18\x01 \x01(\v2\x18.silo.chunk.v1.ChunkInfoR\x04info\"F\n" +
 	"\n" +
 	"GetRequest\x12\x19\n" +
-	"\bchunk_id\x18\x01 \x01(\tR\achunkId\"[\n" +
+	"\bchunk_id\x18\x01 \x01(\tR\achunkId\x12\x1d\n" +
+	"\n" +
+	"local_only\x18\x02 \x01(\bR\tlocalOnly\"[\n" +
 	"\vGetResponse\x12.\n" +
 	"\x04info\x18\x01 \x01(\v2\x18.silo.chunk.v1.ChunkInfoH\x00R\x04info\x12\x14\n" +
 	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\x06\n" +

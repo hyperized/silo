@@ -22,21 +22,33 @@ import (
 // having to tune anything.
 const dataFrameSize = 64 * 1024
 
-// ChunkService adapts a chunkstore.Store to the gRPC ChunkStore service.
-// Errors from the store are mapped to gRPC status codes so clients get a
-// machine-distinguishable result for not-found, invalid-id, and internal
-// failures — but the human-readable message stays the actionable text
-// from the store.
+// Coordinator spreads a chunk across its replica set and reads it back
+// from the nearest available replica. *replication.Coordinator implements
+// it. ChunkService routes client-facing Put/Get through the coordinator,
+// while peer-to-peer replica traffic (PutHeader.replica /
+// GetRequest.local_only) bypasses it and hits the local store directly.
+type Coordinator interface {
+	Write(ctx context.Context, chunkID string, data []byte) (chunkstore.Info, error)
+	Read(ctx context.Context, chunkID string) ([]byte, chunkstore.Info, error)
+}
+
+// ChunkService adapts a chunkstore.Store and the replication coordinator to
+// the gRPC ChunkStore service. Errors from the store are mapped to gRPC
+// status codes so clients get a machine-distinguishable result for
+// not-found, invalid-id, and internal failures — but the human-readable
+// message stays the actionable text from the store.
 type ChunkService struct {
 	chunkv1.UnimplementedChunkStoreServer
 
 	store  chunkstore.Store
+	coord  Coordinator
 	logger *slog.Logger
 }
 
-// NewChunkService wraps a chunkstore.Store as the gRPC ChunkStore service.
-func NewChunkService(store chunkstore.Store, logger *slog.Logger) *ChunkService {
-	return &ChunkService{store: store, logger: logger}
+// NewChunkService wires the local chunk store and the replication
+// coordinator onto the gRPC ChunkStore service.
+func NewChunkService(store chunkstore.Store, coord Coordinator, logger *slog.Logger) *ChunkService {
+	return &ChunkService{store: store, coord: coord, logger: logger}
 }
 
 // Put receives a PutHeader followed by zero or more data frames and
@@ -46,6 +58,7 @@ func (s *ChunkService) Put(stream chunkv1.ChunkStore_PutServer) error {
 		chunkID   string
 		buf       []byte
 		gotHeader bool
+		replica   bool
 	)
 
 	for {
@@ -66,6 +79,7 @@ func (s *ChunkService) Put(stream chunkv1.ChunkStore_PutServer) error {
 				return status.Error(codes.InvalidArgument, "Put: PutHeader.chunk_id is required; set it before sending any data frames")
 			}
 			chunkID = body.Header.ChunkId
+			replica = body.Header.Replica
 			gotHeader = true
 		case *chunkv1.PutRequest_Data:
 			if !gotHeader {
@@ -81,7 +95,7 @@ func (s *ChunkService) Put(stream chunkv1.ChunkStore_PutServer) error {
 		return status.Error(codes.InvalidArgument, "Put: the stream ended before any messages were received; send at least a PutHeader")
 	}
 
-	info, err := s.store.Put(stream.Context(), chunkID, buf)
+	info, err := s.putChunk(stream.Context(), chunkID, buf, replica)
 	if err != nil {
 		return mapStoreError(err, chunkID)
 	}
@@ -89,10 +103,21 @@ func (s *ChunkService) Put(stream chunkv1.ChunkStore_PutServer) error {
 	return stream.SendAndClose(&chunkv1.PutResponse{Info: toProtoInfo(info)})
 }
 
+// putChunk stores a client write through the replication coordinator, or a
+// peer replica write straight to the local store. replica is the loop
+// guard: a coordinator's fan-out to this node must not kick off another
+// round of replication.
+func (s *ChunkService) putChunk(ctx context.Context, chunkID string, data []byte, replica bool) (chunkstore.Info, error) {
+	if replica {
+		return s.store.Put(ctx, chunkID, data)
+	}
+	return s.coord.Write(ctx, chunkID, data)
+}
+
 // Get streams an Info frame followed by the chunk payload in
 // dataFrameSize-bounded frames so a large chunk stays under gRPC limits.
 func (s *ChunkService) Get(req *chunkv1.GetRequest, stream chunkv1.ChunkStore_GetServer) error {
-	data, info, err := s.store.Get(stream.Context(), req.GetChunkId())
+	data, info, err := s.getChunk(stream.Context(), req.GetChunkId(), req.GetLocalOnly())
 	if err != nil {
 		return mapStoreError(err, req.GetChunkId())
 	}
@@ -115,6 +140,17 @@ func (s *ChunkService) Get(req *chunkv1.GetRequest, stream chunkv1.ChunkStore_Ge
 		}
 	}
 	return nil
+}
+
+// getChunk reads a client request through the replication coordinator
+// (local replica first, then peers), or a peer's local_only request
+// straight from the local store. local_only is the loop guard: a
+// coordinator fetching a replica from this node must not fan back out.
+func (s *ChunkService) getChunk(ctx context.Context, chunkID string, localOnly bool) ([]byte, chunkstore.Info, error) {
+	if localOnly {
+		return s.store.Get(ctx, chunkID)
+	}
+	return s.coord.Read(ctx, chunkID)
 }
 
 // Delete removes a chunk by id. A missing chunk surfaces as NotFound.

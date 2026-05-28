@@ -32,10 +32,10 @@ type GRPCServer struct {
 // tlsCfg is required: silod runs every gRPC surface under mTLS so peer
 // identity is part of the wire protocol, not a hope-for-the-best
 // network ACL. Pass clustertls.ServerConfig(ca, nodeCert).
-func NewGRPCServer(addr string, tlsCfg *tls.Config, store chunkstore.Store, logger *slog.Logger) *GRPCServer {
+func NewGRPCServer(addr string, tlsCfg *tls.Config, store chunkstore.Store, coord Coordinator, logger *slog.Logger) *GRPCServer {
 	creds := credentials.NewTLS(tlsCfg)
 	s := grpc.NewServer(grpc.Creds(creds))
-	chunkv1.RegisterChunkStoreServer(s, NewChunkService(store, logger))
+	chunkv1.RegisterChunkStoreServer(s, NewChunkService(store, coord, logger))
 	return &GRPCServer{
 		addr:   addr,
 		logger: logger,

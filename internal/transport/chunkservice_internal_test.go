@@ -57,6 +57,20 @@ func testMTLSPair(t *testing.T) (server, client *tls.Config) {
 	return server, client
 }
 
+// storeCoordinator is a test Coordinator that delegates straight to a
+// local store — the single-node case where every replica of a chunk is
+// this node. It lets the gRPC round-trip tests drive the client Put/Get
+// path (which routes through the coordinator) against a real store.
+type storeCoordinator struct{ store chunkstore.Store }
+
+func (c storeCoordinator) Write(ctx context.Context, id string, data []byte) (chunkstore.Info, error) {
+	return c.store.Put(ctx, id, data)
+}
+
+func (c storeCoordinator) Read(ctx context.Context, id string) ([]byte, chunkstore.Info, error) {
+	return c.store.Get(ctx, id)
+}
+
 // newTestServer wires a real grpc.Server bound to an ephemeral port,
 // returns a client and a teardown. Single helper because the streaming
 // nature of Put/Get makes pure-stub testing too noisy to be useful.
@@ -77,7 +91,7 @@ func newTestServer(t *testing.T) (chunkv1.ChunkStoreClient, func()) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := NewChunkService(store, logger)
+	svc := NewChunkService(store, storeCoordinator{store: store}, logger)
 
 	serverTLS, clientTLS := testMTLSPair(t)
 
@@ -200,6 +214,51 @@ func TestChunkService_RoundTrip(t *testing.T) {
 	_, err = client.Stat(context.Background(), &chunkv1.StatRequest{ChunkId: "demo"})
 	if status.Code(err) != codes.NotFound {
 		t.Errorf("Stat after Delete: got %v, want NotFound", err)
+	}
+}
+
+// TestChunkService_ReplicaWriteAndLocalRead exercises the loop-guard
+// paths: a replica Put stores straight to the local disk and a local_only
+// Get reads straight back, neither touching the replication coordinator.
+func TestChunkService_ReplicaWriteAndLocalRead(t *testing.T) {
+	client, teardown := newTestServer(t)
+	defer teardown()
+
+	payload := []byte("replica payload")
+
+	stream, err := client.Put(context.Background())
+	if err != nil {
+		t.Fatalf("Put open: %v", err)
+	}
+	if err := stream.Send(&chunkv1.PutRequest{Body: &chunkv1.PutRequest_Header{Header: &chunkv1.PutHeader{ChunkId: "rep", Replica: true}}}); err != nil {
+		t.Fatalf("send header: %v", err)
+	}
+	if err := stream.Send(&chunkv1.PutRequest{Body: &chunkv1.PutRequest_Data{Data: payload}}); err != nil {
+		t.Fatalf("send data: %v", err)
+	}
+	if _, err := stream.CloseAndRecv(); err != nil {
+		t.Fatalf("replica put close: %v", err)
+	}
+
+	gstream, err := client.Get(context.Background(), &chunkv1.GetRequest{ChunkId: "rep", LocalOnly: true})
+	if err != nil {
+		t.Fatalf("Get open: %v", err)
+	}
+	var got bytes.Buffer
+	for {
+		msg, err := gstream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("Get recv: %v", err)
+		}
+		if d := msg.GetData(); len(d) > 0 {
+			got.Write(d)
+		}
+	}
+	if !bytes.Equal(got.Bytes(), payload) {
+		t.Errorf("replica round-trip mismatch: got %q, want %q", got.Bytes(), payload)
 	}
 }
 
@@ -379,7 +438,7 @@ func (f *fakeGetServer) Context() context.Context {
 
 func TestChunkService_Put_RecvErrorPropagates(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := NewChunkService(nil, logger)
+	svc := NewChunkService(nil, nil, logger)
 	stream := &fakePutServer{
 		recvErrAt: 0,
 		recvErr:   errors.New("simulated recv failure"),
@@ -396,7 +455,7 @@ func TestChunkService_Put_RecvErrorPropagates(t *testing.T) {
 // stays as a defensive guard against future schema additions.
 func TestChunkService_Put_UnknownOneOfBody(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := NewChunkService(nil, logger)
+	svc := NewChunkService(nil, nil, logger)
 	stream := &fakePutServer{
 		msgs: []*chunkv1.PutRequest{{Body: nil}},
 	}
@@ -416,11 +475,12 @@ func TestChunkService_Get_SendInfoFails(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := NewChunkService(store, logger)
+	svc := NewChunkService(store, nil, logger)
 
-	// Fail the very first Send (the info frame).
+	// Fail the very first Send (the info frame). local_only keeps the read
+	// on the local store so the coordinator is not involved.
 	gs := &fakeGetServer{failAt: 0, sendErr: errors.New("info send boom")}
-	if err := svc.Get(&chunkv1.GetRequest{ChunkId: "g"}, gs); err == nil || !strings.Contains(err.Error(), "info send boom") {
+	if err := svc.Get(&chunkv1.GetRequest{ChunkId: "g", LocalOnly: true}, gs); err == nil || !strings.Contains(err.Error(), "info send boom") {
 		t.Errorf("got %v, want info-send-boom", err)
 	}
 }
@@ -437,10 +497,10 @@ func TestChunkService_Get_SendDataFails(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := NewChunkService(store, logger)
+	svc := NewChunkService(store, nil, logger)
 
 	gs := &fakeGetServer{failAt: 1, sendErr: errors.New("data send boom")}
-	if err := svc.Get(&chunkv1.GetRequest{ChunkId: "g"}, gs); err == nil || !strings.Contains(err.Error(), "data send boom") {
+	if err := svc.Get(&chunkv1.GetRequest{ChunkId: "g", LocalOnly: true}, gs); err == nil || !strings.Contains(err.Error(), "data send boom") {
 		t.Errorf("got %v, want data-send-boom", err)
 	}
 }
@@ -470,7 +530,7 @@ func TestGRPCServer_LifecycleAndAddrIsRaceFree(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverTLS, _ := testMTLSPair(t)
-	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, logger)
+	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, nil, logger)
 
 	if srv.Addr() != "" {
 		t.Errorf("Addr before Start: got %q, want empty", srv.Addr())
@@ -514,7 +574,7 @@ func TestGRPCServer_StartFailsOnBadAddress(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverTLS, _ := testMTLSPair(t)
 
-	srv := NewGRPCServer("not-an-address", serverTLS, store, logger)
+	srv := NewGRPCServer("not-an-address", serverTLS, store, nil, logger)
 	err := srv.Start()
 	if err == nil || !strings.Contains(err.Error(), "SILO_GRPC_ADDR") {
 		t.Errorf("expected SILO_GRPC_ADDR error, got %v", err)
@@ -529,7 +589,7 @@ func TestGRPCServer_ShutdownDeadlineForcesStop(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverTLS, clientTLS := testMTLSPair(t)
 
-	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, logger)
+	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, nil, logger)
 	go func() { _ = srv.Start() }()
 	// Wait until bound.
 	deadline := time.Now().Add(2 * time.Second)
@@ -549,7 +609,10 @@ func TestGRPCServer_ShutdownDeadlineForcesStop(t *testing.T) {
 	client := chunkv1.NewChunkStoreClient(conn)
 	streamCtx, streamCancel := context.WithCancel(context.Background())
 	defer streamCancel()
-	stream, err := client.Get(streamCtx, &chunkv1.GetRequest{ChunkId: "any"})
+	// local_only keeps this lifecycle probe on the local store; the server
+	// was built without a coordinator since this test is about shutdown, not
+	// replication.
+	stream, err := client.Get(streamCtx, &chunkv1.GetRequest{ChunkId: "any", LocalOnly: true})
 	if err == nil {
 		// Drain one msg if available (probably an error since "any" doesn't exist).
 		_, _ = stream.Recv()
