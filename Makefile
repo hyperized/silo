@@ -93,6 +93,7 @@ fuzz: ## Fuzz the parse/merge/placement boundaries on demand (override: make fuz
 	@go test -run='^$$' -fuzz='^FuzzReplicas$$'     -fuzztime=$(FUZZTIME) ./internal/placement/
 	@go test -run='^$$' -fuzz='^FuzzLoadCA$$'       -fuzztime=$(FUZZTIME) ./internal/clustertls/
 	@go test -run='^$$' -fuzz='^FuzzClockMonotonic$$' -fuzztime=$(FUZZTIME) ./internal/hlc/
+	@go test -run='^$$' -fuzz='^FuzzORSetConverges$$' -fuzztime=$(FUZZTIME) ./internal/crdt/
 
 proto: ## Regenerate protobuf and gRPC code. Requires Docker; uses bufbuild/buf.
 	@if ! docker info >/dev/null 2>&1; then \

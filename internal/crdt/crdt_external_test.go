@@ -1,0 +1,122 @@
+package crdt_test
+
+import (
+	"sort"
+	"testing"
+
+	"github.com/hyperized/silo/internal/crdt"
+	"github.com/hyperized/silo/internal/hlc"
+)
+
+func ts(wall int64, node string) hlc.Timestamp {
+	return hlc.Timestamp{Wall: wall, Node: node}
+}
+
+func TestLWWRegister_Merge(t *testing.T) {
+	early := crdt.Set("old", ts(1, "a"))
+	late := crdt.Set("new", ts(2, "a"))
+
+	if got := early.Merge(late); got.Value != "new" {
+		t.Errorf("later write should win: got %q", got.Value)
+	}
+	if got := late.Merge(early); got.Value != "new" {
+		t.Errorf("merge is order-independent: got %q", got.Value)
+	}
+	// A zero-timestamp register loses to any real write.
+	var zero crdt.LWWRegister[string]
+	if got := zero.Merge(early); got.Value != "old" {
+		t.Errorf("real write should beat the zero register: got %q", got.Value)
+	}
+	// Equal timestamps keep the receiver (the node tiebreaker means equal
+	// (wall,logical,node) only happens for the identical write).
+	same := crdt.Set("keep", ts(5, "a"))
+	if got := same.Merge(crdt.Set("other", ts(5, "a"))); got.Value != "keep" {
+		t.Errorf("equal timestamps keep receiver: got %q", got.Value)
+	}
+}
+
+func TestORSet_AddRemoveContains(t *testing.T) {
+	s := crdt.NewORSet[string]()
+	if s.Contains("x") {
+		t.Error("empty set contains nothing")
+	}
+	s.Add("x", ts(1, "a"))
+	if !s.Contains("x") {
+		t.Error("x should be present after Add")
+	}
+	s.Remove("x")
+	if s.Contains("x") {
+		t.Error("x should be gone after Remove tombstones its tag")
+	}
+	// Removing an absent element is a no-op.
+	s.Remove("never-added")
+
+	// Re-adding with a fresh tag revives the element.
+	s.Add("x", ts(2, "a"))
+	if !s.Contains("x") {
+		t.Error("x should be present again after re-Add with a new tag")
+	}
+}
+
+func TestORSet_Elements(t *testing.T) {
+	s := crdt.NewORSet[string]()
+	s.Add("a", ts(1, "n"))
+	s.Add("b", ts(2, "n"))
+	s.Add("c", ts(3, "n"))
+	s.Remove("b")
+
+	got := s.Elements()
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != "a" || got[1] != "c" {
+		t.Errorf("Elements = %v, want [a c]", got)
+	}
+}
+
+func TestORSet_AddWinsOverConcurrentRemove(t *testing.T) {
+	// Replica A adds x@t1. B learns it, then removes x (tombstoning t1).
+	// Concurrently A re-observes... model: A adds x again @t2 (a tag B never
+	// saw). After merge, t2 is live and t1 is tombstoned -> x present.
+	a := crdt.NewORSet[string]()
+	a.Add("x", ts(1, "a"))
+
+	b := a.Clone()
+	b.Remove("x") // tombstones t1, the only tag B has seen
+
+	a.Add("x", ts(2, "a")) // concurrent add with a tag B never observed
+
+	a.Merge(b)
+	if !a.Contains("x") {
+		t.Error("an add concurrent with a remove must survive (add wins)")
+	}
+}
+
+func TestORSet_MergeConverges(t *testing.T) {
+	a := crdt.NewORSet[string]()
+	a.Add("keep", ts(1, "a"))
+	a.Add("drop", ts(2, "a"))
+	a.Remove("drop")
+
+	b := crdt.NewORSet[string]()
+	b.Add("other", ts(3, "b"))
+
+	ab := a.Clone()
+	ab.Merge(b)
+	ba := b.Clone()
+	ba.Merge(a)
+
+	for _, elem := range []string{"keep", "drop", "other"} {
+		if ab.Contains(elem) != ba.Contains(elem) {
+			t.Errorf("merge not commutative for %q: ab=%v ba=%v", elem, ab.Contains(elem), ba.Contains(elem))
+		}
+	}
+	if !ab.Contains("keep") || ab.Contains("drop") || !ab.Contains("other") {
+		t.Errorf("converged state wrong: keep=%v drop=%v other=%v",
+			ab.Contains("keep"), ab.Contains("drop"), ab.Contains("other"))
+	}
+
+	// Idempotent: merging the same delta again changes nothing.
+	ab.Merge(b)
+	if !ab.Contains("keep") || ab.Contains("drop") || !ab.Contains("other") {
+		t.Error("merge is not idempotent")
+	}
+}
