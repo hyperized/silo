@@ -34,10 +34,13 @@ type ChunkService struct {
 	logger *slog.Logger
 }
 
+// NewChunkService wraps a chunkstore.Store as the gRPC ChunkStore service.
 func NewChunkService(store chunkstore.Store, logger *slog.Logger) *ChunkService {
 	return &ChunkService{store: store, logger: logger}
 }
 
+// Put receives a PutHeader followed by zero or more data frames and
+// stores the assembled chunk. Protocol violations return InvalidArgument.
 func (s *ChunkService) Put(stream chunkv1.ChunkStore_PutServer) error {
 	var (
 		chunkID   string
@@ -47,7 +50,7 @@ func (s *ChunkService) Put(stream chunkv1.ChunkStore_PutServer) error {
 
 	for {
 		msg, err := stream.Recv()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -86,6 +89,8 @@ func (s *ChunkService) Put(stream chunkv1.ChunkStore_PutServer) error {
 	return stream.SendAndClose(&chunkv1.PutResponse{Info: toProtoInfo(info)})
 }
 
+// Get streams an Info frame followed by the chunk payload in
+// dataFrameSize-bounded frames so a large chunk stays under gRPC limits.
 func (s *ChunkService) Get(req *chunkv1.GetRequest, stream chunkv1.ChunkStore_GetServer) error {
 	data, info, err := s.store.Get(stream.Context(), req.GetChunkId())
 	if err != nil {
@@ -112,6 +117,7 @@ func (s *ChunkService) Get(req *chunkv1.GetRequest, stream chunkv1.ChunkStore_Ge
 	return nil
 }
 
+// Delete removes a chunk by id. A missing chunk surfaces as NotFound.
 func (s *ChunkService) Delete(ctx context.Context, req *chunkv1.DeleteRequest) (*chunkv1.DeleteResponse, error) {
 	if err := s.store.Delete(ctx, req.GetChunkId()); err != nil {
 		return nil, mapStoreError(err, req.GetChunkId())
@@ -119,6 +125,7 @@ func (s *ChunkService) Delete(ctx context.Context, req *chunkv1.DeleteRequest) (
 	return &chunkv1.DeleteResponse{}, nil
 }
 
+// Stat returns chunk metadata without transferring the payload.
 func (s *ChunkService) Stat(ctx context.Context, req *chunkv1.StatRequest) (*chunkv1.StatResponse, error) {
 	info, err := s.store.Stat(ctx, req.GetChunkId())
 	if err != nil {

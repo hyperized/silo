@@ -31,6 +31,9 @@ const (
 	KeySourceFile KeySource = "file"
 )
 
+// Defaults applied by Load when the matching SILO_* env var is unset.
+// Every value is overridable; these are the documented out-of-the-box
+// listen addresses and tunables.
 const (
 	DefaultGRPCAddr      = "0.0.0.0:7000"
 	DefaultBootstrapAddr = "0.0.0.0:7001"
@@ -44,6 +47,8 @@ const (
 	DefaultLogFormat     = "text"
 )
 
+// Config is silod's fully-resolved runtime configuration. Load builds it
+// from the environment and Validate must pass before it is used.
 type Config struct {
 	NodeID             string
 	GRPCAddr           string
@@ -53,16 +58,16 @@ type Config struct {
 	GossipAddr         string
 	GossipAdvertise    string
 	HTTPAddr           string
-	Seeds           []string
-	Domain          string
-	DataDir         string
-	ChunkSize       int64
-	Replication     int
-	KeySource       KeySource
-	EncryptionKey   []byte
-	KeyPath         string
-	LogLevel        string
-	LogFormat       string
+	Seeds              []string
+	Domain             string
+	DataDir            string
+	ChunkSize          int64
+	Replication        int
+	KeySource          KeySource
+	EncryptionKey      []byte
+	KeyPath            string
+	LogLevel           string
+	LogFormat          string
 
 	// TLS material for inter-node and client traffic. All four paths
 	// default to siblings under DataDir so a fresh silod boots without
@@ -166,7 +171,7 @@ func Load(env EnvFunc) (*Config, error) {
 	if cfg.NodeID == "" {
 		h, err := osHostname()
 		if err != nil {
-			return nil, fmt.Errorf("could not derive a node id from the OS hostname (%v); set SILO_NODE_ID explicitly to a stable, unique value", err)
+			return nil, fmt.Errorf("could not derive a node id from the OS hostname (%w); set SILO_NODE_ID explicitly to a stable, unique value", err)
 		}
 		cfg.NodeID = h
 	}
@@ -207,8 +212,9 @@ func Load(env EnvFunc) (*Config, error) {
 	return cfg, nil
 }
 
-// Validate's errors are intentionally instruction-shaped: see the
-// "errors are instructions" project rule.
+// Validate returns instruction-shaped errors: each message names the
+// env var to set and a sane example, per the "errors are instructions"
+// project rule.
 func (c *Config) Validate() error {
 	if c.NodeID == "" {
 		return errors.New("node id is empty; set SILO_NODE_ID explicitly, or run on a host with a non-empty hostname")
@@ -337,7 +343,7 @@ func loadEncryptionKey(env EnvFunc, cfg *Config) error {
 		}
 		key, err := base64.StdEncoding.DecodeString(raw)
 		if err != nil {
-			return fmt.Errorf("SILO_ENCRYPTION_KEY must be a valid base64-encoded value (%v); regenerate with: openssl rand -base64 32", err)
+			return fmt.Errorf("SILO_ENCRYPTION_KEY must be a valid base64-encoded value (%w); regenerate with: openssl rand -base64 32", err)
 		}
 		if len(key) != 32 {
 			return fmt.Errorf("SILO_ENCRYPTION_KEY must decode to 32 bytes (AES-256 key length), got %d bytes; regenerate with: openssl rand -base64 32", len(key))

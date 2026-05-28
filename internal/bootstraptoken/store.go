@@ -194,7 +194,7 @@ func (s *Store) load() error {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("bootstraptoken: could not read the token store at %s (%v); check the file is readable by silod or remove it to start fresh", s.path, err)
+		return fmt.Errorf("bootstraptoken: could not read the token store at %s (%w); check the file is readable by silod or remove it to start fresh", s.path, err)
 	}
 	if len(raw) == 0 {
 		s.tokens = nil
@@ -202,7 +202,7 @@ func (s *Store) load() error {
 	}
 	var tokens []Token
 	if err := json.Unmarshal(raw, &tokens); err != nil {
-		return fmt.Errorf("bootstraptoken: the token store at %s is not valid JSON (%v); remove the file so silod can recreate it on the next mint", s.path, err)
+		return fmt.Errorf("bootstraptoken: the token store at %s is not valid JSON (%w); remove the file so silod can recreate it on the next mint", s.path, err)
 	}
 	s.tokens = tokens
 	return nil
@@ -214,15 +214,15 @@ func (s *Store) load() error {
 func (s *Store) persistLocked() error {
 	data, err := json.MarshalIndent(s.tokens, "", "  ")
 	if err != nil {
-		return fmt.Errorf("bootstraptoken: could not serialise the token store (%v); this is a programming error", err)
+		return fmt.Errorf("bootstraptoken: could not serialise the token store (%w); this is a programming error", err)
 	}
 	tmp := s.path + ".tmp"
 	if err := os.WriteFile(tmp, data, defaultStoreMode); err != nil {
-		return fmt.Errorf("bootstraptoken: could not write the temp token store at %s (%v); check %s is on a writable filesystem and silod has permission", tmp, err, filepath.Dir(tmp))
+		return fmt.Errorf("bootstraptoken: could not write the temp token store at %s (%w); check %s is on a writable filesystem and silod has permission", tmp, err, filepath.Dir(tmp))
 	}
 	if err := os.Rename(tmp, s.path); err != nil {
 		_ = os.Remove(tmp)
-		return fmt.Errorf("bootstraptoken: could not rename the temp token store into place at %s (%v); the partial file at %s was removed", s.path, err, tmp)
+		return fmt.Errorf("bootstraptoken: could not rename the temp token store into place at %s (%w); the partial file at %s was removed", s.path, err, tmp)
 	}
 	return nil
 }
@@ -239,7 +239,7 @@ var randRead = rand.Read
 func generateToken() (string, error) {
 	buf := make([]byte, defaultTokenBytes)
 	if _, err := randRead(buf); err != nil {
-		return "", fmt.Errorf("bootstraptoken: could not draw entropy for a new token (%v); the host entropy pool may be exhausted", err)
+		return "", fmt.Errorf("bootstraptoken: could not draw entropy for a new token (%w); the host entropy pool may be exhausted", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }

@@ -234,7 +234,7 @@ func (s *Subsystem) Addr() string {
 func (s *Subsystem) Start() error {
 	ln, err := net.Listen("tcp", s.opts.Addr)
 	if err != nil {
-		return fmt.Errorf("gossip: could not bind listener at %q (%v); set SILO_GOSSIP_ADDR to a free host:port, e.g. 0.0.0.0:7100", s.opts.Addr, err)
+		return fmt.Errorf("gossip: could not bind listener at %q (%w); set SILO_GOSSIP_ADDR to a free host:port, e.g. 0.0.0.0:7100", s.opts.Addr, err)
 	}
 	s.mu.Lock()
 	s.ln = ln
@@ -295,7 +295,7 @@ func (s *Subsystem) Shutdown(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("gossip: shutdown deadline expired (%v); increase the shutdown budget or investigate stuck probes", ctx.Err())
+		return fmt.Errorf("gossip: shutdown deadline expired (%w); increase the shutdown budget or investigate stuck probes", ctx.Err())
 	}
 }
 

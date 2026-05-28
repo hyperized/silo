@@ -192,13 +192,13 @@ func defaultLoadClusterTLS(cfg *config.Config) (*clustertls.CA, *clustertls.Node
 
 	certPEM, err := os.ReadFile(cfg.CACertPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("could not read the cluster CA certificate at %s (%v); delete the file so silod can mint a fresh one, or point SILO_TLS_CA_CERT at a CA cert generated elsewhere", cfg.CACertPath, err)
+		return nil, nil, fmt.Errorf("could not read the cluster CA certificate at %s (%w); delete the file so silod can mint a fresh one, or point SILO_TLS_CA_CERT at a CA cert generated elsewhere", cfg.CACertPath, err)
 	}
 	var keyPEM []byte
 	if caKeyPresent {
 		keyPEM, err = os.ReadFile(cfg.CAKeyPath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("could not read the cluster CA key at %s (%v); either remove SILO_TLS_CA_KEY (this silod will not be able to mint its own node cert) or point it at a readable key file", cfg.CAKeyPath, err)
+			return nil, nil, fmt.Errorf("could not read the cluster CA key at %s (%w); either remove SILO_TLS_CA_KEY (this silod will not be able to mint its own node cert) or point it at a readable key file", cfg.CAKeyPath, err)
 		}
 	}
 	ca, err := clustertls.LoadCA(certPEM, keyPEM)
@@ -222,18 +222,18 @@ func defaultLoadClusterTLS(cfg *config.Config) (*clustertls.CA, *clustertls.Node
 // apart without having to read the certificate serials.
 func mintClusterCA(certPath, keyPath, nodeID string) error {
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
-		return fmt.Errorf("could not create the directory for the cluster CA at %s (%v); check the parent path is on a writable filesystem and silod has permission", certPath, err)
+		return fmt.Errorf("could not create the directory for the cluster CA at %s (%w); check the parent path is on a writable filesystem and silod has permission", certPath, err)
 	}
 	certPEM, keyPEM, err := generateCA("silo-"+nodeID, defaultClusterCALifetime)
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
-		return fmt.Errorf("could not write the newly-minted cluster CA cert to %s (%v); check the data directory is writable", certPath, err)
+		return fmt.Errorf("could not write the newly-minted cluster CA cert to %s (%w); check the data directory is writable", certPath, err)
 	}
 	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
 		_ = os.Remove(certPath)
-		return fmt.Errorf("could not write the newly-minted cluster CA key to %s (%v); the partial cert at %s was removed", keyPath, err, certPath)
+		return fmt.Errorf("could not write the newly-minted cluster CA key to %s (%w); the partial cert at %s was removed", keyPath, err, certPath)
 	}
 	return nil
 }
@@ -278,12 +278,12 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 
 	cipher, err := crypto.NewCipher(cfg.EncryptionKey)
 	if err != nil {
-		return fmt.Errorf("silod.Run: could not initialise the cluster encryption key (%v); regenerate SILO_ENCRYPTION_KEY with: openssl rand -base64 32", err)
+		return fmt.Errorf("silod.Run: could not initialise the cluster encryption key (%w); regenerate SILO_ENCRYPTION_KEY with: openssl rand -base64 32", err)
 	}
 
 	store, err := newChunkStore(cfg, cipher)
 	if err != nil {
-		return fmt.Errorf("silod.Run: could not open the chunk store (%v); check SILO_DATA_DIR is on a writable filesystem and silod has permission", err)
+		return fmt.Errorf("silod.Run: could not open the chunk store (%w); check SILO_DATA_DIR is on a writable filesystem and silod has permission", err)
 	}
 
 	ca, nodeCert, err := loadClusterTLS(cfg)

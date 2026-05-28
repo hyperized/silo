@@ -36,7 +36,7 @@ func LoadOrMintNode(dir string, ca *CA, nodeID string, dnsNames []string, ipAddr
 	}
 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("silo: could not create the TLS material directory at %s (%v); check the path is on a writable filesystem and silod has permission", dir, err)
+		return nil, fmt.Errorf("silo: could not create the TLS material directory at %s (%w); check the path is on a writable filesystem and silod has permission", dir, err)
 	}
 
 	nc, err := MintNodeCert(ca, nodeID, dnsNames, ipAddrs, DefaultNodeCertLifetime)
@@ -45,21 +45,23 @@ func LoadOrMintNode(dir string, ca *CA, nodeID string, dnsNames []string, ipAddr
 	}
 
 	if err := writeAtomic(certPath, nc.CertPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("silo: could not write the new node certificate to %s (%v); check the data directory has free space and silod can write to it", certPath, err)
+		return nil, fmt.Errorf("silo: could not write the new node certificate to %s (%w); check the data directory has free space and silod can write to it", certPath, err)
 	}
 	if err := writeAtomic(keyPath, nc.KeyPEM, 0o600); err != nil {
 		_ = os.Remove(certPath)
-		return nil, fmt.Errorf("silo: could not write the new node key to %s (%v); the partial cert at %s was removed — check the data directory has free space and silod can write to it", keyPath, err, certPath)
+		return nil, fmt.Errorf("silo: could not write the new node key to %s (%w); the partial cert at %s was removed — check the data directory has free space and silod can write to it", keyPath, err, certPath)
 	}
 	return nc, nil
 }
 
 func loadIfPresent(certPath, keyPath string) (*NodeCert, bool) {
-	certPEM, err := os.ReadFile(certPath)
+	// Paths come from operator-supplied config (SILO_TLS_*), not request
+	// input, so directory traversal is not a concern here.
+	certPEM, err := os.ReadFile(certPath) // #nosec G304
 	if err != nil {
 		return nil, false
 	}
-	keyPEM, err := os.ReadFile(keyPath)
+	keyPEM, err := os.ReadFile(keyPath) // #nosec G304
 	if err != nil {
 		return nil, false
 	}
@@ -80,7 +82,8 @@ type syncCloser interface {
 // the os package; tests swap them per test under t.Cleanup.
 var (
 	openExclusiveFile = func(path string, mode os.FileMode) (syncCloser, error) {
-		return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, mode)
+		// path is derived from operator-supplied config, not request input.
+		return os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC|os.O_EXCL, mode) // #nosec G304
 	}
 	osRename = os.Rename
 	osRemove = os.Remove

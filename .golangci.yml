@@ -13,6 +13,16 @@ linters:
     - revive
     - unconvert
     - unparam
+  settings:
+    errcheck:
+      # Writes to stdout/stderr/http.ResponseWriter from the CLI and the
+      # health/metrics handlers have no actionable failure mode — there is
+      # nowhere left to report a failed write to the user's terminal — so
+      # the print family is excluded rather than peppered with `_, _ =`.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
   exclusions:
     rules:
       - path: _test\.go

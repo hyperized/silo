@@ -68,7 +68,7 @@ type Message struct {
 func writeMessage(w io.Writer, msg *Message) error {
 	body, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("gossip: could not encode %s message (%v); this is a programmer bug, please file a bug at https://github.com/hyperized/silo/issues", msg.Kind, err)
+		return fmt.Errorf("gossip: could not encode %s message (%w); this is a programmer bug, please file a bug at https://github.com/hyperized/silo/issues", msg.Kind, err)
 	}
 	if len(body) > MaxMessageBytes {
 		return fmt.Errorf("gossip: %s message is %d bytes; the per-message cap is %d — this usually means the membership table is unexpectedly large, please file a bug at https://github.com/hyperized/silo/issues with the cluster size", msg.Kind, len(body), MaxMessageBytes)
@@ -107,7 +107,7 @@ func readMessage(r io.Reader) (*Message, error) {
 	}
 	var msg Message
 	if err := json.Unmarshal(buf, &msg); err != nil {
-		return nil, fmt.Errorf("gossip: could not decode frame body (%v); the peer is sending malformed gossip — check that both sides are on the same silod version", err)
+		return nil, fmt.Errorf("gossip: could not decode frame body (%w); the peer is sending malformed gossip — check that both sides are on the same silod version", err)
 	}
 	return &msg, nil
 }

@@ -51,7 +51,7 @@ func NewServer(addr, nodeID, version string, logger *slog.Logger) *Server {
 func (s *Server) Start() error {
 	ln, err := net.Listen("tcp", s.srv.Addr)
 	if err != nil {
-		return fmt.Errorf("could not bind HTTP listener at %q (%v); set SILO_HTTP_ADDR to a host:port that is free and reachable, e.g. 0.0.0.0:7080", s.srv.Addr, err)
+		return fmt.Errorf("could not bind HTTP listener at %q (%w); set SILO_HTTP_ADDR to a host:port that is free and reachable, e.g. 0.0.0.0:7080", s.srv.Addr, err)
 	}
 	s.mu.Lock()
 	s.ln = ln

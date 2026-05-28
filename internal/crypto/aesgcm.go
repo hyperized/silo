@@ -145,7 +145,7 @@ func (c *Cipher) DecryptChunk(envelope []byte) ([]byte, error) {
 func readRandom(n int, purpose string) ([]byte, error) {
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
-		return nil, fmt.Errorf("silo: could not read random bytes for the %s (%v); the system entropy pool may be exhausted, check /dev/random availability", purpose, err)
+		return nil, fmt.Errorf("silo: could not read random bytes for the %s (%w); the system entropy pool may be exhausted, check /dev/random availability", purpose, err)
 	}
 	return buf, nil
 }

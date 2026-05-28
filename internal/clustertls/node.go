@@ -42,17 +42,17 @@ func MintNodeCert(ca *CA, nodeID string, dnsNames []string, ipAddrs []net.IP, va
 
 	pub, priv, err := ed25519GenerateKey(randReader)
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not generate the node TLS key (%v); the system entropy pool may be exhausted", err)
+		return nil, fmt.Errorf("silo: could not generate the node TLS key (%w); the system entropy pool may be exhausted", err)
 	}
 
 	serial, err := randInt(new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not generate the node certificate serial number (%v); the system entropy pool may be exhausted", err)
+		return nil, fmt.Errorf("silo: could not generate the node certificate serial number (%w); the system entropy pool may be exhausted", err)
 	}
 
 	spiffeURI, err := url.Parse("spiffe://silo/node/" + nodeID)
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not encode the node identity as a SPIFFE URI (%v); the node id %q may contain characters that are invalid in a URI", err, nodeID)
+		return nil, fmt.Errorf("silo: could not encode the node identity as a SPIFFE URI (%w); the node id %q may contain characters that are invalid in a URI", err, nodeID)
 	}
 
 	template := &x509.Certificate{
@@ -72,12 +72,12 @@ func MintNodeCert(ca *CA, nodeID string, dnsNames []string, ipAddrs []net.IP, va
 
 	der, err := x509CreateCertificate(randReader, template, ca.Cert, pub, ca.Key)
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not sign the node certificate (%v); please file a bug at https://github.com/hyperized/silo/issues", err)
+		return nil, fmt.Errorf("silo: could not sign the node certificate (%w); please file a bug at https://github.com/hyperized/silo/issues", err)
 	}
 
 	keyDER, err := x509MarshalPKCS8PrivateKey(priv)
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not encode the node TLS key in PKCS#8 (%v); please file a bug at https://github.com/hyperized/silo/issues", err)
+		return nil, fmt.Errorf("silo: could not encode the node TLS key in PKCS#8 (%w); please file a bug at https://github.com/hyperized/silo/issues", err)
 	}
 
 	return &NodeCert{
@@ -91,7 +91,7 @@ func MintNodeCert(ca *CA, nodeID string, dnsNames []string, ipAddrs []net.IP, va
 func (n *NodeCert) AsTLSCertificate() (tls.Certificate, error) {
 	cert, err := tls.X509KeyPair(n.CertPEM, n.KeyPEM)
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("silo: node cert and key do not pair (%v); regenerate the node identity by removing node.crt and node.key from the data directory and restarting silod", err)
+		return tls.Certificate{}, fmt.Errorf("silo: node cert and key do not pair (%w); regenerate the node identity by removing node.crt and node.key from the data directory and restarting silod", err)
 	}
 	return cert, nil
 }
@@ -115,17 +115,17 @@ func MintClientCert(ca *CA, principal string, validFor time.Duration) (*NodeCert
 
 	pub, priv, err := ed25519GenerateKey(randReader)
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not generate the client TLS key (%v); the system entropy pool may be exhausted", err)
+		return nil, fmt.Errorf("silo: could not generate the client TLS key (%w); the system entropy pool may be exhausted", err)
 	}
 
 	serial, err := randInt(new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not generate the client certificate serial number (%v); the system entropy pool may be exhausted", err)
+		return nil, fmt.Errorf("silo: could not generate the client certificate serial number (%w); the system entropy pool may be exhausted", err)
 	}
 
 	spiffeURI, err := url.Parse("spiffe://silo/client/" + principal)
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not encode the principal %q as a SPIFFE URI (%v); use a value that is valid in a URI path", principal, err)
+		return nil, fmt.Errorf("silo: could not encode the principal %q as a SPIFFE URI (%w); use a value that is valid in a URI path", principal, err)
 	}
 
 	template := &x509.Certificate{
@@ -143,12 +143,12 @@ func MintClientCert(ca *CA, principal string, validFor time.Duration) (*NodeCert
 
 	der, err := x509CreateCertificate(randReader, template, ca.Cert, pub, ca.Key)
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not sign the client certificate (%v); please file a bug at https://github.com/hyperized/silo/issues", err)
+		return nil, fmt.Errorf("silo: could not sign the client certificate (%w); please file a bug at https://github.com/hyperized/silo/issues", err)
 	}
 
 	keyDER, err := x509MarshalPKCS8PrivateKey(priv)
 	if err != nil {
-		return nil, fmt.Errorf("silo: could not encode the client TLS key in PKCS#8 (%v); please file a bug at https://github.com/hyperized/silo/issues", err)
+		return nil, fmt.Errorf("silo: could not encode the client TLS key in PKCS#8 (%w); please file a bug at https://github.com/hyperized/silo/issues", err)
 	}
 
 	return &NodeCert{

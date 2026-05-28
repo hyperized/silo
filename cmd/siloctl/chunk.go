@@ -75,13 +75,14 @@ func loadClientTLS() (*tls.Config, error) {
 		return nil, nil
 	}
 
-	caBytes, err := os.ReadFile(caPath)
+	// caPath is from the operator's own config dir / env, not request input.
+	caBytes, err := os.ReadFile(caPath) // #nosec G304
 	if err != nil {
-		return nil, fmt.Errorf("siloctl: could not read CA cert at %s (%v); remove the file or fix the path with SILO_CA_CERT", caPath, err)
+		return nil, fmt.Errorf("siloctl: could not read CA cert at %s (%w); remove the file or fix the path with SILO_CA_CERT", caPath, err)
 	}
 	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("siloctl: could not load client cert+key from %s / %s (%v); regenerate them with 'siloctl auth init'", certPath, keyPath, err)
+		return nil, fmt.Errorf("siloctl: could not load client cert+key from %s / %s (%w); regenerate them with 'siloctl auth init'", certPath, keyPath, err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(caBytes) {
@@ -208,14 +209,14 @@ func runChunkPut(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "siloctl: could not open %q for reading (%v); check the path exists and you have read permission\n", path, err)
 		return 1
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 
 	conn, err := dialer(*server)
 	if err != nil {
 		fmt.Fprintf(stderr, "siloctl: could not dial silod at %q (%v); check that silod is running and SILO_SERVER points at its gRPC address\n", *server, err)
 		return 1
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	client := newChunkClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
@@ -266,15 +267,23 @@ func runChunkGet(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	id := rest[0]
-	var sink io.Writer = stdout
+	sink := stdout
+	var (
+		out     *os.File
+		outPath string
+	)
 	if len(rest) == 2 {
-		path := rest[1]
-		f, err := os.Create(path)
+		outPath = rest[1]
+		f, err := os.Create(outPath) // #nosec G304 -- operator's own CLI destination path
 		if err != nil {
-			fmt.Fprintf(stderr, "siloctl: could not open %q for writing (%v); check the parent directory exists and is writable\n", path, err)
+			fmt.Fprintf(stderr, "siloctl: could not open %q for writing (%v); check the parent directory exists and is writable\n", outPath, err)
 			return 1
 		}
-		defer f.Close()
+		// Safety net for the error-return paths below; the success path
+		// closes explicitly and checks the result, since a failed flush
+		// on close means the chunk was not fully written.
+		defer func() { _ = f.Close() }()
+		out = f
 		sink = f
 	}
 
@@ -283,7 +292,7 @@ func runChunkGet(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "siloctl: could not dial silod at %q (%v); check that silod is running and SILO_SERVER points at its gRPC address\n", *server, err)
 		return 1
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	client := newChunkClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
@@ -309,6 +318,12 @@ func runChunkGet(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	}
+	if out != nil {
+		if err := out.Close(); err != nil {
+			fmt.Fprintf(stderr, "siloctl: could not finalize %q (%v); the chunk may be incompletely written — re-run the get\n", outPath, err)
+			return 1
+		}
+	}
 	return 0
 }
 
@@ -329,7 +344,7 @@ func runChunkDelete(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "siloctl: could not dial silod at %q (%v); check that silod is running and SILO_SERVER points at its gRPC address\n", *server, err)
 		return 1
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	client := newChunkClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
@@ -358,7 +373,7 @@ func runChunkStat(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "siloctl: could not dial silod at %q (%v); check that silod is running and SILO_SERVER points at its gRPC address\n", *server, err)
 		return 1
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	client := newChunkClient(conn)
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
@@ -383,7 +398,7 @@ func openInput(path string, stdin io.Reader) (io.ReadCloser, error) {
 	if path == "-" {
 		return io.NopCloser(stdin), nil
 	}
-	return os.Open(path)
+	return os.Open(path) // #nosec G304 -- operator's own CLI source path
 }
 
 // reportRPC turns a gRPC error into an actionable stderr line. Known

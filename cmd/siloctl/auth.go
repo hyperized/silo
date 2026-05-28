@@ -57,7 +57,7 @@ var authDialer = func(target string, tlsCfg *tls.Config) (*grpc.ClientConn, erro
 var userConfigDir = func() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("could not determine the user config dir (%v); pass --config-dir to siloctl explicitly", err)
+		return "", fmt.Errorf("could not determine the user config dir (%w); pass --config-dir to siloctl explicitly", err)
 	}
 	return filepath.Join(dir, "silo"), nil
 }
@@ -136,7 +136,7 @@ func runAuthInit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "siloctl auth init: could not dial silod at %q (%v); check the server address and that the bootstrap listener is up\n", *server, err)
 		return 1
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
@@ -181,12 +181,13 @@ func runAuthStatus(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	caBytes, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	// dir is the operator's own config dir (per-user or --config-dir), not request input.
+	caBytes, err := os.ReadFile(filepath.Join(dir, "ca.crt")) // #nosec G304
 	if err != nil {
 		fmt.Fprintf(stderr, "siloctl auth status: no cluster credentials at %s (%v); run 'siloctl auth init --token … --server …' first\n", dir, err)
 		return 1
 	}
-	clientBytes, err := os.ReadFile(filepath.Join(dir, "client.crt"))
+	clientBytes, err := os.ReadFile(filepath.Join(dir, "client.crt")) // #nosec G304
 	if err != nil {
 		fmt.Fprintf(stderr, "siloctl auth status: no client cert at %s (%v); run 'siloctl auth init' to claim one\n", dir, err)
 		return 1
@@ -254,7 +255,7 @@ func buildBootstrapTLSConfig(fingerprint, serverName string) (*tls.Config, *fpCh
 
 func writeAuthMaterial(dir string, caPEM, certPEM, keyPEM []byte, server, grpcServer, principal string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("could not create %s (%v); pick a writable path with --config-dir", dir, err)
+		return fmt.Errorf("could not create %s (%w); pick a writable path with --config-dir", dir, err)
 	}
 	files := []struct {
 		name string
@@ -268,22 +269,22 @@ func writeAuthMaterial(dir string, caPEM, certPEM, keyPEM []byte, server, grpcSe
 	for _, f := range files {
 		path := filepath.Join(dir, f.name)
 		if err := os.WriteFile(path, f.data, f.mode); err != nil {
-			return fmt.Errorf("could not write %s (%v); check the path is on a writable filesystem", path, err)
+			return fmt.Errorf("could not write %s (%w); check the path is on a writable filesystem", path, err)
 		}
 	}
 	cfg := authConfig{DefaultServer: server, DefaultGRPCServer: grpcServer, Principal: principal, IssuedAt: time.Now().UTC().Format(time.RFC3339)}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return fmt.Errorf("could not serialise siloctl config (%v); this is a programming error", err)
+		return fmt.Errorf("could not serialise siloctl config (%w); this is a programming error", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0o600); err != nil {
-		return fmt.Errorf("could not write %s/config.json (%v); check the path is on a writable filesystem", dir, err)
+		return fmt.Errorf("could not write %s/config.json (%w); check the path is on a writable filesystem", dir, err)
 	}
 	return nil
 }
 
 func loadAuthConfig(dir string) (authConfig, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	raw, err := os.ReadFile(filepath.Join(dir, "config.json")) // #nosec G304 -- operator's own config dir
 	if err != nil {
 		return authConfig{}, err
 	}

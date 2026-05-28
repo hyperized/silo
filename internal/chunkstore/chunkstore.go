@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+// Sentinel errors callers match with errors.Is to branch on outcome
+// (e.g. the gRPC layer maps ErrNotFound to codes.NotFound). The message
+// text is the human-facing instruction; the identity is the contract.
 var (
 	ErrNotFound  = errors.New("silo: chunk not found at this node — the chunk may live on a different replica or have been deleted; try another node, or restore from a healthy replica")
 	ErrInvalidID = errors.New("silo: chunk id is invalid — chunk ids must be 1-128 characters consisting of ASCII letters, digits, dashes, and underscores")

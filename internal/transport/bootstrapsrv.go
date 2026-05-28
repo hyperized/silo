@@ -48,7 +48,7 @@ func NewBootstrapServer(addr string, tlsCfg *tls.Config, svc *BootstrapService, 
 func (s *BootstrapServer) Start() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
-		return fmt.Errorf("could not bind bootstrap listener at %q (%v); set SILO_BOOTSTRAP_ADDR to a free, reachable host:port, e.g. 0.0.0.0:7001", s.addr, err)
+		return fmt.Errorf("could not bind bootstrap listener at %q (%w); set SILO_BOOTSTRAP_ADDR to a free, reachable host:port, e.g. 0.0.0.0:7001", s.addr, err)
 	}
 	s.mu.Lock()
 	s.ln = ln
@@ -84,6 +84,6 @@ func (s *BootstrapServer) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		s.server.Stop()
-		return fmt.Errorf("bootstrap shutdown deadline expired (%v); in-flight RPCs were terminated forcefully — increase the shutdown budget or investigate slow handlers", ctx.Err())
+		return fmt.Errorf("bootstrap shutdown deadline expired (%w); in-flight RPCs were terminated forcefully — increase the shutdown budget or investigate slow handlers", ctx.Err())
 	}
 }
