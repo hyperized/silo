@@ -13,7 +13,7 @@ import (
 // observe convergence. White-box tests for the merge rule table live
 // in membership_internal_test.go.
 func TestMembership_PublicSurface(t *testing.T) {
-	m, err := membership.New("alpha", "alpha:7100")
+	m, err := membership.New("alpha", "alpha:7100", "alpha:7000")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -72,6 +72,47 @@ func TestMembership_PublicSurface(t *testing.T) {
 	}
 }
 
+func TestMembership_DataAddressPropagates(t *testing.T) {
+	m, err := membership.New("alpha", "alpha:7100", "alpha:7000")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := m.Self().DataAddress; got != "alpha:7000" {
+		t.Errorf("Self data address: got %q, want alpha:7000", got)
+	}
+
+	// A peer's data address arrives on its first event and is retained.
+	m.Apply(membership.Event{ID: "beta", Address: "beta:7100", DataAddress: "beta:7000", State: membership.StateAlive, Incarnation: 1})
+	if n, _ := m.Lookup("beta"); n.DataAddress != "beta:7000" {
+		t.Fatalf("beta data address after insert: got %q, want beta:7000", n.DataAddress)
+	}
+
+	// A newer event that omits the data address must not blank the one we
+	// already learned — preferNonEmpty keeps it (e.g. a Suspect event
+	// minted by a peer that never recorded beta's data plane).
+	m.Apply(membership.Event{ID: "beta", State: membership.StateSuspect, Incarnation: 2})
+	if n, _ := m.Lookup("beta"); n.DataAddress != "beta:7000" {
+		t.Errorf("beta data address must survive a data-address-less merge: got %q", n.DataAddress)
+	}
+
+	// A newer event carrying a changed data address updates it.
+	m.Apply(membership.Event{ID: "beta", DataAddress: "beta-moved:7000", State: membership.StateAlive, Incarnation: 3})
+	if n, _ := m.Lookup("beta"); n.DataAddress != "beta-moved:7000" {
+		t.Errorf("beta data address should update on a newer event: got %q", n.DataAddress)
+	}
+
+	// Mark* events must carry the data address so the broadcast that
+	// announces a failure still teaches receivers where the node's data
+	// plane was — the re-replication path needs it even for a dead node.
+	ev, ok := m.MarkDead("beta")
+	if !ok {
+		t.Fatal("MarkDead should report a change")
+	}
+	if ev.DataAddress != "beta-moved:7000" {
+		t.Errorf("MarkDead event data address: got %q, want beta-moved:7000", ev.DataAddress)
+	}
+}
+
 func TestMembership_PruneRemovesDeadAfterRetention(t *testing.T) {
 	// Drive the clock forward through Now so retention takes effect
 	// without sleeping.
@@ -81,7 +122,7 @@ func TestMembership_PruneRemovesDeadAfterRetention(t *testing.T) {
 	current := t0
 	membership.Now = func() time.Time { return current }
 
-	m, err := membership.New("self", "self:7100")
+	m, err := membership.New("self", "self:7100", "self:7000")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -107,7 +148,7 @@ func TestMembership_PruneRemovesDeadAfterRetention(t *testing.T) {
 }
 
 func TestMembership_SnapshotIsADeepCopy(t *testing.T) {
-	m, _ := membership.New("self", "")
+	m, _ := membership.New("self", "", "")
 	m.Apply(membership.Event{ID: "p", Address: "p:1", State: membership.StateAlive, Incarnation: 1})
 	snap := m.Snapshot()
 	for i := range snap {

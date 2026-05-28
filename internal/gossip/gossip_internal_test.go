@@ -38,7 +38,7 @@ func dummyTLS() *tls.Config { return &tls.Config{MinVersion: tls.VersionTLS13} }
 
 func newTestSubsystem(t *testing.T, selfID, addr string, seeds []string, logger *slog.Logger) *Subsystem {
 	t.Helper()
-	m, err := membership.New(selfID, addr)
+	m, err := membership.New(selfID, addr, addr)
 	if err != nil {
 		t.Fatalf("membership.New: %v", err)
 	}
@@ -63,7 +63,7 @@ func newTestSubsystem(t *testing.T, selfID, addr string, seeds []string, logger 
 
 func TestNew_ValidatesArgs(t *testing.T) {
 	logger := discardLogger()
-	m, _ := membership.New("self", "self:1")
+	m, _ := membership.New("self", "self:1", "self:2")
 
 	if _, err := New(nil, Options{Addr: "a:1", ServerTLS: dummyTLS(), ClientTLS: dummyTLS()}, logger); err == nil {
 		t.Error("nil membership should fail")
@@ -81,7 +81,7 @@ func TestNew_ValidatesArgs(t *testing.T) {
 
 func TestNew_RefusesSelfSeed(t *testing.T) {
 	logger := discardLogger()
-	m, _ := membership.New("alpha", "alpha:7100")
+	m, _ := membership.New("alpha", "alpha:7100", "alpha:7000")
 	_, err := New(m, Options{
 		Addr:      "alpha:7100",
 		Seeds:     []string{"alpha:7100"},
@@ -95,7 +95,7 @@ func TestNew_RefusesSelfSeed(t *testing.T) {
 
 func TestNew_RefusesSelfSeedByNodeID(t *testing.T) {
 	logger := discardLogger()
-	m, _ := membership.New("alpha", "alpha:7100")
+	m, _ := membership.New("alpha", "alpha:7100", "alpha:7000")
 	_, err := New(m, Options{
 		Addr:      "0.0.0.0:7100",
 		Seeds:     []string{"alpha"},
@@ -109,7 +109,7 @@ func TestNew_RefusesSelfSeedByNodeID(t *testing.T) {
 
 func TestNew_EmptySeedEntriesAreIgnored(t *testing.T) {
 	logger := discardLogger()
-	m, _ := membership.New("alpha", "alpha:7100")
+	m, _ := membership.New("alpha", "alpha:7100", "alpha:7000")
 	_, err := New(m, Options{
 		Addr:      "alpha:7100",
 		Seeds:     []string{""},

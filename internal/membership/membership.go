@@ -75,6 +75,12 @@ type Node struct {
 	// entries that were learned only as "this name exists" before a
 	// concrete probe target was attached.
 	Address string
+	// DataAddress is the host:port other nodes dial to reach this peer's
+	// gRPC data plane (chunk replication and reads). It rides gossip
+	// alongside Address so placement can resolve a node id to a dial
+	// target without a separate lookup service. Empty until the peer's
+	// own advertisement has propagated.
+	DataAddress string
 	// State is the SWIM state for this peer at the moment Snapshot was
 	// called.
 	State State
@@ -95,6 +101,7 @@ type Node struct {
 type Event struct {
 	ID          string    `json:"id"`
 	Address     string    `json:"address,omitempty"`
+	DataAddress string    `json:"data_address,omitempty"`
 	State       State     `json:"state"`
 	Incarnation uint64    `json:"incarnation"`
 	At          time.Time `json:"at,omitempty"`
@@ -117,13 +124,14 @@ type Membership struct {
 	members map[string]Node
 }
 
-// New constructs a Membership rooted at the local node id and address.
-// Both arguments are required: the local node is the only entry whose
-// incarnation this process owns, and a fresh table without it would
-// drop self-refutations on the floor. selfAddr is the host:port other
-// peers should dial to gossip with us — surfaced so peers learn our
-// dial address as part of their first received event from us.
-func New(selfID, selfAddr string) (*Membership, error) {
+// New constructs a Membership rooted at the local node id. selfID is
+// required: the local node is the only entry whose incarnation this
+// process owns, and a fresh table without it would drop self-refutations
+// on the floor. selfAddr is the host:port peers should dial to gossip
+// with us; selfDataAddr is the host:port peers should dial to reach our
+// gRPC data plane. Both are surfaced so peers learn our dial targets from
+// the first event they receive from us.
+func New(selfID, selfAddr, selfDataAddr string) (*Membership, error) {
 	if selfID == "" {
 		return nil, errors.New("membership: selfID is empty; pass cfg.NodeID")
 	}
@@ -135,6 +143,7 @@ func New(selfID, selfAddr string) (*Membership, error) {
 	m.members[selfID] = Node{
 		ID:          selfID,
 		Address:     selfAddr,
+		DataAddress: selfDataAddr,
 		State:       StateAlive,
 		Incarnation: 0,
 		LastChange:  now,
@@ -266,6 +275,7 @@ func (m *Membership) applyLocked(ev Event) (Node, bool) {
 		n := Node{
 			ID:          ev.ID,
 			Address:     ev.Address,
+			DataAddress: ev.DataAddress,
 			State:       ev.State,
 			Incarnation: ev.Incarnation,
 			LastChange:  now,
@@ -276,6 +286,7 @@ func (m *Membership) applyLocked(ev Event) (Node, bool) {
 	// Higher incarnation always wins.
 	if ev.Incarnation > cur.Incarnation {
 		cur.Address = preferNonEmpty(ev.Address, cur.Address)
+		cur.DataAddress = preferNonEmpty(ev.DataAddress, cur.DataAddress)
 		cur.State = ev.State
 		cur.Incarnation = ev.Incarnation
 		cur.LastChange = now
@@ -288,6 +299,7 @@ func (m *Membership) applyLocked(ev Event) (Node, bool) {
 	// elsewhere without forcing a new incarnation from the absent node.
 	if ev.Incarnation == cur.Incarnation && ev.State > cur.State {
 		cur.Address = preferNonEmpty(ev.Address, cur.Address)
+		cur.DataAddress = preferNonEmpty(ev.DataAddress, cur.DataAddress)
 		cur.State = ev.State
 		cur.LastChange = now
 		m.members[ev.ID] = cur
@@ -317,7 +329,7 @@ func (m *Membership) MarkSuspect(id string) (Event, bool) {
 	cur.State = StateSuspect
 	cur.LastChange = Now()
 	m.members[id] = cur
-	return Event{ID: id, Address: cur.Address, State: StateSuspect, Incarnation: cur.Incarnation, At: cur.LastChange}, true
+	return Event{ID: id, Address: cur.Address, DataAddress: cur.DataAddress, State: StateSuspect, Incarnation: cur.Incarnation, At: cur.LastChange}, true
 }
 
 // MarkDead transitions id to Dead at its current incarnation. Returns
@@ -339,7 +351,7 @@ func (m *Membership) MarkDead(id string) (Event, bool) {
 	cur.State = StateDead
 	cur.LastChange = Now()
 	m.members[id] = cur
-	return Event{ID: id, Address: cur.Address, State: StateDead, Incarnation: cur.Incarnation, At: cur.LastChange}, true
+	return Event{ID: id, Address: cur.Address, DataAddress: cur.DataAddress, State: StateDead, Incarnation: cur.Incarnation, At: cur.LastChange}, true
 }
 
 // MarkLeft transitions id to Left. Used by the graceful-drain flow on
@@ -363,7 +375,7 @@ func (m *Membership) MarkLeft(id string) (Event, bool) {
 	cur.State = StateLeft
 	cur.LastChange = Now()
 	m.members[id] = cur
-	return Event{ID: id, Address: cur.Address, State: StateLeft, Incarnation: cur.Incarnation, At: cur.LastChange}, true
+	return Event{ID: id, Address: cur.Address, DataAddress: cur.DataAddress, State: StateLeft, Incarnation: cur.Incarnation, At: cur.LastChange}, true
 }
 
 // Prune removes Dead/Left entries whose LastChange is older than

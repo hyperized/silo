@@ -78,7 +78,10 @@ func (s *sharedTLS) client() *tls.Config {
 // id and address are set up so test peers can recognise each other.
 func startNode(t *testing.T, shared *sharedTLS, id string, seeds []string) (*gossip.Subsystem, string, func()) {
 	t.Helper()
-	m, err := membership.New(id, "127.0.0.1:0")
+	// Advertise a distinct, recognisable data-plane address per node so
+	// tests can assert it propagates over gossip. It is never dialed here
+	// (no data plane runs), only gossiped.
+	m, err := membership.New(id, "127.0.0.1:0", id+":7000")
 	if err != nil {
 		t.Fatalf("membership.New: %v", err)
 	}
@@ -128,14 +131,15 @@ func TestGossip_TwoNodesConverge(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		members := a.Members().Members()
-		var seenB bool
 		for _, n := range members {
 			if n.ID == "b" && n.State == membership.StateAlive {
-				seenB = true
+				// b's data-plane address must arrive with its membership
+				// entry — placement resolves node ids to this value.
+				if n.DataAddress != "b:7000" {
+					t.Fatalf("a learned b but not its data address: got %q, want b:7000", n.DataAddress)
+				}
+				return
 			}
-		}
-		if seenB {
-			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -184,7 +188,7 @@ func TestGossip_DeadNodeDetected(t *testing.T) {
 // rejection of misconfigured seed lists is reachable from the public API.
 func TestGossip_RefusesSelfSeed(t *testing.T) {
 	shared := newSharedTLS(t)
-	m, err := membership.New("alpha", "alpha:7100")
+	m, err := membership.New("alpha", "alpha:7100", "alpha:7000")
 	if err != nil {
 		t.Fatalf("membership.New: %v", err)
 	}

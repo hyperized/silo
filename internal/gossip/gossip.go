@@ -146,7 +146,7 @@ func (tlsDialer) Dial(addr string, cfg *tls.Config, timeout time.Duration) (net.
 // then to this constructor.
 func New(members *membership.Membership, opts Options, logger *slog.Logger) (*Subsystem, error) {
 	if members == nil {
-		return nil, errors.New("gossip: membership is nil; construct one with membership.New(cfg.NodeID, cfg.GossipAddr)")
+		return nil, errors.New("gossip: membership is nil; construct one with membership.New(cfg.NodeID, cfg.GossipAddr, cfg.GRPCAdvertise)")
 	}
 	if logger == nil {
 		return nil, errors.New("gossip: logger is nil; pass the slog logger built by observability.NewLogger")
@@ -371,12 +371,13 @@ func (s *Subsystem) piggybackSnapshot() []membership.Event {
 func (s *Subsystem) selfEnvelope(kind MessageKind, target string) *Message {
 	self := s.members.Self()
 	return &Message{
-		Kind:          kind,
-		SenderID:      self.ID,
-		SenderAddress: self.Address,
-		SenderIncarn:  self.Incarnation,
-		Target:        target,
-		Piggyback:     s.piggybackSnapshot(),
+		Kind:              kind,
+		SenderID:          self.ID,
+		SenderAddress:     self.Address,
+		SenderDataAddress: self.DataAddress,
+		SenderIncarn:      self.Incarnation,
+		Target:            target,
+		Piggyback:         s.piggybackSnapshot(),
 	}
 }
 
@@ -401,6 +402,7 @@ func (s *Subsystem) applyIncoming(msg *Message) []membership.Node {
 		if n, ok := s.members.Apply(membership.Event{
 			ID:          msg.SenderID,
 			Address:     msg.SenderAddress,
+			DataAddress: msg.SenderDataAddress,
 			State:       membership.StateAlive,
 			Incarnation: msg.SenderIncarn,
 		}); ok {
@@ -415,6 +417,7 @@ func (s *Subsystem) applyIncoming(msg *Message) []membership.Node {
 			evs = append(evs, membership.Event{
 				ID:          n.ID,
 				Address:     n.Address,
+				DataAddress: n.DataAddress,
 				State:       n.State,
 				Incarnation: n.Incarnation,
 				At:          n.LastChange,

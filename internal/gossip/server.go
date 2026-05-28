@@ -106,6 +106,7 @@ func (s *Subsystem) viewSnapshot() []membership.Event {
 		out = append(out, membership.Event{
 			ID:          n.ID,
 			Address:     n.Address,
+			DataAddress: n.DataAddress,
 			State:       n.State,
 			Incarnation: n.Incarnation,
 			At:          n.LastChange,

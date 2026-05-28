@@ -27,7 +27,7 @@ func TestState_String(t *testing.T) {
 }
 
 func TestNew_RejectsEmptySelfID(t *testing.T) {
-	_, err := New("", "127.0.0.1:7100")
+	_, err := New("", "127.0.0.1:7100", "")
 	if err == nil {
 		t.Fatal("expected error for empty selfID")
 	}
@@ -49,7 +49,7 @@ func TestApply_MergeRules(t *testing.T) {
 	// case is independent.
 	applyTo := func(t *testing.T, initial Node, ev Event) (Node, bool) {
 		t.Helper()
-		m, err := New("self", "addr:1")
+		m, err := New("self", "addr:1", "data:1")
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
@@ -147,7 +147,7 @@ func TestApply_MergeRules(t *testing.T) {
 }
 
 func TestApply_PreservesKnownAddressWhenEventAddressEmpty(t *testing.T) {
-	m, err := New("self", "self:1")
+	m, err := New("self", "self:1", "self:2")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestApply_PreservesKnownAddressWhenEventAddressEmpty(t *testing.T) {
 }
 
 func TestApply_SelfRefutation(t *testing.T) {
-	m, err := New("self", "self:1")
+	m, err := New("self", "self:1", "self:2")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestApply_SelfRefutationWithLowerIncarnationStillRefutes(t *testing.T) {
 	// If we're already at incarnation 10 and a stale Suspect event for
 	// us arrives with incarnation 3, we still refute (state becomes
 	// Alive) but we keep our existing higher incarnation.
-	m, err := New("self", "self:1")
+	m, err := New("self", "self:1", "self:2")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestApply_SelfRefutationWithLowerIncarnationStillRefutes(t *testing.T) {
 }
 
 func TestApplyMany_EmptyAndPartial(t *testing.T) {
-	m, err := New("self", "self:1")
+	m, err := New("self", "self:1", "self:2")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestApplyMany_EmptyAndPartial(t *testing.T) {
 }
 
 func TestMarkSuspect_Transitions(t *testing.T) {
-	m, _ := New("self", "self:1")
+	m, _ := New("self", "self:1", "self:2")
 	m.members["p1"] = Node{ID: "p1", State: StateAlive, Incarnation: 1}
 	ev, ok := m.MarkSuspect("p1")
 	if !ok || ev.State != StateSuspect {
@@ -248,7 +248,7 @@ func TestMarkSuspect_Transitions(t *testing.T) {
 }
 
 func TestMarkDead_Transitions(t *testing.T) {
-	m, _ := New("self", "self:1")
+	m, _ := New("self", "self:1", "self:2")
 	m.members["p1"] = Node{ID: "p1", State: StateSuspect, Incarnation: 2}
 	ev, ok := m.MarkDead("p1")
 	if !ok || ev.State != StateDead {
@@ -269,7 +269,7 @@ func TestMarkDead_Transitions(t *testing.T) {
 }
 
 func TestMarkLeft_Transitions(t *testing.T) {
-	m, _ := New("self", "self:1")
+	m, _ := New("self", "self:1", "self:2")
 	m.members["p1"] = Node{ID: "p1", State: StateAlive, Incarnation: 5}
 	ev, ok := m.MarkLeft("p1")
 	if !ok || ev.State != StateLeft {
@@ -292,7 +292,7 @@ func TestPrune_DeadAndLeftAfterRetention(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	Now = func() time.Time { return base }
 
-	m, _ := New("self", "self:1")
+	m, _ := New("self", "self:1", "self:2")
 	m.members["dead-old"] = Node{ID: "dead-old", State: StateDead, LastChange: base.Add(-time.Hour)}
 	m.members["dead-new"] = Node{ID: "dead-new", State: StateDead, LastChange: base.Add(-time.Second)}
 	m.members["left-old"] = Node{ID: "left-old", State: StateLeft, LastChange: base.Add(-time.Hour)}
@@ -323,7 +323,7 @@ func TestPrune_DeadAndLeftAfterRetention(t *testing.T) {
 }
 
 func TestAlivePeers_ExcludesSelfAndNonAlive(t *testing.T) {
-	m, _ := New("self", "self:1")
+	m, _ := New("self", "self:1", "self:2")
 	m.members["p1"] = Node{ID: "p1", State: StateAlive, Address: "p1:1"}
 	m.members["p2"] = Node{ID: "p2", State: StateSuspect}
 	m.members["p3"] = Node{ID: "p3", State: StateDead}
@@ -334,7 +334,7 @@ func TestAlivePeers_ExcludesSelfAndNonAlive(t *testing.T) {
 }
 
 func TestSetSelfAddress_BumpsIncarnation(t *testing.T) {
-	m, _ := New("self", "")
+	m, _ := New("self", "", "")
 	before := m.Self()
 	m.SetSelfAddress("self:7100")
 	after := m.Self()
@@ -347,7 +347,7 @@ func TestSetSelfAddress_BumpsIncarnation(t *testing.T) {
 }
 
 func TestSelfID_Returns(t *testing.T) {
-	m, _ := New("self-x", "")
+	m, _ := New("self-x", "", "")
 	if m.SelfID() != "self-x" {
 		t.Errorf("SelfID: got %q, want self-x", m.SelfID())
 	}
@@ -357,7 +357,7 @@ func TestMembership_ConcurrentApplyIsRaceFree(t *testing.T) {
 	// Run lots of concurrent Apply/Lookup pairs under -race; failure is
 	// only visible when go test is run with -race. The assertion side
 	// just confirms we converged on something sensible.
-	m, _ := New("self", "self:1")
+	m, _ := New("self", "self:1", "self:2")
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Add(1)

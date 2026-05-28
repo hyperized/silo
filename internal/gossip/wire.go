@@ -51,14 +51,15 @@ const MaxMessageBytes = 256 * 1024
 // recent membership changes so the table converges without a dedicated
 // broadcast channel.
 type Message struct {
-	Kind           MessageKind        `json:"kind"`
-	SenderID       string             `json:"sender_id"`
-	SenderAddress  string             `json:"sender_address,omitempty"`
-	SenderIncarn   uint64             `json:"sender_incarnation"`
-	Target         string             `json:"target,omitempty"`
-	TargetAddress  string             `json:"target_address,omitempty"`
-	Piggyback      []membership.Event `json:"piggyback,omitempty"`
-	MembershipView []membership.Event `json:"membership_view,omitempty"`
+	Kind              MessageKind        `json:"kind"`
+	SenderID          string             `json:"sender_id"`
+	SenderAddress     string             `json:"sender_address,omitempty"`
+	SenderDataAddress string             `json:"sender_data_address,omitempty"`
+	SenderIncarn      uint64             `json:"sender_incarnation"`
+	Target            string             `json:"target,omitempty"`
+	TargetAddress     string             `json:"target_address,omitempty"`
+	Piggyback         []membership.Event `json:"piggyback,omitempty"`
+	MembershipView    []membership.Event `json:"membership_view,omitempty"`
 }
 
 // writeMessage serialises msg as length-prefixed JSON and writes it.

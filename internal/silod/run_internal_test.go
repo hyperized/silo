@@ -270,7 +270,7 @@ func TestRun_MembershipInitFailure(t *testing.T) {
 	loadClusterTLS = stubLoadClusterTLS
 	prev := newMembership
 	t.Cleanup(func() { newMembership = prev })
-	newMembership = func(string, string) (*membership.Membership, error) {
+	newMembership = func(string, string, string) (*membership.Membership, error) {
 		return nil, errors.New("simulated membership init failure")
 	}
 	err := Run(context.Background(), testConfig(t), discardLogger(), io.Discard, "v0")
