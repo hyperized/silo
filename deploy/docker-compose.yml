@@ -50,6 +50,17 @@ services:
       # routable container hostname so peers learn the right dial
       # address instead of "0.0.0.0:7100".
       SILO_GOSSIP_ADVERTISE: silo-a:7100
+      # The bootstrap and gRPC advertise values are the operator-facing
+      # dial targets. silo-a is the only node that publishes its
+      # bootstrap and gRPC ports to the host, so it advertises 127.0.0.1
+      # back through the Join response — operators run siloctl from the
+      # docker host, not from inside the cluster network.
+      SILO_BOOTSTRAP_ADVERTISE: 127.0.0.1:7001
+      # Host port is configurable via SILO_GRPC_HOST_PORT (default 7900).
+      # macOS reserves 7000 for AirPlay Receiver, so the cluster's gRPC
+      # data plane gets a different host-side port; the container still
+      # listens on 7000 internally.
+      SILO_GRPC_ADVERTISE: 127.0.0.1:${SILO_GRPC_HOST_PORT:-7900}
       # Seeds point at peer gossip listeners (port 7100), not the gRPC
       # data port — gossip is the membership channel.
       SILO_SEEDS: silo-b:7100,silo-c:7100
@@ -64,6 +75,7 @@ services:
     ports:
       - "7080:7080" # HTTP (healthz, metrics) on the host
       - "7001:7001" # Bootstrap join API — point siloctl auth init here
+      - "${SILO_GRPC_HOST_PORT:-7900}:7000" # mTLS gRPC — siloctl chunk … goes here after auth init
 
   silo-b:
     <<: *silod

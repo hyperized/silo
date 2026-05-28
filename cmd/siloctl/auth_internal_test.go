@@ -338,7 +338,7 @@ func TestRunAuthStatus_HappyPath(t *testing.T) {
 	}
 	ca, _ := clustertls.LoadCA(caPEM, keyPEM)
 	client, _ := clustertls.MintClientCert(ca, "alice@host", time.Hour)
-	if err := writeAuthMaterial(dir, caPEM, client.CertPEM, client.KeyPEM, "silo.example:7000", "alice@host"); err != nil {
+	if err := writeAuthMaterial(dir, caPEM, client.CertPEM, client.KeyPEM, "silo.example:7001", "silo.example:7000", "alice@host"); err != nil {
 		t.Fatalf("writeAuthMaterial: %v", err)
 	}
 
@@ -350,7 +350,8 @@ func TestRunAuthStatus_HappyPath(t *testing.T) {
 		"siloctl credentials at " + dir,
 		"CA fingerprint:   sha256:",
 		"Client principal: alice@host",
-		"Default server:   silo.example:7000",
+		"Chunk server:     silo.example:7000",
+		"Joined via:       silo.example:7001 (bootstrap port)",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("status output missing %q; got:\n%s", want, out.String())
@@ -433,7 +434,7 @@ func TestRunAuthStatus_ConfigDirResolveFailure(t *testing.T) {
 func TestRunAuthStatus_NoConfigJSONStillSucceeds(t *testing.T) {
 	// Some operators copy the cert files manually without the config.json
 	// shim; status should still print the principal+fingerprint and skip
-	// the Default server line silently.
+	// the server lines silently.
 	dir := t.TempDir()
 	caPEM, keyPEM, err := clustertls.GenerateCA("silo-test", time.Hour)
 	if err != nil {
@@ -454,8 +455,8 @@ func TestRunAuthStatus_NoConfigJSONStillSucceeds(t *testing.T) {
 	if code := runAuth([]string{"status", "--config-dir", dir}, &out, &errBuf); code != 0 {
 		t.Errorf("got %d, want 0; stderr=%q", code, errBuf.String())
 	}
-	if strings.Contains(out.String(), "Default server:") {
-		t.Errorf("status should omit 'Default server' when config.json is absent, got %q", out.String())
+	if strings.Contains(out.String(), "Chunk server:") || strings.Contains(out.String(), "Joined via:") {
+		t.Errorf("status should omit server lines when config.json is absent, got %q", out.String())
 	}
 }
 
@@ -558,14 +559,14 @@ func TestWriteAuthMaterial_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCA: %v", err)
 	}
-	if err := writeAuthMaterial(dir, caPEM, caPEM, caPEM, "host:1", "alice"); err != nil {
+	if err := writeAuthMaterial(dir, caPEM, caPEM, caPEM, "host:1", "host:2", "alice"); err != nil {
 		t.Fatalf("writeAuthMaterial: %v", err)
 	}
 	cfg, err := loadAuthConfig(dir)
 	if err != nil {
 		t.Fatalf("loadAuthConfig: %v", err)
 	}
-	if cfg.DefaultServer != "host:1" || cfg.Principal != "alice" {
+	if cfg.DefaultServer != "host:1" || cfg.DefaultGRPCServer != "host:2" || cfg.Principal != "alice" {
 		t.Errorf("config round-trip: %+v", cfg)
 	}
 }
@@ -576,7 +577,7 @@ func TestWriteAuthMaterial_WriteFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "ca.crt"), 0o700); err != nil {
 		t.Fatalf("seed dir: %v", err)
 	}
-	if err := writeAuthMaterial(dir, []byte("CA"), []byte("CERT"), []byte("KEY"), "s", "p"); err == nil {
+	if err := writeAuthMaterial(dir, []byte("CA"), []byte("CERT"), []byte("KEY"), "s", "g", "p"); err == nil {
 		t.Error("writeAuthMaterial should fail when a child path is a directory")
 	}
 }
@@ -586,7 +587,7 @@ func TestWriteAuthMaterial_ConfigWriteFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "config.json"), 0o700); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if err := writeAuthMaterial(dir, []byte("CA"), []byte("CERT"), []byte("KEY"), "s", "p"); err == nil || !strings.Contains(err.Error(), "config.json") {
+	if err := writeAuthMaterial(dir, []byte("CA"), []byte("CERT"), []byte("KEY"), "s", "g", "p"); err == nil || !strings.Contains(err.Error(), "config.json") {
 		t.Errorf("got %v, want config.json write failure", err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -44,12 +45,14 @@ const (
 )
 
 type Config struct {
-	NodeID          string
-	GRPCAddr        string
-	BootstrapAddr   string
-	GossipAddr      string
-	GossipAdvertise string
-	HTTPAddr        string
+	NodeID             string
+	GRPCAddr           string
+	GRPCAdvertise      string
+	BootstrapAddr      string
+	BootstrapAdvertise string
+	GossipAddr         string
+	GossipAdvertise    string
+	HTTPAddr           string
 	Seeds           []string
 	Domain          string
 	DataDir         string
@@ -121,7 +124,9 @@ func Load(env EnvFunc) (*Config, error) {
 	cfg := &Config{
 		NodeID:              env("SILO_NODE_ID"),
 		GRPCAddr:            envDefault(env, "SILO_GRPC_ADDR", DefaultGRPCAddr),
+		GRPCAdvertise:       env("SILO_GRPC_ADVERTISE"),
 		BootstrapAddr:       envDefault(env, "SILO_BOOTSTRAP_ADDR", DefaultBootstrapAddr),
+		BootstrapAdvertise:  env("SILO_BOOTSTRAP_ADVERTISE"),
 		GossipAddr:          envDefault(env, "SILO_GOSSIP_ADDR", DefaultGossipAddr),
 		GossipAdvertise:     env("SILO_GOSSIP_ADVERTISE"),
 		HTTPAddr:            envDefault(env, "SILO_HTTP_ADDR", DefaultHTTPAddr),
@@ -183,6 +188,19 @@ func Load(env EnvFunc) (*Config, error) {
 		cfg.NodeKeyPath = cfg.DataDir + "/node.key"
 	}
 
+	// Default each advertise address to the matching listen address with
+	// the unspecified host swapped for the loopback. Listening on 0.0.0.0
+	// is what every container does, but it is not a routable dial target;
+	// publishing 127.0.0.1 means single-node `make up-local` works without
+	// extra configuration. Multi-node deployments override SILO_*_ADVERTISE
+	// with the container's routable hostname.
+	if cfg.GRPCAdvertise == "" {
+		cfg.GRPCAdvertise = advertiseFallback(cfg.GRPCAddr)
+	}
+	if cfg.BootstrapAdvertise == "" {
+		cfg.BootstrapAdvertise = advertiseFallback(cfg.BootstrapAddr)
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -227,6 +245,25 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("SILO_LOG_FORMAT %q is not recognised; set it to text (human-readable) or json (machine-readable)", c.LogFormat)
 	}
 	return nil
+}
+
+// advertiseFallback derives a dial-friendly advertise address from a
+// listen address. Listening on the unspecified host (0.0.0.0 or [::])
+// is the normal container pattern, but the same string cannot be used
+// as a dial target by an outside client. Rewriting the host portion to
+// the loopback gives a value that works for same-machine clients and is
+// still obviously wrong for any multi-host scenario, prompting the
+// operator to set SILO_*_ADVERTISE explicitly.
+func advertiseFallback(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return listen
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	return listen
 }
 
 func envDefault(env EnvFunc, key, fallback string) string {

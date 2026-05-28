@@ -49,7 +49,7 @@ func stubMinter(caPEM, certPEM, keyPEM []byte, err error) ClientCertMinter {
 func TestBootstrapJoin_HappyPath(t *testing.T) {
 	red := &fakeRedeemer{}
 	minter := stubMinter([]byte("CA"), []byte("CERT"), []byte("KEY"), nil)
-	svc := NewBootstrapService(red, minter, discardLogger())
+	svc := NewBootstrapService(red, minter, "grpc-advertise:7000", discardLogger())
 
 	resp, err := svc.Join(context.Background(), &bootstrapv1.JoinRequest{Token: "tok", Principal: "user@host"})
 	if err != nil {
@@ -58,13 +58,16 @@ func TestBootstrapJoin_HappyPath(t *testing.T) {
 	if string(resp.CaCertPem) != "CA" || string(resp.ClientCertPem) != "CERT" || string(resp.ClientKeyPem) != "KEY" {
 		t.Errorf("Join response payload mismatch: %+v", resp)
 	}
+	if resp.GrpcAddress != "grpc-advertise:7000" {
+		t.Errorf("GrpcAddress = %q, want %q", resp.GrpcAddress, "grpc-advertise:7000")
+	}
 	if red.calls != 1 || red.gotPlain != "tok" {
 		t.Errorf("redeemer not called as expected (calls=%d, plain=%q)", red.calls, red.gotPlain)
 	}
 }
 
 func TestBootstrapJoin_RejectsEmptyInputs(t *testing.T) {
-	svc := NewBootstrapService(&fakeRedeemer{}, stubMinter(nil, nil, nil, nil), discardLogger())
+	svc := NewBootstrapService(&fakeRedeemer{}, stubMinter(nil, nil, nil, nil), "grpc-advertise:7000", discardLogger())
 	cases := []struct {
 		name string
 		req  *bootstrapv1.JoinRequest
@@ -91,7 +94,7 @@ func TestBootstrapJoin_RejectsEmptyInputs(t *testing.T) {
 
 func TestBootstrapJoin_TokenNotRecognised(t *testing.T) {
 	red := &fakeRedeemer{err: bootstraptoken.ErrTokenNotFound}
-	svc := NewBootstrapService(red, stubMinter(nil, nil, nil, nil), discardLogger())
+	svc := NewBootstrapService(red, stubMinter(nil, nil, nil, nil), "grpc-advertise:7000", discardLogger())
 
 	_, err := svc.Join(context.Background(), &bootstrapv1.JoinRequest{Token: "bad", Principal: "user@host"})
 	st, _ := status.FromError(err)
@@ -108,7 +111,7 @@ func TestBootstrapJoin_TokenStoreInternalFailure(t *testing.T) {
 	// should surface as Internal so operators see something is wrong with
 	// the cluster, not a credentials problem with the caller.
 	red := &fakeRedeemer{err: errors.New("disk on fire")}
-	svc := NewBootstrapService(red, stubMinter(nil, nil, nil, nil), discardLogger())
+	svc := NewBootstrapService(red, stubMinter(nil, nil, nil, nil), "grpc-advertise:7000", discardLogger())
 
 	_, err := svc.Join(context.Background(), &bootstrapv1.JoinRequest{Token: "ok", Principal: "user@host"})
 	st, _ := status.FromError(err)
@@ -122,7 +125,7 @@ func TestBootstrapJoin_TokenStoreInternalFailure(t *testing.T) {
 
 func TestBootstrapJoin_MinterFailure(t *testing.T) {
 	red := &fakeRedeemer{}
-	svc := NewBootstrapService(red, stubMinter(nil, nil, nil, errors.New("simulated CA-key missing")), discardLogger())
+	svc := NewBootstrapService(red, stubMinter(nil, nil, nil, errors.New("simulated CA-key missing")), "grpc-advertise:7000", discardLogger())
 
 	_, err := svc.Join(context.Background(), &bootstrapv1.JoinRequest{Token: "ok", Principal: "user@host"})
 	st, _ := status.FromError(err)

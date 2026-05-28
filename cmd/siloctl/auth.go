@@ -29,9 +29,18 @@ import (
 // Kept deliberately small — there is no global config registry to drift
 // out of sync with.
 type authConfig struct {
+	// DefaultServer was the bootstrap host:port the operator typed into
+	// 'auth init'. Kept for diagnostic display in 'auth status' so an
+	// operator can tell which silod minted these credentials, but it is
+	// not where chunk RPCs go.
 	DefaultServer string `json:"default_server"`
-	Principal     string `json:"principal"`
-	IssuedAt      string `json:"issued_at"`
+	// DefaultGRPCServer is the mTLS gRPC dial target siloctl uses for
+	// every command that follows 'auth init'. silod returns this value
+	// in the Join response so the operator never has to know which port
+	// the data plane is on.
+	DefaultGRPCServer string `json:"default_grpc_server,omitempty"`
+	Principal         string `json:"principal"`
+	IssuedAt          string `json:"issued_at"`
 }
 
 // authDialer is the seam siloctl auth uses to reach silod's bootstrap
@@ -140,13 +149,22 @@ func runAuthInit(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "siloctl auth init: WARNING: connecting without --server-fingerprint (trust-on-first-use). Verify this fingerprint matches the value silod printed on boot:\n  %s\n", fpCheck.observed())
 	}
 
-	if err := writeAuthMaterial(dir, resp.CaCertPem, resp.ClientCertPem, resp.ClientKeyPem, *server, *principal); err != nil {
+	if err := writeAuthMaterial(dir, resp.CaCertPem, resp.ClientCertPem, resp.ClientKeyPem, *server, resp.GrpcAddress, *principal); err != nil {
 		fmt.Fprintf(stderr, "siloctl auth init: %v\n", err)
 		return 1
 	}
 
+	chunkTarget := resp.GrpcAddress
+	if chunkTarget == "" {
+		// Older silods (or a misconfigured deployment) may not advertise
+		// the gRPC address; falling back to the bootstrap server keeps the
+		// "you can now run" line honest about what's actually in the
+		// config file, even though chunk RPCs will not work against a
+		// bootstrap-only port.
+		chunkTarget = *server
+	}
 	fmt.Fprintf(stdout, "Wrote cluster credentials to %s\n  ca.crt       %d bytes\n  client.crt   %d bytes\n  client.key   %d bytes\nYou can now run siloctl chunk … against %s.\n",
-		dir, len(resp.CaCertPem), len(resp.ClientCertPem), len(resp.ClientKeyPem), *server)
+		dir, len(resp.CaCertPem), len(resp.ClientCertPem), len(resp.ClientKeyPem), chunkTarget)
 	return 0
 }
 
@@ -189,8 +207,11 @@ func runAuthStatus(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "  CA fingerprint:   %s\n", fingerprintCert(caCert))
 	fmt.Fprintf(stdout, "  Client principal: %s\n", clientCert.Subject.CommonName)
 	fmt.Fprintf(stdout, "  Client expires:   %s (in %s)\n", clientCert.NotAfter.UTC().Format(time.RFC3339), time.Until(clientCert.NotAfter).Round(time.Second))
+	if cfg.DefaultGRPCServer != "" {
+		fmt.Fprintf(stdout, "  Chunk server:     %s\n", cfg.DefaultGRPCServer)
+	}
 	if cfg.DefaultServer != "" {
-		fmt.Fprintf(stdout, "  Default server:   %s\n", cfg.DefaultServer)
+		fmt.Fprintf(stdout, "  Joined via:       %s (bootstrap port)\n", cfg.DefaultServer)
 	}
 	return 0
 }
@@ -231,7 +252,7 @@ func buildBootstrapTLSConfig(fingerprint, serverName string) (*tls.Config, *fpCh
 	}, check
 }
 
-func writeAuthMaterial(dir string, caPEM, certPEM, keyPEM []byte, server, principal string) error {
+func writeAuthMaterial(dir string, caPEM, certPEM, keyPEM []byte, server, grpcServer, principal string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("could not create %s (%v); pick a writable path with --config-dir", dir, err)
 	}
@@ -250,7 +271,7 @@ func writeAuthMaterial(dir string, caPEM, certPEM, keyPEM []byte, server, princi
 			return fmt.Errorf("could not write %s (%v); check the path is on a writable filesystem", path, err)
 		}
 	}
-	cfg := authConfig{DefaultServer: server, Principal: principal, IssuedAt: time.Now().UTC().Format(time.RFC3339)}
+	cfg := authConfig{DefaultServer: server, DefaultGRPCServer: grpcServer, Principal: principal, IssuedAt: time.Now().UTC().Format(time.RFC3339)}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("could not serialise siloctl config (%v); this is a programming error", err)

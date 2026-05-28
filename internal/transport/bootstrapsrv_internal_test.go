@@ -37,7 +37,7 @@ func TestBootstrapServer_StartShutdownRoundTrip(t *testing.T) {
 		t.Fatalf("ServerOnlyConfig: %v", err)
 	}
 
-	svc := NewBootstrapService(&fakeRedeemer{}, stubMinter([]byte("CA"), []byte("CERT"), []byte("KEY"), nil), discardLogger())
+	svc := NewBootstrapService(&fakeRedeemer{}, stubMinter([]byte("CA"), []byte("CERT"), []byte("KEY"), nil), "grpc-advertise:7000", discardLogger())
 	srv := NewBootstrapServer("127.0.0.1:0", srvTLS, svc, discardLogger())
 	started := make(chan error, 1)
 	go func() { started <- srv.Start() }()

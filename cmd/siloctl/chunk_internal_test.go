@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -255,5 +256,54 @@ func TestSiloctlConfigDir_DelegatesToUserConfigDir(t *testing.T) {
 	}
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestConfiguredChunkServer_PrefersConfiguredAddress(t *testing.T) {
+	prev := userConfigDir
+	t.Cleanup(func() { userConfigDir = prev })
+	dir := t.TempDir()
+	userConfigDir = func() (string, error) { return dir, nil }
+
+	raw, err := json.Marshal(authConfig{DefaultGRPCServer: "10.0.0.5:7000"})
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	if got := configuredChunkServer(); got != "10.0.0.5:7000" {
+		t.Errorf("configuredChunkServer() = %q, want %q", got, "10.0.0.5:7000")
+	}
+}
+
+func TestConfiguredChunkServer_FallsBackWhenUnset(t *testing.T) {
+	prev := userConfigDir
+	t.Cleanup(func() { userConfigDir = prev })
+	dir := t.TempDir()
+	userConfigDir = func() (string, error) { return dir, nil }
+
+	// A config.json written by a pre-grpc-address 'auth init' omits the
+	// field entirely; siloctl must fall back to the loopback default
+	// rather than dialing an empty target.
+	raw, err := json.Marshal(authConfig{DefaultServer: "127.0.0.1:7001"})
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0o600); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	if got := configuredChunkServer(); got != defaultServer {
+		t.Errorf("configuredChunkServer() = %q, want fallback %q", got, defaultServer)
+	}
+}
+
+func TestConfiguredChunkServer_FallsBackWhenConfigDirUnavailable(t *testing.T) {
+	prev := userConfigDir
+	t.Cleanup(func() { userConfigDir = prev })
+	userConfigDir = func() (string, error) { return "", errors.New("simulated user-dir lookup failure") }
+
+	if got := configuredChunkServer(); got != defaultServer {
+		t.Errorf("configuredChunkServer() = %q, want fallback %q", got, defaultServer)
 	}
 }

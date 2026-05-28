@@ -108,7 +108,9 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 	want := &Config{
 		NodeID:              "alpha",
 		GRPCAddr:            "127.0.0.1:9000",
+		GRPCAdvertise:       "127.0.0.1:9000",
 		BootstrapAddr:       "127.0.0.1:9001",
+		BootstrapAdvertise:  "127.0.0.1:9001",
 		GossipAddr:          "127.0.0.1:9100",
 		GossipAdvertise:     "node-host:9100",
 		HTTPAddr:            "127.0.0.1:9080",
@@ -368,4 +370,25 @@ func TestValidate(t *testing.T) {
 			t.Errorf("Validate baseline: %v", err)
 		}
 	})
+}
+
+func TestAdvertiseFallback(t *testing.T) {
+	cases := []struct {
+		name   string
+		listen string
+		want   string
+	}{
+		{"ipv4 unspecified rewritten to loopback", "0.0.0.0:7000", "127.0.0.1:7000"},
+		{"ipv6 unspecified rewritten to loopback", "[::]:7000", "127.0.0.1:7000"},
+		{"empty host rewritten to loopback", ":7000", "127.0.0.1:7000"},
+		{"routable host left unchanged", "10.0.0.5:7000", "10.0.0.5:7000"},
+		{"address with no port returned verbatim", "no-port-here", "no-port-here"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := advertiseFallback(tc.listen); got != tc.want {
+				t.Errorf("advertiseFallback(%q) = %q, want %q", tc.listen, got, tc.want)
+			}
+		})
+	}
 }

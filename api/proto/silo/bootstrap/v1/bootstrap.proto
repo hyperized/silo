@@ -42,4 +42,11 @@ message JoinResponse {
   // client_key_pem is the private key matching client_cert_pem. silod
   // returns it once; lose it and the operator must redeem a new token.
   bytes client_key_pem = 3;
+  // grpc_address tells the operator's siloctl where to send subsequent
+  // chunk RPCs. The bootstrap listener is on a different port (and may
+  // be on a different host:port pair entirely when one node fronts the
+  // join API on behalf of the cluster), so this field carries the actual
+  // mTLS gRPC endpoint operators should dial next. siloctl persists it
+  // as default_grpc_server in its config.json.
+  string grpc_address = 4;
 }

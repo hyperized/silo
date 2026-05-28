@@ -92,7 +92,14 @@ type JoinResponse struct {
 	ClientCertPem []byte `protobuf:"bytes,2,opt,name=client_cert_pem,json=clientCertPem,proto3" json:"client_cert_pem,omitempty"`
 	// client_key_pem is the private key matching client_cert_pem. silod
 	// returns it once; lose it and the operator must redeem a new token.
-	ClientKeyPem  []byte `protobuf:"bytes,3,opt,name=client_key_pem,json=clientKeyPem,proto3" json:"client_key_pem,omitempty"`
+	ClientKeyPem []byte `protobuf:"bytes,3,opt,name=client_key_pem,json=clientKeyPem,proto3" json:"client_key_pem,omitempty"`
+	// grpc_address tells the operator's siloctl where to send subsequent
+	// chunk RPCs. The bootstrap listener is on a different port (and may
+	// be on a different host:port pair entirely when one node fronts the
+	// join API on behalf of the cluster), so this field carries the actual
+	// mTLS gRPC endpoint operators should dial next. siloctl persists it
+	// as default_grpc_server in its config.json.
+	GrpcAddress   string `protobuf:"bytes,4,opt,name=grpc_address,json=grpcAddress,proto3" json:"grpc_address,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -148,6 +155,13 @@ func (x *JoinResponse) GetClientKeyPem() []byte {
 	return nil
 }
 
+func (x *JoinResponse) GetGrpcAddress() string {
+	if x != nil {
+		return x.GrpcAddress
+	}
+	return ""
+}
+
 var File_silo_bootstrap_v1_bootstrap_proto protoreflect.FileDescriptor
 
 const file_silo_bootstrap_v1_bootstrap_proto_rawDesc = "" +
@@ -155,11 +169,12 @@ const file_silo_bootstrap_v1_bootstrap_proto_rawDesc = "" +
 	"!silo/bootstrap/v1/bootstrap.proto\x12\x11silo.bootstrap.v1\"A\n" +
 	"\vJoinRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x12\x1c\n" +
-	"\tprincipal\x18\x02 \x01(\tR\tprincipal\"|\n" +
+	"\tprincipal\x18\x02 \x01(\tR\tprincipal\"\x9f\x01\n" +
 	"\fJoinResponse\x12\x1e\n" +
 	"\vca_cert_pem\x18\x01 \x01(\fR\tcaCertPem\x12&\n" +
 	"\x0fclient_cert_pem\x18\x02 \x01(\fR\rclientCertPem\x12$\n" +
-	"\x0eclient_key_pem\x18\x03 \x01(\fR\fclientKeyPem2T\n" +
+	"\x0eclient_key_pem\x18\x03 \x01(\fR\fclientKeyPem\x12!\n" +
+	"\fgrpc_address\x18\x04 \x01(\tR\vgrpcAddress2T\n" +
 	"\tBootstrap\x12G\n" +
 	"\x04Join\x12\x1e.silo.bootstrap.v1.JoinRequest\x1a\x1f.silo.bootstrap.v1.JoinResponseBCZAgithub.com/hyperized/silo/api/proto/silo/bootstrap/v1;bootstrapv1b\x06proto3"
 

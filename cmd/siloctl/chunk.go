@@ -164,12 +164,31 @@ Defaults to SILO_SERVER (or 127.0.0.1:7000 if unset).
 
 // newSubFlagSet returns a flag.FlagSet that errors-out cleanly to stderr
 // instead of os.Exit'ing on a parse error, keeping runMain in control of
-// the exit code.
+// the exit code. The --server default cascades through SILO_SERVER, the
+// default_grpc_server stored by 'siloctl auth init', and finally the
+// hard-coded loopback target — so a freshly-bootstrapped operator never
+// has to remember a port number after running 'auth init'.
 func newSubFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *string) {
 	fs := flag.NewFlagSet("siloctl chunk "+name, flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	server := fs.String("server", envDefault("SILO_SERVER", defaultServer), "silod gRPC address (host:port)")
+	server := fs.String("server", envDefault("SILO_SERVER", configuredChunkServer()), "silod gRPC address (host:port)")
 	return fs, server
+}
+
+// configuredChunkServer reads default_grpc_server from the auth config
+// the operator wrote during 'auth init'. Returns the hard-coded loopback
+// fallback when no config is present so single-node dev still works
+// before any bootstrap has happened.
+func configuredChunkServer() string {
+	dir, err := siloctlConfigDir()
+	if err != nil {
+		return defaultServer
+	}
+	cfg, err := loadAuthConfig(dir)
+	if err != nil || cfg.DefaultGRPCServer == "" {
+		return defaultServer
+	}
+	return cfg.DefaultGRPCServer
 }
 
 func runChunkPut(args []string, stdin io.Reader, stdout, stderr io.Writer) int {

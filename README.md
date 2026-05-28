@@ -40,7 +40,9 @@ Run this on the operator host to claim a client certificate:
     --server-fingerprint sha256:6ba2902451d6…
 ```
 
-Copy that command and run it on the host where you'll be using `siloctl`. It writes the cluster CA, your client certificate, and the matching key into `~/.config/silo/`. From then on every `siloctl chunk …` call authenticates over mTLS automatically — no further flags or env vars required.
+Copy that command and run it on the host where you'll be using `siloctl`. It writes the cluster CA, your client certificate, and the matching key into `~/.config/silo/` (or the platform-specific user config dir), and records the cluster's mTLS gRPC address in `config.json`. From then on every `siloctl chunk …` call authenticates over mTLS automatically and targets the right port — no further flags or env vars required.
+
+In the bundled docker-compose stack the bootstrap join API is published on `127.0.0.1:7001` and the mTLS gRPC data plane on `127.0.0.1:7900` (port 7000 collides with macOS AirPlay Receiver — override with `SILO_GRPC_HOST_PORT` if needed).
 
 To mint another token later (e.g. for a colleague's machine), restart `silod` with `SILO_PRINT_BOOTSTRAP_TOKEN=1` set. The new token is printed on the next boot.
 

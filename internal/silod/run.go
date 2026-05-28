@@ -49,7 +49,7 @@ var (
 		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, logger)}
 	}
 	newBootstrapSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokens transport.TokenRedeemer, minter transport.ClientCertMinter, logger *slog.Logger) subsystem {
-		svc := transport.NewBootstrapService(tokens, minter, logger)
+		svc := transport.NewBootstrapService(tokens, minter, cfg.GRPCAdvertise, logger)
 		return &bootstrapSub{srv: transport.NewBootstrapServer(cfg.BootstrapAddr, tlsCfg, svc, logger)}
 	}
 	// newGossipSubsystem constructs the gossip subsystem. Returns
@@ -474,6 +474,6 @@ Run this on the operator host to claim a client certificate:
 To mint another token later, restart silod with SILO_PRINT_BOOTSTRAP_TOKEN=1.
 ========================================================================
 
-`, plaintext, fp, plaintext, cfg.BootstrapAddr, fp)
+`, plaintext, fp, plaintext, cfg.BootstrapAdvertise, fp)
 	return nil
 }

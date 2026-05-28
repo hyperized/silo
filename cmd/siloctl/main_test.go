@@ -27,8 +27,15 @@ import (
 
 // newTestServer mirrors the transport test helper: real gRPC server, real
 // chunk store under a tempdir, returned address ready for --server=.
+// Each test starts with an empty per-user config dir so credentials the
+// developer may have on disk from a real 'siloctl auth init' do not bleed
+// into loadClientTLS and make the plain test server fail the handshake.
 func newTestServer(t *testing.T) (addr string, teardown func()) {
 	t.Helper()
+	prevUserConfigDir := userConfigDir
+	emptyDir := t.TempDir()
+	userConfigDir = func() (string, error) { return emptyDir, nil }
+	t.Cleanup(func() { userConfigDir = prevUserConfigDir })
 	key := make([]byte, crypto.ClusterKeyBytes)
 	if _, err := rand.Read(key); err != nil {
 		t.Fatalf("rand: %v", err)

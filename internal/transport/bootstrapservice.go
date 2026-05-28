@@ -36,17 +36,22 @@ type ClientCertMinter func(principal string) (caCertPEM, clientCertPEM, clientKe
 type BootstrapService struct {
 	bootstrapv1.UnimplementedBootstrapServer
 
-	tokens TokenRedeemer
-	minter ClientCertMinter
-	logger *slog.Logger
+	tokens        TokenRedeemer
+	minter        ClientCertMinter
+	grpcAdvertise string
+	logger        *slog.Logger
 }
 
 // NewBootstrapService wires the token store and client-cert minter onto
-// a service ready for grpc.RegisterService. The logger sees one line per
-// Join, with the principal and outcome — silod operators can audit who
-// joined when by reading silod's stdout.
-func NewBootstrapService(tokens TokenRedeemer, minter ClientCertMinter, logger *slog.Logger) *BootstrapService {
-	return &BootstrapService{tokens: tokens, minter: minter, logger: logger}
+// a service ready for grpc.RegisterService. grpcAdvertise is the dial
+// target operators get back in the Join response so siloctl knows where
+// to send subsequent chunk RPCs — typically the mTLS gRPC listener on
+// the same node, but cluster fronts where one address serves the join
+// API on behalf of a separately-addressable data plane are also valid.
+// The logger sees one line per Join, with the principal and outcome —
+// silod operators can audit who joined when by reading silod's stdout.
+func NewBootstrapService(tokens TokenRedeemer, minter ClientCertMinter, grpcAdvertise string, logger *slog.Logger) *BootstrapService {
+	return &BootstrapService{tokens: tokens, minter: minter, grpcAdvertise: grpcAdvertise, logger: logger}
 }
 
 // Join consumes a one-time token and returns a freshly-signed client
@@ -84,6 +89,7 @@ func (s *BootstrapService) Join(_ context.Context, req *bootstrapv1.JoinRequest)
 		CaCertPem:     caPEM,
 		ClientCertPem: certPEM,
 		ClientKeyPem:  keyPEM,
+		GrpcAddress:   s.grpcAdvertise,
 	}, nil
 }
 

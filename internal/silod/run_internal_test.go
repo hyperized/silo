@@ -818,6 +818,7 @@ func TestAnnounceBootstrap_PrintsActionableHandshake(t *testing.T) {
 	// shows the exact siloctl command the operator should run next.
 	cfg := testConfig(t)
 	cfg.BootstrapAddr = "127.0.0.1:7001"
+	cfg.BootstrapAdvertise = "127.0.0.1:7001"
 	tokens, err := bootstraptoken.Open(filepath.Join(t.TempDir(), bootstraptoken.DefaultStoreName()))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
