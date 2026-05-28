@@ -90,6 +90,23 @@ func (s *ORSet[T]) Contains(elem T) bool {
 	return false
 }
 
+// LiveTag returns the greatest non-tombstoned tag for elem and whether elem
+// is present. The greatest tag is the element's effective claim time, which
+// lets callers order competing claims deterministically.
+func (s *ORSet[T]) LiveTag(elem T) (hlc.Timestamp, bool) {
+	var best hlc.Timestamp
+	found := false
+	for tag := range s.adds[elem] {
+		if _, removed := s.removes[elem][tag]; removed {
+			continue
+		}
+		if !found || tag.After(best) {
+			best, found = tag, true
+		}
+	}
+	return best, found
+}
+
 // Elements returns the present elements in unspecified order; callers that
 // need a stable order should sort the result.
 func (s *ORSet[T]) Elements() []T {

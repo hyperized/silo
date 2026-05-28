@@ -72,6 +72,24 @@ func TestORSet_Elements(t *testing.T) {
 	}
 }
 
+func TestORSet_LiveTag(t *testing.T) {
+	s := crdt.NewORSet[string]()
+	if _, ok := s.LiveTag("absent"); ok {
+		t.Error("absent element has no live tag")
+	}
+	s.Add("x", ts(1, "a"))
+	s.Add("x", ts(3, "a")) // a later claim of the same element
+	s.Add("x", ts(2, "a"))
+	got, ok := s.LiveTag("x")
+	if !ok || got.Compare(ts(3, "a")) != 0 {
+		t.Errorf("LiveTag = %v (ok=%v), want the greatest tag ts(3,a)", got, ok)
+	}
+	s.Remove("x")
+	if _, ok := s.LiveTag("x"); ok {
+		t.Error("LiveTag should report absent once all tags are tombstoned")
+	}
+}
+
 func TestORSet_AddWinsOverConcurrentRemove(t *testing.T) {
 	// Replica A adds x@t1. B learns it, then removes x (tombstoning t1).
 	// Concurrently A re-observes... model: A adds x again @t2 (a tag B never
