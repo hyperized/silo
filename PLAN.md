@@ -114,8 +114,8 @@ Each milestone is a usable, demoable, shippable artifact.
 | M0  | done        | scaffold, `/healthz`, docker-compose, CI |
 | M1  | done        | encrypted file-backed chunk store, gRPC, `siloctl` |
 | M2  | done        | mTLS, token-based operator join, SWIM gossip; bootstrap UX paper-cuts fixed |
-| M3  | next        | distributed chunk placement + replication (chunks currently single-node only) |
-| M4  | not started | CRDT namespace |
+| M3  | done        | consistent-hash placement, quorum-replicated writes, replica-preferring reads, re-replication scrubber |
+| M4  | next        | CRDT namespace |
 | M5  | not started | writer-owned chunks |
 | M6  | not started | block volume surface |
 | M7  | not started | CSI driver |
@@ -155,17 +155,17 @@ The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI 
 
 **Demo:** kill/start nodes randomly; cluster view converges within seconds on every node.
 
-### M3 — Distributed chunk placement + replication  [next]
+### M3 — Distributed chunk placement + replication  [done]
 
-- Consistent hash ring over live members
-- `Chunk.Put` to any node → forwarded to primary → synchronously replicated to N-1 secondaries (default N=3)
+- Consistent hash ring over live members (virtual nodes, derived from gossip)
+- `Chunk.Put` to any node → that node coordinates a direct fan-out to the chunk's replicas, acking at majority quorum; stragglers heal in the background (refined from the original "forward to primary": chunks are immutable, so a coordinator fan-out is simpler and the ring still names a deterministic primary)
 - Reads prefer local replica, fall back to ring
-- Re-replication on member loss (eventual, paced) via scrubber goroutine
-- Per-chunk data keys distributed alongside chunk replicas
+- Re-replication on member loss (eventual, paced) via scrubber goroutine — highest-priority *holder* pushes missing replicas
+- Per-chunk data keys distributed alongside chunk replicas (the wrapped DEK travels inside the encrypted envelope)
 
 **Demo:** kill a node holding replicas; `chunk get` still works; replicas re-form on a survivor.
 
-### M4 — CRDT namespace
+### M4 — CRDT namespace  [next]
 
 - Per-directory OR-Set of `(name, inode_id, claim_hlc, tombstone_hlc?)`
 - Per-inode metadata: type, ACL (LWW register), writer manifest (OR-Set), wrapped per-chunk data keys
