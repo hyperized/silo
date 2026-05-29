@@ -492,6 +492,21 @@ func (n *Namespace) WriteExtent(path string, index uint64, chunkID, holder strin
 	return nil
 }
 
+// Extent returns the chunk id backing the extent at index of the volume at
+// path, and whether that extent is mapped. An unmapped extent reads as zeros.
+// This is the per-block lookup the block-I/O path uses, avoiding a full
+// extent-map copy on every read.
+func (n *Namespace) Extent(path string, index uint64) (string, bool, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return "", false, err
+	}
+	id, ok := vol.extents.Get(index)
+	return id, ok, nil
+}
+
 // Extents returns the volume's current extent-to-chunk bindings as a map from
 // extent index to chunk id. Unmapped extents are absent (they read as zeros).
 func (n *Namespace) Extents(path string) (map[uint64]string, error) {

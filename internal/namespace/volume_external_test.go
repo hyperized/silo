@@ -38,6 +38,17 @@ func TestNamespace_CreateVolumeWriteReadExtents(t *testing.T) {
 		t.Fatalf("Extents = (%v,%v), want {0:c0 5:c5}", got, err)
 	}
 
+	// Per-extent lookup: a mapped extent and an unmapped one.
+	if id, ok, err := ns.Extent("/vol", 5); err != nil || !ok || id != "c5" {
+		t.Errorf("Extent(5) = (%q,%v,%v), want (c5,true,nil)", id, ok, err)
+	}
+	if id, ok, err := ns.Extent("/vol", 99); err != nil || ok || id != "" {
+		t.Errorf("Extent(99) = (%q,%v,%v), want (\"\",false,nil)", id, ok, err)
+	}
+	if _, _, err := ns.Extent("/missing", 0); err == nil {
+		t.Error("Extent on a missing volume should error")
+	}
+
 	// Overwriting a region under a newer HLC rebinds it (copy-on-write).
 	clk++
 	if err := ns.WriteExtent("/vol", 0, "c0-v2", "w"); err != nil {
