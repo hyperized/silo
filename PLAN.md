@@ -115,8 +115,8 @@ Each milestone is a usable, demoable, shippable artifact.
 | M1  | done        | encrypted file-backed chunk store, gRPC, `siloctl` |
 | M2  | done        | mTLS, token-based operator join, SWIM gossip; bootstrap UX paper-cuts fixed |
 | M3  | done        | consistent-hash placement, quorum-replicated writes, replica-preferring reads, re-replication scrubber |
-| M4  | next        | CRDT namespace |
-| M5  | not started | writer-owned chunks |
+| M4  | done        | HLC + CRDT namespace (OR-Set dirs, LWW ACLs), gossip-propagated, conflict surfacing, tombstone GC |
+| M5  | next        | writer-owned chunks |
 | M6  | not started | block volume surface |
 | M7  | not started | CSI driver |
 | M8  | not started | FUSE filesystem integration (gated on F1) |
@@ -165,18 +165,18 @@ The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI 
 
 **Demo:** kill a node holding replicas; `chunk get` still works; replicas re-form on a survivor.
 
-### M4 — CRDT namespace  [next]
+### M4 — CRDT namespace  [done]
 
-- Per-directory OR-Set of `(name, inode_id, claim_hlc, tombstone_hlc?)`
-- Per-inode metadata: type, ACL (LWW register), writer manifest (OR-Set), wrapped per-chunk data keys
+- Per-directory OR-Set of `(name, inode_id)` tagged with the claim HLC; removals are timestamped tombstones
+- Per-inode metadata: type and ACL (LWW register). Writer manifest + wrapped per-chunk data keys are deferred to the writer work (M5), where they are actually populated
 - HLC implementation (stdlib `time` + logical counter + node-id tiebreaker)
-- Gossip-propagated deltas + anti-entropy reconciliation
+- Gossip-propagated state over the existing anti-entropy exchange (refined from "deltas": full-state CRDT merge, which is simpler and still converges)
 - Conflict surface: `name.conflict-<hlc>` when concurrent creates collide
-- Tombstone GC with configurable retention (default 24h)
+- Tombstone GC with configurable retention (`SILO_TOMBSTONE_RETENTION`, default 24h)
 
 **Demo:** `siloctl ns mkdir/touch/ls/rm` across nodes; partition the cluster, mutate both sides, heal — converges with collisions surfaced cleanly.
 
-### M5 — Writer-owned chunks
+### M5 — Writer-owned chunks  [next]
 
 - Writer SDK (Go library): opens an inode, receives `(writer_id, epoch, chunk-id derivation rule, per-chunk data key)`
 - Local chunk-id counter + HLC per writer

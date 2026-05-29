@@ -2,7 +2,7 @@
 
 A symmetric, partition-tolerant distributed storage system in Go, designed for Kubernetes workloads on commodity hardware.
 
-> **Status:** pre-alpha. M3 distributed chunk placement + replication (quorum writes, replica-preferring reads). See [PLAN.md](PLAN.md) for the full design and roadmap.
+> **Status:** pre-alpha. M4 CRDT namespace (coordinator-free `mkdir/touch/ls/rm` over `siloctl ns`, gossip-converged, conflict surfacing, tombstone GC) on top of M3 replication. See [PLAN.md](PLAN.md) for the full design and roadmap.
 
 ## Design at a glance
 
