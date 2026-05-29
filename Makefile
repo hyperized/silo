@@ -101,6 +101,7 @@ fuzz: ## Fuzz the parse/merge/placement boundaries on demand (override: make fuz
 	@go test -run='^$$' -fuzz='^FuzzRedeem$$' -fuzztime=$(FUZZTIME) ./internal/bootstraptoken/
 	@go test -run='^$$' -fuzz='^FuzzConfigLoad$$' -fuzztime=$(FUZZTIME) ./internal/config/
 	@go test -run='^$$' -fuzz='^FuzzLoadAuthConfig$$' -fuzztime=$(FUZZTIME) ./cmd/siloctl/
+	@go test -run='^$$' -fuzz='^FuzzChunkIDAlwaysValid$$' -fuzztime=$(FUZZTIME) ./internal/writer/
 
 proto: ## Regenerate protobuf and gRPC code. Requires Docker; uses bufbuild/buf.
 	@if ! docker info >/dev/null 2>&1; then \
