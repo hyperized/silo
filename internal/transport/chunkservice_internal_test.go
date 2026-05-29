@@ -554,7 +554,7 @@ func TestGRPCServer_LifecycleAndAddrIsRaceFree(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverTLS, _ := testMTLSPair(t)
-	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, nil, logger)
+	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, nil, nil, logger)
 
 	if srv.Addr() != "" {
 		t.Errorf("Addr before Start: got %q, want empty", srv.Addr())
@@ -598,7 +598,7 @@ func TestGRPCServer_StartFailsOnBadAddress(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverTLS, _ := testMTLSPair(t)
 
-	srv := NewGRPCServer("not-an-address", serverTLS, store, nil, logger)
+	srv := NewGRPCServer("not-an-address", serverTLS, store, nil, nil, logger)
 	err := srv.Start()
 	if err == nil || !strings.Contains(err.Error(), "SILO_GRPC_ADDR") {
 		t.Errorf("expected SILO_GRPC_ADDR error, got %v", err)
@@ -613,7 +613,7 @@ func TestGRPCServer_ShutdownDeadlineForcesStop(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	serverTLS, clientTLS := testMTLSPair(t)
 
-	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, nil, logger)
+	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, nil, nil, logger)
 	go func() { _ = srv.Start() }()
 	// Wait until bound.
 	deadline := time.Now().Add(2 * time.Second)

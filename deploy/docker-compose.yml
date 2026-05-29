@@ -99,6 +99,9 @@ services:
       - silo-ca:/var/lib/silo/cluster
     ports:
       - "7081:7080"
+      # silo-b's mTLS gRPC, published so an operator (or a demo) can talk to
+      # a second node directly and watch namespace mutations converge.
+      - "7901:7000"
     depends_on:
       silo-a:
         condition: service_healthy

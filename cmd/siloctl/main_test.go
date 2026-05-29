@@ -20,8 +20,11 @@ import (
 	"google.golang.org/grpc/status"
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
+	namespacev1 "github.com/hyperized/silo/api/proto/silo/namespace/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
 	"github.com/hyperized/silo/internal/crypto"
+	"github.com/hyperized/silo/internal/hlc"
+	"github.com/hyperized/silo/internal/namespace"
 	"github.com/hyperized/silo/internal/transport"
 )
 
@@ -72,6 +75,7 @@ func newTestServer(t *testing.T) (addr string, teardown func()) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := transport.NewChunkService(store, storeCoord{store: store}, logger)
+	nsSvc := transport.NewNamespaceService(namespace.New(hlc.New("test")), logger)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -79,6 +83,7 @@ func newTestServer(t *testing.T) (addr string, teardown func()) {
 	}
 	s := grpc.NewServer()
 	chunkv1.RegisterChunkStoreServer(s, svc)
+	namespacev1.RegisterNamespaceStoreServer(s, nsSvc)
 	go func() { _ = s.Serve(ln) }()
 
 	teardown = func() {

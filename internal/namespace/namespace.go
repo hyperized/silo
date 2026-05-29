@@ -7,6 +7,7 @@ package namespace
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,6 +15,19 @@ import (
 
 	"github.com/hyperized/silo/internal/crdt"
 	"github.com/hyperized/silo/internal/hlc"
+)
+
+// Sentinel errors the gRPC layer matches with errors.Is to choose a status
+// code; the wrapped message stays the human-facing instruction.
+var (
+	// ErrExists means a name is already taken in its parent directory.
+	ErrExists = errors.New("path already exists")
+	// ErrNotExist means a path component was not found.
+	ErrNotExist = errors.New("path does not exist")
+	// ErrInvalidPath means a path is malformed (empty, root, or "..").
+	ErrInvalidPath = errors.New("invalid path")
+	// ErrNotDir means a path component that must be a directory is a file.
+	ErrNotDir = errors.New("not a directory")
 )
 
 // rootID is the well-known id of the root directory. Every replica shares
@@ -97,7 +111,7 @@ func (n *Namespace) create(path string, typ InodeType) (string, error) {
 		return "", err
 	}
 	if len(segs) == 0 {
-		return "", fmt.Errorf("namespace: cannot create the root directory")
+		return "", fmt.Errorf("namespace: cannot create the root directory: %w", ErrInvalidPath)
 	}
 
 	n.mu.Lock()
@@ -108,7 +122,7 @@ func (n *Namespace) create(path string, typ InodeType) (string, error) {
 	}
 	name := segs[len(segs)-1]
 	if _, exists := n.primaryChildLocked(parent, name); exists {
-		return "", fmt.Errorf("namespace: %q already exists; remove it first or pick another name", path)
+		return "", fmt.Errorf("namespace: %q already exists; remove it first or pick another name: %w", path, ErrExists)
 	}
 
 	ts := n.clock.Now()
@@ -130,7 +144,7 @@ func (n *Namespace) Remove(path string) error {
 		return err
 	}
 	if len(segs) == 0 {
-		return fmt.Errorf("namespace: cannot remove the root directory")
+		return fmt.Errorf("namespace: cannot remove the root directory: %w", ErrInvalidPath)
 	}
 
 	n.mu.Lock()
@@ -148,7 +162,7 @@ func (n *Namespace) Remove(path string) error {
 		}
 	}
 	if !removed {
-		return fmt.Errorf("namespace: %q does not exist", path)
+		return fmt.Errorf("namespace: %q does not exist: %w", path, ErrNotExist)
 	}
 	return nil
 }
@@ -305,11 +319,11 @@ func (n *Namespace) resolveDirLocked(segments []string) (*Inode, error) {
 	for _, name := range segments {
 		childID, ok := n.primaryChildLocked(cur, name)
 		if !ok {
-			return nil, fmt.Errorf("namespace: %q does not exist", name)
+			return nil, fmt.Errorf("namespace: %q does not exist: %w", name, ErrNotExist)
 		}
 		child := n.inodes[childID]
 		if child == nil || child.Type != Dir {
-			return nil, fmt.Errorf("namespace: %q is not a directory", name)
+			return nil, fmt.Errorf("namespace: %q is not a directory: %w", name, ErrNotDir)
 		}
 		cur = child
 	}
@@ -346,7 +360,7 @@ func splitPath(p string) ([]string, error) {
 		case "", ".":
 			continue
 		case "..":
-			return nil, fmt.Errorf("namespace: %q contains \"..\"; parent traversal is not supported", p)
+			return nil, fmt.Errorf("namespace: %q contains \"..\"; parent traversal is not supported: %w", p, ErrInvalidPath)
 		default:
 			out = append(out, seg)
 		}

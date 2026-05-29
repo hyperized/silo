@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package silo.namespace.v1;
+
+option go_package = "github.com/hyperized/silo/api/proto/silo/namespace/v1;namespacev1";
+
+// NamespaceStore is silod's operator-facing view of the cluster's CRDT
+// filesystem namespace. Mutations are local to the receiving node and
+// converge to peers over gossip anti-entropy; reads resolve the receiving
+// node's current replica.
+service NamespaceStore {
+  rpc Mkdir(MkdirRequest) returns (MkdirResponse);
+  rpc Touch(TouchRequest) returns (TouchResponse);
+  rpc List(ListRequest) returns (ListResponse);
+  rpc Remove(RemoveRequest) returns (RemoveResponse);
+}
+
+// EntryType distinguishes a directory from a file.
+enum EntryType {
+  ENTRY_TYPE_DIR = 0;
+  ENTRY_TYPE_FILE = 1;
+}
+
+message MkdirRequest {
+  string path = 1;
+}
+
+message MkdirResponse {
+  string inode = 1;
+}
+
+message TouchRequest {
+  string path = 1;
+}
+
+message TouchResponse {
+  string inode = 1;
+}
+
+message ListRequest {
+  string path = 1;
+}
+
+// Entry is one resolved child. When concurrent creates collided, the
+// highest-HLC claim keeps the bare name and the others carry a
+// ".conflict-<hlc>" name with conflict set.
+message Entry {
+  string name = 1;
+  string inode = 2;
+  EntryType type = 3;
+  bool conflict = 4;
+}
+
+message ListResponse {
+  repeated Entry entries = 1;
+}
+
+message RemoveRequest {
+  string path = 1;
+}
+
+message RemoveResponse {}
