@@ -22,6 +22,7 @@ type NamespaceOps interface {
 	List(path string) ([]namespace.ResolvedEntry, error)
 	AppendChunk(path, chunkID string) error
 	Manifest(path string) ([]string, error)
+	CreateVolume(path string, extentSize int64, opts ...namespace.VolumeOption) (string, error)
 }
 
 // NamespaceService exposes the node's namespace replica over gRPC. Writes
@@ -106,11 +107,25 @@ func (s *NamespaceService) Manifest(_ context.Context, req *namespacev1.Manifest
 	return &namespacev1.ManifestResponse{ChunkIds: ids}, nil
 }
 
-func protoEntryType(t namespace.InodeType) namespacev1.EntryType {
-	if t == namespace.Dir {
-		return namespacev1.EntryType_ENTRY_TYPE_DIR
+// CreateVolume creates a block volume at the requested path with the given
+// device and extent sizes (a zero extent size uses the server default).
+func (s *NamespaceService) CreateVolume(_ context.Context, req *namespacev1.CreateVolumeRequest) (*namespacev1.CreateVolumeResponse, error) {
+	id, err := s.ns.CreateVolume(req.GetPath(), req.GetExtentSizeBytes(), namespace.WithSize(req.GetSizeBytes()))
+	if err != nil {
+		return nil, mapNamespaceError(err)
 	}
-	return namespacev1.EntryType_ENTRY_TYPE_FILE
+	return &namespacev1.CreateVolumeResponse{Inode: id}, nil
+}
+
+func protoEntryType(t namespace.InodeType) namespacev1.EntryType {
+	switch t {
+	case namespace.Dir:
+		return namespacev1.EntryType_ENTRY_TYPE_DIR
+	case namespace.Volume:
+		return namespacev1.EntryType_ENTRY_TYPE_VOLUME
+	default:
+		return namespacev1.EntryType_ENTRY_TYPE_FILE
+	}
 }
 
 // mapNamespaceError translates a namespace sentinel into a gRPC status,

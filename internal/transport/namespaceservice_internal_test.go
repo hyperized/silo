@@ -15,11 +15,12 @@ import (
 )
 
 type fakeNamespaceOps struct {
-	id       string
-	err      error
-	entries  []namespace.ResolvedEntry
-	ids      []string    // returned by Manifest
-	appended [][2]string // records (path, chunkID) passed to AppendChunk
+	id            string
+	err           error
+	entries       []namespace.ResolvedEntry
+	ids           []string    // returned by Manifest
+	appended      [][2]string // records (path, chunkID) passed to AppendChunk
+	volExtentSize int64       // records the extent size passed to CreateVolume
 }
 
 func (f *fakeNamespaceOps) Mkdir(string) (string, error) { return f.id, f.err }
@@ -35,6 +36,11 @@ func (f *fakeNamespaceOps) AppendChunk(path, chunkID string) error {
 }
 
 func (f *fakeNamespaceOps) Manifest(string) ([]string, error) { return f.ids, f.err }
+
+func (f *fakeNamespaceOps) CreateVolume(_ string, extentSize int64, _ ...namespace.VolumeOption) (string, error) {
+	f.volExtentSize = extentSize
+	return f.id, f.err
+}
 
 func nsService(ops NamespaceOps) *NamespaceService {
 	return NewNamespaceService(ops, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -111,6 +117,38 @@ func TestNamespaceService_AppendChunkAndManifest(t *testing.T) {
 	}
 	if _, err := bad.Manifest(ctx, &namespacev1.ManifestRequest{Path: "/missing"}); status.Code(err) != codes.NotFound {
 		t.Errorf("Manifest on missing path code = %v, want NotFound", status.Code(err))
+	}
+}
+
+func TestNamespaceService_CreateVolume(t *testing.T) {
+	ctx := context.Background()
+	ops := &fakeNamespaceOps{id: "inode-vol"}
+	svc := nsService(ops)
+
+	resp, err := svc.CreateVolume(ctx, &namespacev1.CreateVolumeRequest{Path: "/vol", SizeBytes: 1 << 20, ExtentSizeBytes: 8192})
+	if err != nil || resp.GetInode() != "inode-vol" {
+		t.Fatalf("CreateVolume = (%v, %v), want inode-vol", resp, err)
+	}
+	if ops.volExtentSize != 8192 {
+		t.Errorf("extent size passed = %d, want 8192", ops.volExtentSize)
+	}
+
+	bad := nsService(&fakeNamespaceOps{err: namespace.ErrExists})
+	if _, err := bad.CreateVolume(ctx, &namespacev1.CreateVolumeRequest{Path: "/vol"}); status.Code(err) != codes.AlreadyExists {
+		t.Errorf("CreateVolume over existing = %v, want AlreadyExists", status.Code(err))
+	}
+}
+
+func TestNamespaceService_ListReportsVolumeType(t *testing.T) {
+	svc := nsService(&fakeNamespaceOps{entries: []namespace.ResolvedEntry{
+		{Name: "vol", Inode: "inode-1", Type: namespace.Volume},
+	}})
+	resp, err := svc.List(context.Background(), &namespacev1.ListRequest{Path: "/"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got := resp.Entries[0].GetType(); got != namespacev1.EntryType_ENTRY_TYPE_VOLUME {
+		t.Errorf("entry type = %v, want VOLUME", got)
 	}
 }
 

@@ -20,12 +20,16 @@ service NamespaceStore {
   // Manifest returns a file's chunk ids in the order a reader concatenates
   // them to reconstruct the byte stream.
   rpc Manifest(ManifestRequest) returns (ManifestResponse);
+  // CreateVolume creates a block volume: an inode whose data is an extent map
+  // backing a fixed-size block device, the surface an NBD client mounts.
+  rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
 }
 
-// EntryType distinguishes a directory from a file.
+// EntryType distinguishes a directory, a file, and a block volume.
 enum EntryType {
   ENTRY_TYPE_DIR = 0;
   ENTRY_TYPE_FILE = 1;
+  ENTRY_TYPE_VOLUME = 2;
 }
 
 message MkdirRequest {
@@ -81,4 +85,16 @@ message ManifestRequest {
 
 message ManifestResponse {
   repeated string chunk_ids = 1;
+}
+
+message CreateVolumeRequest {
+  string path = 1;
+  // size_bytes is the advertised block-device size.
+  int64 size_bytes = 2;
+  // extent_size_bytes is the copy-on-write unit; 0 uses the server default.
+  int64 extent_size_bytes = 3;
+}
+
+message CreateVolumeResponse {
+  string inode = 1;
 }

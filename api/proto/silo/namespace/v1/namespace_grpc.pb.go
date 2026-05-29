@@ -19,12 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NamespaceStore_Mkdir_FullMethodName       = "/silo.namespace.v1.NamespaceStore/Mkdir"
-	NamespaceStore_Touch_FullMethodName       = "/silo.namespace.v1.NamespaceStore/Touch"
-	NamespaceStore_List_FullMethodName        = "/silo.namespace.v1.NamespaceStore/List"
-	NamespaceStore_Remove_FullMethodName      = "/silo.namespace.v1.NamespaceStore/Remove"
-	NamespaceStore_AppendChunk_FullMethodName = "/silo.namespace.v1.NamespaceStore/AppendChunk"
-	NamespaceStore_Manifest_FullMethodName    = "/silo.namespace.v1.NamespaceStore/Manifest"
+	NamespaceStore_Mkdir_FullMethodName        = "/silo.namespace.v1.NamespaceStore/Mkdir"
+	NamespaceStore_Touch_FullMethodName        = "/silo.namespace.v1.NamespaceStore/Touch"
+	NamespaceStore_List_FullMethodName         = "/silo.namespace.v1.NamespaceStore/List"
+	NamespaceStore_Remove_FullMethodName       = "/silo.namespace.v1.NamespaceStore/Remove"
+	NamespaceStore_AppendChunk_FullMethodName  = "/silo.namespace.v1.NamespaceStore/AppendChunk"
+	NamespaceStore_Manifest_FullMethodName     = "/silo.namespace.v1.NamespaceStore/Manifest"
+	NamespaceStore_CreateVolume_FullMethodName = "/silo.namespace.v1.NamespaceStore/CreateVolume"
 )
 
 // NamespaceStoreClient is the client API for NamespaceStore service.
@@ -47,6 +48,9 @@ type NamespaceStoreClient interface {
 	// Manifest returns a file's chunk ids in the order a reader concatenates
 	// them to reconstruct the byte stream.
 	Manifest(ctx context.Context, in *ManifestRequest, opts ...grpc.CallOption) (*ManifestResponse, error)
+	// CreateVolume creates a block volume: an inode whose data is an extent map
+	// backing a fixed-size block device, the surface an NBD client mounts.
+	CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error)
 }
 
 type namespaceStoreClient struct {
@@ -117,6 +121,16 @@ func (c *namespaceStoreClient) Manifest(ctx context.Context, in *ManifestRequest
 	return out, nil
 }
 
+func (c *namespaceStoreClient) CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateVolumeResponse)
+	err := c.cc.Invoke(ctx, NamespaceStore_CreateVolume_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NamespaceStoreServer is the server API for NamespaceStore service.
 // All implementations should embed UnimplementedNamespaceStoreServer
 // for forward compatibility.
@@ -137,6 +151,9 @@ type NamespaceStoreServer interface {
 	// Manifest returns a file's chunk ids in the order a reader concatenates
 	// them to reconstruct the byte stream.
 	Manifest(context.Context, *ManifestRequest) (*ManifestResponse, error)
+	// CreateVolume creates a block volume: an inode whose data is an extent map
+	// backing a fixed-size block device, the surface an NBD client mounts.
+	CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error)
 }
 
 // UnimplementedNamespaceStoreServer should be embedded to have
@@ -163,6 +180,9 @@ func (UnimplementedNamespaceStoreServer) AppendChunk(context.Context, *AppendChu
 }
 func (UnimplementedNamespaceStoreServer) Manifest(context.Context, *ManifestRequest) (*ManifestResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Manifest not implemented")
+}
+func (UnimplementedNamespaceStoreServer) CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateVolume not implemented")
 }
 func (UnimplementedNamespaceStoreServer) testEmbeddedByValue() {}
 
@@ -292,6 +312,24 @@ func _NamespaceStore_Manifest_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NamespaceStore_CreateVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateVolumeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NamespaceStoreServer).CreateVolume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NamespaceStore_CreateVolume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NamespaceStoreServer).CreateVolume(ctx, req.(*CreateVolumeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NamespaceStore_ServiceDesc is the grpc.ServiceDesc for NamespaceStore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -322,6 +360,10 @@ var NamespaceStore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Manifest",
 			Handler:    _NamespaceStore_Manifest_Handler,
+		},
+		{
+			MethodName: "CreateVolume",
+			Handler:    _NamespaceStore_CreateVolume_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

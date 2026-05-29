@@ -21,12 +21,13 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// EntryType distinguishes a directory from a file.
+// EntryType distinguishes a directory, a file, and a block volume.
 type EntryType int32
 
 const (
-	EntryType_ENTRY_TYPE_DIR  EntryType = 0
-	EntryType_ENTRY_TYPE_FILE EntryType = 1
+	EntryType_ENTRY_TYPE_DIR    EntryType = 0
+	EntryType_ENTRY_TYPE_FILE   EntryType = 1
+	EntryType_ENTRY_TYPE_VOLUME EntryType = 2
 )
 
 // Enum value maps for EntryType.
@@ -34,10 +35,12 @@ var (
 	EntryType_name = map[int32]string{
 		0: "ENTRY_TYPE_DIR",
 		1: "ENTRY_TYPE_FILE",
+		2: "ENTRY_TYPE_VOLUME",
 	}
 	EntryType_value = map[string]int32{
-		"ENTRY_TYPE_DIR":  0,
-		"ENTRY_TYPE_FILE": 1,
+		"ENTRY_TYPE_DIR":    0,
+		"ENTRY_TYPE_FILE":   1,
+		"ENTRY_TYPE_VOLUME": 2,
 	}
 )
 
@@ -659,6 +662,112 @@ func (x *ManifestResponse) GetChunkIds() []string {
 	return nil
 }
 
+type CreateVolumeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Path  string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	// size_bytes is the advertised block-device size.
+	SizeBytes int64 `protobuf:"varint,2,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	// extent_size_bytes is the copy-on-write unit; 0 uses the server default.
+	ExtentSizeBytes int64 `protobuf:"varint,3,opt,name=extent_size_bytes,json=extentSizeBytes,proto3" json:"extent_size_bytes,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *CreateVolumeRequest) Reset() {
+	*x = CreateVolumeRequest{}
+	mi := &file_silo_namespace_v1_namespace_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateVolumeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateVolumeRequest) ProtoMessage() {}
+
+func (x *CreateVolumeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_silo_namespace_v1_namespace_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateVolumeRequest.ProtoReflect.Descriptor instead.
+func (*CreateVolumeRequest) Descriptor() ([]byte, []int) {
+	return file_silo_namespace_v1_namespace_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *CreateVolumeRequest) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *CreateVolumeRequest) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+func (x *CreateVolumeRequest) GetExtentSizeBytes() int64 {
+	if x != nil {
+		return x.ExtentSizeBytes
+	}
+	return 0
+}
+
+type CreateVolumeResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Inode         string                 `protobuf:"bytes,1,opt,name=inode,proto3" json:"inode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CreateVolumeResponse) Reset() {
+	*x = CreateVolumeResponse{}
+	mi := &file_silo_namespace_v1_namespace_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CreateVolumeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CreateVolumeResponse) ProtoMessage() {}
+
+func (x *CreateVolumeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_silo_namespace_v1_namespace_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CreateVolumeResponse.ProtoReflect.Descriptor instead.
+func (*CreateVolumeResponse) Descriptor() ([]byte, []int) {
+	return file_silo_namespace_v1_namespace_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *CreateVolumeResponse) GetInode() string {
+	if x != nil {
+		return x.Inode
+	}
+	return ""
+}
+
 var File_silo_namespace_v1_namespace_proto protoreflect.FileDescriptor
 
 const file_silo_namespace_v1_namespace_proto_rawDesc = "" +
@@ -691,17 +800,26 @@ const file_silo_namespace_v1_namespace_proto_rawDesc = "" +
 	"\x0fManifestRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"/\n" +
 	"\x10ManifestResponse\x12\x1b\n" +
-	"\tchunk_ids\x18\x01 \x03(\tR\bchunkIds*4\n" +
+	"\tchunk_ids\x18\x01 \x03(\tR\bchunkIds\"t\n" +
+	"\x13CreateVolumeRequest\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x02 \x01(\x03R\tsizeBytes\x12*\n" +
+	"\x11extent_size_bytes\x18\x03 \x01(\x03R\x0fextentSizeBytes\",\n" +
+	"\x14CreateVolumeResponse\x12\x14\n" +
+	"\x05inode\x18\x01 \x01(\tR\x05inode*K\n" +
 	"\tEntryType\x12\x12\n" +
 	"\x0eENTRY_TYPE_DIR\x10\x00\x12\x13\n" +
-	"\x0fENTRY_TYPE_FILE\x10\x012\xf3\x03\n" +
+	"\x0fENTRY_TYPE_FILE\x10\x01\x12\x15\n" +
+	"\x11ENTRY_TYPE_VOLUME\x10\x022\xd4\x04\n" +
 	"\x0eNamespaceStore\x12J\n" +
 	"\x05Mkdir\x12\x1f.silo.namespace.v1.MkdirRequest\x1a .silo.namespace.v1.MkdirResponse\x12J\n" +
 	"\x05Touch\x12\x1f.silo.namespace.v1.TouchRequest\x1a .silo.namespace.v1.TouchResponse\x12G\n" +
 	"\x04List\x12\x1e.silo.namespace.v1.ListRequest\x1a\x1f.silo.namespace.v1.ListResponse\x12M\n" +
 	"\x06Remove\x12 .silo.namespace.v1.RemoveRequest\x1a!.silo.namespace.v1.RemoveResponse\x12\\\n" +
 	"\vAppendChunk\x12%.silo.namespace.v1.AppendChunkRequest\x1a&.silo.namespace.v1.AppendChunkResponse\x12S\n" +
-	"\bManifest\x12\".silo.namespace.v1.ManifestRequest\x1a#.silo.namespace.v1.ManifestResponseBCZAgithub.com/hyperized/silo/api/proto/silo/namespace/v1;namespacev1b\x06proto3"
+	"\bManifest\x12\".silo.namespace.v1.ManifestRequest\x1a#.silo.namespace.v1.ManifestResponse\x12_\n" +
+	"\fCreateVolume\x12&.silo.namespace.v1.CreateVolumeRequest\x1a'.silo.namespace.v1.CreateVolumeResponseBCZAgithub.com/hyperized/silo/api/proto/silo/namespace/v1;namespacev1b\x06proto3"
 
 var (
 	file_silo_namespace_v1_namespace_proto_rawDescOnce sync.Once
@@ -716,22 +834,24 @@ func file_silo_namespace_v1_namespace_proto_rawDescGZIP() []byte {
 }
 
 var file_silo_namespace_v1_namespace_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_silo_namespace_v1_namespace_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_silo_namespace_v1_namespace_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_silo_namespace_v1_namespace_proto_goTypes = []any{
-	(EntryType)(0),              // 0: silo.namespace.v1.EntryType
-	(*MkdirRequest)(nil),        // 1: silo.namespace.v1.MkdirRequest
-	(*MkdirResponse)(nil),       // 2: silo.namespace.v1.MkdirResponse
-	(*TouchRequest)(nil),        // 3: silo.namespace.v1.TouchRequest
-	(*TouchResponse)(nil),       // 4: silo.namespace.v1.TouchResponse
-	(*ListRequest)(nil),         // 5: silo.namespace.v1.ListRequest
-	(*Entry)(nil),               // 6: silo.namespace.v1.Entry
-	(*ListResponse)(nil),        // 7: silo.namespace.v1.ListResponse
-	(*RemoveRequest)(nil),       // 8: silo.namespace.v1.RemoveRequest
-	(*RemoveResponse)(nil),      // 9: silo.namespace.v1.RemoveResponse
-	(*AppendChunkRequest)(nil),  // 10: silo.namespace.v1.AppendChunkRequest
-	(*AppendChunkResponse)(nil), // 11: silo.namespace.v1.AppendChunkResponse
-	(*ManifestRequest)(nil),     // 12: silo.namespace.v1.ManifestRequest
-	(*ManifestResponse)(nil),    // 13: silo.namespace.v1.ManifestResponse
+	(EntryType)(0),               // 0: silo.namespace.v1.EntryType
+	(*MkdirRequest)(nil),         // 1: silo.namespace.v1.MkdirRequest
+	(*MkdirResponse)(nil),        // 2: silo.namespace.v1.MkdirResponse
+	(*TouchRequest)(nil),         // 3: silo.namespace.v1.TouchRequest
+	(*TouchResponse)(nil),        // 4: silo.namespace.v1.TouchResponse
+	(*ListRequest)(nil),          // 5: silo.namespace.v1.ListRequest
+	(*Entry)(nil),                // 6: silo.namespace.v1.Entry
+	(*ListResponse)(nil),         // 7: silo.namespace.v1.ListResponse
+	(*RemoveRequest)(nil),        // 8: silo.namespace.v1.RemoveRequest
+	(*RemoveResponse)(nil),       // 9: silo.namespace.v1.RemoveResponse
+	(*AppendChunkRequest)(nil),   // 10: silo.namespace.v1.AppendChunkRequest
+	(*AppendChunkResponse)(nil),  // 11: silo.namespace.v1.AppendChunkResponse
+	(*ManifestRequest)(nil),      // 12: silo.namespace.v1.ManifestRequest
+	(*ManifestResponse)(nil),     // 13: silo.namespace.v1.ManifestResponse
+	(*CreateVolumeRequest)(nil),  // 14: silo.namespace.v1.CreateVolumeRequest
+	(*CreateVolumeResponse)(nil), // 15: silo.namespace.v1.CreateVolumeResponse
 }
 var file_silo_namespace_v1_namespace_proto_depIdxs = []int32{
 	0,  // 0: silo.namespace.v1.Entry.type:type_name -> silo.namespace.v1.EntryType
@@ -742,14 +862,16 @@ var file_silo_namespace_v1_namespace_proto_depIdxs = []int32{
 	8,  // 5: silo.namespace.v1.NamespaceStore.Remove:input_type -> silo.namespace.v1.RemoveRequest
 	10, // 6: silo.namespace.v1.NamespaceStore.AppendChunk:input_type -> silo.namespace.v1.AppendChunkRequest
 	12, // 7: silo.namespace.v1.NamespaceStore.Manifest:input_type -> silo.namespace.v1.ManifestRequest
-	2,  // 8: silo.namespace.v1.NamespaceStore.Mkdir:output_type -> silo.namespace.v1.MkdirResponse
-	4,  // 9: silo.namespace.v1.NamespaceStore.Touch:output_type -> silo.namespace.v1.TouchResponse
-	7,  // 10: silo.namespace.v1.NamespaceStore.List:output_type -> silo.namespace.v1.ListResponse
-	9,  // 11: silo.namespace.v1.NamespaceStore.Remove:output_type -> silo.namespace.v1.RemoveResponse
-	11, // 12: silo.namespace.v1.NamespaceStore.AppendChunk:output_type -> silo.namespace.v1.AppendChunkResponse
-	13, // 13: silo.namespace.v1.NamespaceStore.Manifest:output_type -> silo.namespace.v1.ManifestResponse
-	8,  // [8:14] is the sub-list for method output_type
-	2,  // [2:8] is the sub-list for method input_type
+	14, // 8: silo.namespace.v1.NamespaceStore.CreateVolume:input_type -> silo.namespace.v1.CreateVolumeRequest
+	2,  // 9: silo.namespace.v1.NamespaceStore.Mkdir:output_type -> silo.namespace.v1.MkdirResponse
+	4,  // 10: silo.namespace.v1.NamespaceStore.Touch:output_type -> silo.namespace.v1.TouchResponse
+	7,  // 11: silo.namespace.v1.NamespaceStore.List:output_type -> silo.namespace.v1.ListResponse
+	9,  // 12: silo.namespace.v1.NamespaceStore.Remove:output_type -> silo.namespace.v1.RemoveResponse
+	11, // 13: silo.namespace.v1.NamespaceStore.AppendChunk:output_type -> silo.namespace.v1.AppendChunkResponse
+	13, // 14: silo.namespace.v1.NamespaceStore.Manifest:output_type -> silo.namespace.v1.ManifestResponse
+	15, // 15: silo.namespace.v1.NamespaceStore.CreateVolume:output_type -> silo.namespace.v1.CreateVolumeResponse
+	9,  // [9:16] is the sub-list for method output_type
+	2,  // [2:9] is the sub-list for method input_type
 	2,  // [2:2] is the sub-list for extension type_name
 	2,  // [2:2] is the sub-list for extension extendee
 	0,  // [0:2] is the sub-list for field type_name
@@ -766,7 +888,7 @@ func file_silo_namespace_v1_namespace_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_silo_namespace_v1_namespace_proto_rawDesc), len(file_silo_namespace_v1_namespace_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   13,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
