@@ -15,6 +15,9 @@ deploy/.env.local
 coverage.*
 profile.*
 
+# QEMU NBD demo guest artifacts (kernel + initramfs, rebuilt by run-vm.sh)
+/deploy/nbd-demo/vm/out/
+
 # Local data directories used by docker-compose
 /data/
 /var/

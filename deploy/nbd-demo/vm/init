@@ -1,0 +1,49 @@
+#!/bin/sh
+# Guest init for the QEMU NBD demo. The NBD export is attached by qemu (the
+# host process, via its built-in NBD client) as the virtio disk /dev/vda, so
+# the guest needs no networking and no nbd kernel module — it just makes a
+# filesystem on the disk, mounts it, writes and reads a file, and reports a
+# sentinel the host greps for. Then it powers off so qemu exits.
+set -u
+
+mount -t proc none /proc 2>/dev/null || true
+mount -t sysfs none /sys 2>/dev/null || true
+mount -t devtmpfs none /dev 2>/dev/null || true
+
+modprobe virtio_blk 2>/dev/null || true
+modprobe ext4 2>/dev/null || true
+
+want="hello from a silo block volume over qemu NBD"
+
+for _ in $(seq 1 100); do
+	[ -b /dev/vda ] && break
+	sleep 0.1
+done
+if [ ! -b /dev/vda ]; then
+	echo "NBD-VM-FAIL: /dev/vda never appeared"
+	poweroff -f
+fi
+
+echo "NBD-VM: mkfs.ext4 on /dev/vda"
+if ! mkfs.ext4 -q -F /dev/vda; then
+	echo "NBD-VM-FAIL: mkfs failed"
+	poweroff -f
+fi
+
+mkdir -p /mnt/demo
+if ! mount /dev/vda /mnt/demo; then
+	echo "NBD-VM-FAIL: mount failed"
+	poweroff -f
+fi
+
+echo "$want" >/mnt/demo/hello.txt
+sync
+got=$(cat /mnt/demo/hello.txt 2>/dev/null || true)
+umount /mnt/demo
+
+if [ "$got" = "$want" ]; then
+	echo "NBD-VM-OK: $got"
+else
+	echo "NBD-VM-FAIL: read back '$got'"
+fi
+poweroff -f

@@ -18,6 +18,10 @@ x-silod: &silod
     SILO_BOOTSTRAP_ADDR: 0.0.0.0:7001
     SILO_GOSSIP_ADDR: 0.0.0.0:7100
     SILO_HTTP_ADDR: 0.0.0.0:7080
+    # NBD block-device server. Opt-in (off unless SILO_NBD_ADDR is set); the
+    # local stack turns it on so `make nbd-demo` can mkfs+mount a volume. It is
+    # unauthenticated block I/O, reachable only on the cluster network here.
+    SILO_NBD_ADDR: 0.0.0.0:10809
     SILO_DATA_DIR: /var/lib/silo
     # Sharing /var/lib/silo/cluster across nodes via the silo-ca named
     # volume means all three silods load the same CA cert + key, which
@@ -77,6 +81,10 @@ services:
       # silo-a's healthcheck to pass before they start, by which time
       # the CA is already on disk.
       SILO_TLS_CA_SEED: "1"
+      # `make nbd-demo` sets this to 1 so silo-a always prints a fresh
+      # bootstrap token (even on a cluster that has already booted), giving
+      # the demo a token to scrape without tearing the cluster down.
+      SILO_PRINT_BOOTSTRAP_TOKEN: "${SILO_PRINT_BOOTSTRAP_TOKEN:-}"
     volumes:
       - silo-a-data:/var/lib/silo
       - silo-ca:/var/lib/silo/cluster
@@ -84,6 +92,7 @@ services:
       - "7080:7080" # HTTP (healthz, metrics) on the host
       - "7001:7001" # Bootstrap join API — point siloctl auth init here
       - "${SILO_GRPC_HOST_PORT:-7900}:7000" # mTLS gRPC — siloctl chunk … goes here after auth init
+      - "${SILO_NBD_HOST_PORT:-10809}:10809" # NBD — a Linux host can nbd-client this directly
 
   silo-b:
     <<: *silod
@@ -120,6 +129,29 @@ services:
       - silo-ca:/var/lib/silo/cluster
     ports:
       - "7082:7080"
+    depends_on:
+      silo-a:
+        condition: service_healthy
+
+  # nbd-demo is a one-shot privileged Linux container that proves the block
+  # surface end to end: it claims credentials, creates a volume, attaches it
+  # over NBD, mkfs+mounts it, writes and reads a file, and re-attaches to show
+  # the data persists. It is gated behind the "demo" profile so it never runs
+  # on `make up`; drive it with `make nbd-demo`, which scrapes the bootstrap
+  # token+fingerprint from silo-a's logs and passes them in. Requires a Linux
+  # Docker host with the nbd kernel module available (it cannot run against the
+  # macOS Docker VM, which lacks /dev/nbd).
+  nbd-demo:
+    profiles: ["demo"]
+    build:
+      context: ..
+      dockerfile: deploy/nbd-demo/Dockerfile
+    privileged: true
+    environment:
+      SILO_DEMO_TOKEN: "${SILO_DEMO_TOKEN:-}"
+      SILO_DEMO_FP: "${SILO_DEMO_FP:-}"
+    networks:
+      - silo
     depends_on:
       silo-a:
         condition: service_healthy

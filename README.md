@@ -201,6 +201,31 @@ troubleshooting (the `nbd` module, lease takeover, sidecar RBAC) are in
 
 ---
 
+### Block volumes
+
+A *volume* is a virtual disk backed by silo. Internally it is an inode whose data is mapped extent-by-extent (offset → chunk) with copy-on-write, guarded by a single-writer lease so two hosts can't scribble over each other. Create one with:
+
+```sh
+siloctl volume create --size 10G --extent-size 64K /my-volume
+```
+
+You attach a volume to a host as a block device over **NBD** (Network Block Device — a Linux kernel protocol that exposes a remote disk as a local `/dev/nbdX`). Each silod can serve its volumes over NBD when `SILO_NBD_ADDR` is set; the volume's path is the NBD export name.
+
+Two end-to-end demos prove the block surface — they differ in *which* NBD client mounts the volume, because that client is the part worth verifying independently:
+
+```sh
+make nbd-demo      # privileged Linux container: nbd-client attaches the volume,
+                   # mkfs.ext4 + mount, write/read, detach/re-attach to show the
+                   # data persists. Needs a Linux host with the `nbd` kernel
+                   # module (the macOS Docker VM does not ship it).
+
+make nbd-demo-vm   # boots a throwaway aarch64 Linux guest under QEMU with the
+                   # volume attached as its virtio disk over NBD, so QEMU's own
+                   # NBD client is the verifier. Runs fully on macOS via the
+                   # Hypervisor framework — no host NBD kernel module needed.
+                   # Requires `qemu` (brew install qemu) and Docker.
+```
+
 ## Documentation
 
 - **[docs/kubernetes.md](docs/kubernetes.md)** — install and operate silo-csi on Kubernetes (Helm values, StorageClass, snapshots, troubleshooting)

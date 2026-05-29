@@ -199,6 +199,10 @@ The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI 
 
 **Demo:** `mkfs.ext4` + mount a 10GB volume on a Linux host; pull the underlying node's plug, volume reattaches elsewhere via lease takeover. `siloctl volume snapshot /vol /vol-backup` freezes a point-in-time copy that survives writes to the source.
 
+**NBD client demos (two, because the NBD client is the part to verify independently):**
+- `make nbd-demo` — privileged Linux container: `nbd-client` attaches the volume, `mkfs.ext4` + mount, write/read, detach/re-attach to prove persistence. Needs a Linux host with the `nbd` kernel module (not the macOS Docker VM).
+- `make nbd-demo-vm` — boots a throwaway aarch64 guest under QEMU (HVF on Apple Silicon) with the volume attached as its virtio disk *over NBD*, so QEMU's own NBD client is the independent verifier. Runs fully on macOS, no host NBD kernel module. The guest does `mkfs.ext4` + mount + write + read and reports a sentinel.
+
 ### M7 — CSI driver  [done]
 
 - `silo-csi` plugin wrapping M6: `CreateVolume`, `DeleteVolume`, `ControllerPublishVolume`, `NodePublishVolume`, snapshots. The CSI spec proto is vendored under `api/proto/csi/v1` and generated in-tree (no module dependency, per the stdlib-first principle). Identity/Controller/Node services live in `internal/csi`; the controller maps each CSI name onto a `/csi/{volumes,snapshots}` namespace path (the path doubles as the opaque CSI id) and provisions/snapshots/clones via the namespace `CreateVolume`/`SnapshotVolume` RPCs; the node attaches over NBD (taking the fenced lease) and formats/mounts via the host's nbd-client/mkfs/mount behind a tested command-runner seam. `cmd/silo-csi` runs controller, node, or both.
