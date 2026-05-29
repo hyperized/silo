@@ -89,6 +89,10 @@ func New(node string, opts ...Option) *Clock {
 	return c
 }
 
+// Node returns the id this clock stamps its timestamps with. It never
+// changes after New, so no lock is taken.
+func (c *Clock) Node() string { return c.node }
+
 // Now returns the timestamp for a local event and advances the clock. The
 // result is strictly greater (by Compare) than every timestamp this clock
 // has previously returned, even if the physical clock has not advanced or

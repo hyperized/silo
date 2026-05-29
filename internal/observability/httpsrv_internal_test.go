@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,10 +13,10 @@ import (
 
 // newTestServer starts a Server bound to an ephemeral port and returns it
 // together with a cleanup function. Tests can hit s.Addr() over HTTP.
-func newTestServer(t *testing.T) *Server {
+func newTestServer(t *testing.T, opts ...Option) *Server {
 	t.Helper()
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := NewServer("127.0.0.1:0", "node-test", "v0.0.0-test", lg)
+	s := NewServer("127.0.0.1:0", "node-test", "v0.0.0-test", lg, opts...)
 
 	started := make(chan struct{})
 	go func() {
@@ -72,8 +73,11 @@ func TestServer_HealthzReturnsOK(t *testing.T) {
 	}
 }
 
-func TestServer_MetricsExposesBuildInfo(t *testing.T) {
-	s := newTestServer(t)
+func TestServer_MetricsDelegatesToHandler(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "silo_test_metric 1\n")
+	})
+	s := newTestServer(t, WithMetricsHandler(handler))
 	resp, err := http.Get("http://" + s.Addr() + "/metrics")
 	if err != nil {
 		t.Fatalf("GET /metrics: %v", err)
@@ -83,15 +87,21 @@ func TestServer_MetricsExposesBuildInfo(t *testing.T) {
 		t.Errorf("status: got %d, want 200", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	out := string(body)
-	if !strings.Contains(out, "silo_build_info") {
-		t.Errorf("metrics missing build_info: %q", out)
+	if !strings.Contains(string(body), "silo_test_metric 1") {
+		t.Errorf("metrics body did not come from the mounted handler: %q", body)
 	}
-	if !strings.Contains(out, `node="node-test"`) {
-		t.Errorf("metrics missing node label: %q", out)
+}
+
+func TestServer_MetricsAbsentWithoutHandler(t *testing.T) {
+	// With no metrics handler the route is not mounted at all.
+	s := newTestServer(t)
+	resp, err := http.Get("http://" + s.Addr() + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
 	}
-	if !strings.Contains(out, `version="v0.0.0-test"`) {
-		t.Errorf("metrics missing version label: %q", out)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status: got %d, want 404 when no metrics handler is set", resp.StatusCode)
 	}
 }
 

@@ -97,6 +97,11 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.TombstoneRetention != DefaultTombstoneRetention {
 		t.Errorf("TombstoneRetention default: got %v, want %v", cfg.TombstoneRetention, DefaultTombstoneRetention)
 	}
+	// Skew threshold, like retention, defaults concretely: zero would alert on
+	// every observation.
+	if cfg.MaxClockSkew != DefaultMaxClockSkew {
+		t.Errorf("MaxClockSkew default: got %v, want %v", cfg.MaxClockSkew, DefaultMaxClockSkew)
+	}
 }
 
 func TestLoad_BadTombstoneRetention(t *testing.T) {
@@ -107,6 +112,17 @@ func TestLoad_BadTombstoneRetention(t *testing.T) {
 	}))
 	if err == nil || !strings.Contains(err.Error(), "SILO_TOMBSTONE_RETENTION") {
 		t.Fatalf("got %v, want a SILO_TOMBSTONE_RETENTION parse error", err)
+	}
+}
+
+func TestLoad_BadMaxClockSkew(t *testing.T) {
+	_, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":        "n",
+		"SILO_ENCRYPTION_KEY": validBase64Key(t),
+		"SILO_MAX_CLOCK_SKEW": "a-while",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "SILO_MAX_CLOCK_SKEW") {
+		t.Fatalf("got %v, want a SILO_MAX_CLOCK_SKEW parse error", err)
 	}
 }
 
@@ -146,6 +162,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_REPLICATION":           "5",
 		"SILO_SCRUB_INTERVAL":        "5s",
 		"SILO_TOMBSTONE_RETENTION":   "12h",
+		"SILO_MAX_CLOCK_SKEW":        "2s",
 		"SILO_LOG_LEVEL":             "debug",
 		"SILO_LOG_FORMAT":            "json",
 		"SILO_ENCRYPTION_KEY":        validBase64Key(t),
@@ -175,6 +192,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		Replication:         5,
 		ScrubInterval:       5 * time.Second,
 		TombstoneRetention:  12 * time.Hour,
+		MaxClockSkew:        2 * time.Second,
 		KeySource:           KeySourceStatic,
 		LogLevel:            "debug",
 		LogFormat:           "json",

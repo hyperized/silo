@@ -25,7 +25,7 @@ func FuzzConfigLoad(f *testing.F) {
 				return addr
 			case "SILO_REPLICATION":
 				return repl
-			case "SILO_SCRUB_INTERVAL", "SILO_TOMBSTONE_RETENTION":
+			case "SILO_SCRUB_INTERVAL", "SILO_TOMBSTONE_RETENTION", "SILO_MAX_CLOCK_SKEW":
 				return dur
 			case "SILO_ENCRYPTION_KEY":
 				return key

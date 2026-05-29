@@ -118,7 +118,7 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 		loadClusterTLS = prevTLS
 		openTokenStore = prevTokens
 	})
-	newHTTPSubsystem = func(_ *config.Config, _ string, _ *slog.Logger) subsystem { return httpSub }
+	newHTTPSubsystem = func(_ *config.Config, _ string, _ *slog.Logger, _ http.Handler) subsystem { return httpSub }
 	newGRPCSubsystem = func(_ *config.Config, _ *tls.Config, _ chunkstore.Store, _ transport.Coordinator, _ transport.NamespaceOps, _ *slog.Logger) subsystem {
 		return grpcSub
 	}
@@ -1061,7 +1061,7 @@ func TestRun_NamespaceOpenFailure(t *testing.T) {
 	)
 	prev := newNamespace
 	t.Cleanup(func() { newNamespace = prev })
-	newNamespace = func(*hlc.Clock, string, *slog.Logger) (*namespace.Namespace, error) {
+	newNamespace = func(*hlc.Clock, string, *slog.Logger, ...namespace.Option) (*namespace.Namespace, error) {
 		return nil, errors.New("simulated namespace open failure")
 	}
 	err := Run(context.Background(), testConfig(t), discardLogger(), io.Discard, "v0")

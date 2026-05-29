@@ -9,15 +9,18 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/hyperized/silo/internal/bootstraptoken"
 	"github.com/hyperized/silo/internal/chunkstore"
+	"github.com/hyperized/silo/internal/clockskew"
 	"github.com/hyperized/silo/internal/clustertls"
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
+	"github.com/hyperized/silo/internal/exporter"
 	"github.com/hyperized/silo/internal/gossip"
 	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/membership"
@@ -54,8 +57,8 @@ type subsystem interface {
 // Factories for each subsystem are package-level so tests can swap in
 // fakes without spinning up real listeners.
 var (
-	newHTTPSubsystem = func(cfg *config.Config, version string, logger *slog.Logger) subsystem {
-		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger)}
+	newHTTPSubsystem = func(cfg *config.Config, version string, logger *slog.Logger, metrics http.Handler) subsystem {
+		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger, observability.WithMetricsHandler(metrics))}
 	}
 	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, logger *slog.Logger) subsystem {
 		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, coord, ns, logger)}
@@ -369,7 +372,12 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// rides the gossip anti-entropy exchange to converge with peers, and a
 	// background sweep reclaims tombstones older than the retention window.
 	// The sweep stops when ctx is cancelled on shutdown.
-	ns, err := newNamespace(hlc.New(cfg.NodeID), filepath.Join(cfg.DataDir, "namespace.json"), logger)
+	// The skew monitor compares peer-issued HLC timestamps (seen as peer
+	// state arrives over anti-entropy) against this node's clock, warning and
+	// counting an alert when a peer runs ahead beyond the threshold — the
+	// early signal of broken time sync, which silently corrupts write order.
+	skew := clockskew.New(cfg.MaxClockSkew, logger)
+	ns, err := newNamespace(hlc.New(cfg.NodeID), filepath.Join(cfg.DataDir, "namespace.json"), logger, namespace.WithPeerClockObserver(skew.Observe))
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not open the namespace state (%w)", err)
 	}
@@ -389,8 +397,16 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	defer func() { _ = peers.Close() }()
 	coord := replication.New(router, store, peers, cfg.Replication, logger)
 
+	// The exporter owns silod's Prometheus exposition: it reads plain getters
+	// (build info, the skew monitor) and renders them at /metrics, which the
+	// observability server hosts on its shared listener.
+	exp := exporter.New()
+	exp.Info("silo_build_info", "Build information for the running silod.", [][2]string{{"node", cfg.NodeID}, {"version", version}})
+	exp.Gauge("silo_hlc_peer_clock_skew_seconds", "Last observed clock skew to a peer; positive means the peer is ahead of this node.", func() float64 { return skew.Last().Seconds() })
+	exp.Counter("silo_hlc_clock_skew_alerts_total", "Times a peer's clock exceeded the configured skew threshold.", skew.Alerts)
+
 	subs := []subsystem{
-		newHTTPSubsystem(cfg, version, logger),
+		newHTTPSubsystem(cfg, version, logger, exp.Handler()),
 		newGRPCSubsystem(cfg, serverTLS, store, coord, ns, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,

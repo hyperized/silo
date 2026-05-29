@@ -20,23 +20,39 @@ type Server struct {
 	version string
 	logger  *slog.Logger
 	srv     *http.Server
+	metrics http.Handler // optional; the /metrics route is mounted only when set
 
 	mu sync.Mutex // guards ln; race detector caught a Start/Addr race
 	ln net.Listener
 }
 
+// Option configures a Server.
+type Option func(*Server)
+
+// WithMetricsHandler mounts handler at GET /metrics. The metrics text is owned
+// by the exporter package; this server only hosts the route on its shared
+// listener alongside /healthz.
+func WithMetricsHandler(handler http.Handler) Option {
+	return func(s *Server) { s.metrics = handler }
+}
+
 // NewServer wires the routes but does not bind the socket; call Start
 // for that. The split matters because bind failures should surface
 // during silod startup, not during ServeMux construction in tests.
-func NewServer(addr, nodeID, version string, logger *slog.Logger) *Server {
+func NewServer(addr, nodeID, version string, logger *slog.Logger, opts ...Option) *Server {
 	s := &Server{
 		nodeID:  nodeID,
 		version: version,
 		logger:  logger,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	if s.metrics != nil {
+		mux.Handle("GET /metrics", s.metrics)
+	}
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -96,11 +112,4 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","node":%q,"version":%q}`+"\n", s.nodeID, s.version)
-}
-
-func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprintf(w, "# HELP silo_build_info Build information for the running silod.\n")
-	fmt.Fprintf(w, "# TYPE silo_build_info gauge\n")
-	fmt.Fprintf(w, "silo_build_info{node=%q,version=%q} 1\n", s.nodeID, s.version)
 }

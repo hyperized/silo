@@ -53,6 +53,11 @@ const (
 // was partitioned for hours — before its tombstone is reclaimed.
 const DefaultTombstoneRetention = 24 * time.Hour
 
+// DefaultMaxClockSkew is how far ahead a peer's clock may run before silod
+// warns. 500ms comfortably absorbs gossip and processing delay while still
+// catching a genuinely misconfigured clock (seconds to hours off).
+const DefaultMaxClockSkew = 500 * time.Millisecond
+
 // Config is silod's fully-resolved runtime configuration. Load builds it
 // from the environment and Validate must pass before it is used.
 type Config struct {
@@ -78,11 +83,15 @@ type Config struct {
 	// is kept before GC reclaims it — long enough to propagate to every
 	// replica. Set SILO_TOMBSTONE_RETENTION to override the 24h default.
 	TombstoneRetention time.Duration
-	KeySource          KeySource
-	EncryptionKey      []byte
-	KeyPath            string
-	LogLevel           string
-	LogFormat          string
+	// MaxClockSkew is how far ahead a peer's clock may run before silod warns
+	// and counts a skew alert. Set SILO_MAX_CLOCK_SKEW to override the 500ms
+	// default.
+	MaxClockSkew  time.Duration
+	KeySource     KeySource
+	EncryptionKey []byte
+	KeyPath       string
+	LogLevel      string
+	LogFormat     string
 
 	// TLS material for inter-node and client traffic. All four paths
 	// default to siblings under DataDir so a fresh silod boots without
@@ -192,6 +201,12 @@ func Load(env EnvFunc) (*Config, error) {
 	}
 	cfg.TombstoneRetention = retention
 
+	maxSkew, err := envDuration(env, "SILO_MAX_CLOCK_SKEW")
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxClockSkew = maxSkew
+
 	if err := loadEncryptionKey(env, cfg); err != nil {
 		return nil, err
 	}
@@ -249,6 +264,11 @@ func Load(env EnvFunc) (*Config, error) {
 	// safe default rather than honour it.
 	if cfg.TombstoneRetention == 0 {
 		cfg.TombstoneRetention = DefaultTombstoneRetention
+	}
+	// A zero threshold would alert on every observation; fall back to the
+	// safe default rather than honour it.
+	if cfg.MaxClockSkew == 0 {
+		cfg.MaxClockSkew = DefaultMaxClockSkew
 	}
 
 	if err := cfg.Validate(); err != nil {

@@ -105,20 +105,38 @@ type Namespace struct {
 	path   string
 	logger *slog.Logger
 
+	// peerClock, when set, is called with the highest foreign timestamp seen
+	// in each peer snapshot so a skew monitor can compare it to local time.
+	peerClock func(node string, wall int64)
+
 	mu     sync.Mutex
 	inodes map[string]*Inode
+}
+
+// Option configures a Namespace at construction.
+type Option func(*Namespace)
+
+// WithPeerClockObserver registers a callback invoked, on each peer snapshot
+// merged over the wire, with the highest timestamp issued by another node —
+// the hook a clock-skew monitor uses to compare peer clocks against this one.
+func WithPeerClockObserver(observe func(node string, wall int64)) Option {
+	return func(n *Namespace) { n.peerClock = observe }
 }
 
 // New builds an in-memory namespace whose clock stamps local mutations. The
 // root directory is seeded with the shared well-known id. Use Open to back
 // the namespace with a file on disk.
-func New(clock *hlc.Clock) *Namespace {
-	return &Namespace{
+func New(clock *hlc.Clock, opts ...Option) *Namespace {
+	n := &Namespace{
 		clock: clock,
 		inodes: map[string]*Inode{
 			rootID: {ID: rootID, Type: Dir, children: crdt.NewORSet[Entry]()},
 		},
 	}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n
 }
 
 // Open builds a namespace backed by the file at path: it loads any state
@@ -126,11 +144,11 @@ func New(clock *hlc.Clock) *Namespace {
 // missing file is a fresh start; a corrupt file is logged and ignored
 // (the namespace re-converges from peers over gossip). A nil logger
 // defaults to slog.Default.
-func Open(clock *hlc.Clock, path string, logger *slog.Logger) (*Namespace, error) {
+func Open(clock *hlc.Clock, path string, logger *slog.Logger, opts ...Option) (*Namespace, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	ns := New(clock)
+	ns := New(clock, opts...)
 	ns.path = path
 	ns.logger = logger
 
@@ -478,8 +496,58 @@ func (n *Namespace) MergeBytes(b []byte) error {
 	if err := json.Unmarshal(b, &w); err != nil {
 		return fmt.Errorf("namespace: could not decode a peer's state (%w); both nodes must run the same silo version", err)
 	}
+	n.observePeerClocks(w)
 	n.Merge(fromWire(w))
 	return nil
+}
+
+// observePeerClocks reports the highest timestamp issued by another node in a
+// peer snapshot to the registered observer. It is the skew-monitor seam:
+// scanning the wire form (rather than the merged CRDT) keeps it on the receive
+// path and out of the local mutation path. Timestamps this node issued itself
+// are skipped — comparing our clock to our own past says nothing about skew.
+func (n *Namespace) observePeerClocks(w wireNamespace) {
+	if n.peerClock == nil || n.clock == nil {
+		return
+	}
+	self := n.clock.Node()
+	var top hlc.Timestamp
+	consider := func(ts hlc.Timestamp) {
+		if ts.Node == "" || ts.Node == self {
+			return
+		}
+		if top.Before(ts) {
+			top = ts
+		}
+	}
+	for _, wi := range w.Inodes {
+		consider(wi.ACLTS)
+		for _, a := range wi.Adds {
+			for _, t := range a.Tags {
+				consider(t)
+			}
+		}
+		for _, a := range wi.ManifestAdds {
+			for _, t := range a.Tags {
+				consider(t)
+			}
+		}
+		for _, r := range wi.Removes {
+			for _, tb := range r.Tombstones {
+				consider(tb.Add)
+				consider(tb.At)
+			}
+		}
+		for _, r := range wi.ManifestRemoves {
+			for _, tb := range r.Tombstones {
+				consider(tb.Add)
+				consider(tb.At)
+			}
+		}
+	}
+	if !top.IsZero() {
+		n.peerClock(top.Node, top.Wall)
+	}
 }
 
 // fromWire rebuilds a clock-less namespace from its wire form. It is only
