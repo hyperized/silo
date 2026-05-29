@@ -23,11 +23,15 @@ func TestNamespace_CreateVolumeWriteReadExtents(t *testing.T) {
 	}
 
 	clk++
-	if err := ns.WriteExtent("/vol", 0, "c0"); err != nil {
+	if _, err := ns.AcquireLease("/vol", "w"); err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	clk++
+	if err := ns.WriteExtent("/vol", 0, "c0", "w"); err != nil {
 		t.Fatalf("WriteExtent 0: %v", err)
 	}
 	clk++
-	if err := ns.WriteExtent("/vol", 5, "c5"); err != nil {
+	if err := ns.WriteExtent("/vol", 5, "c5", "w"); err != nil {
 		t.Fatalf("WriteExtent 5: %v", err)
 	}
 	if got, err := ns.Extents("/vol"); err != nil || !reflect.DeepEqual(got, map[uint64]string{0: "c0", 5: "c5"}) {
@@ -36,7 +40,7 @@ func TestNamespace_CreateVolumeWriteReadExtents(t *testing.T) {
 
 	// Overwriting a region under a newer HLC rebinds it (copy-on-write).
 	clk++
-	if err := ns.WriteExtent("/vol", 0, "c0-v2"); err != nil {
+	if err := ns.WriteExtent("/vol", 0, "c0-v2", "w"); err != nil {
 		t.Fatalf("rewrite extent 0: %v", err)
 	}
 	if got, _ := ns.Extents("/vol"); got[0] != "c0-v2" {
@@ -100,12 +104,12 @@ func TestNamespace_VolumeOpsRejectWrongTarget(t *testing.T) {
 		do   func() error
 		want string
 	}{
-		{"write missing", func() error { return ns.WriteExtent("/nope", 0, "c") }, "does not exist"},
-		{"write under missing parent", func() error { return ns.WriteExtent("/gone/v", 0, "c") }, "does not exist"},
-		{"write a directory", func() error { return ns.WriteExtent("/dir", 0, "c") }, "not a volume"},
-		{"write a file", func() error { return ns.WriteExtent("/file", 0, "c") }, "not a volume"},
-		{"write root", func() error { return ns.WriteExtent("/", 0, "c") }, "not a volume"},
-		{"write traversal", func() error { return ns.WriteExtent("/a/../b", 0, "c") }, `".."`},
+		{"write missing", func() error { return ns.WriteExtent("/nope", 0, "c", "w") }, "does not exist"},
+		{"write under missing parent", func() error { return ns.WriteExtent("/gone/v", 0, "c", "w") }, "does not exist"},
+		{"write a directory", func() error { return ns.WriteExtent("/dir", 0, "c", "w") }, "not a volume"},
+		{"write a file", func() error { return ns.WriteExtent("/file", 0, "c", "w") }, "not a volume"},
+		{"write root", func() error { return ns.WriteExtent("/", 0, "c", "w") }, "not a volume"},
+		{"write traversal", func() error { return ns.WriteExtent("/a/../b", 0, "c", "w") }, `".."`},
 		{"size of a file", func() error { _, err := ns.ExtentSize("/file"); return err }, "not a volume"},
 		{"extents of a file", func() error { _, err := ns.Extents("/file"); return err }, "not a volume"},
 	}
@@ -127,7 +131,10 @@ func TestNamespace_VolumePersists(t *testing.T) {
 	if _, err := first.CreateVolume("/vol", 8192); err != nil {
 		t.Fatalf("CreateVolume: %v", err)
 	}
-	if err := first.WriteExtent("/vol", 2, "c2"); err != nil {
+	if _, err := first.AcquireLease("/vol", "w"); err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	if err := first.WriteExtent("/vol", 2, "c2", "w"); err != nil {
 		t.Fatalf("WriteExtent: %v", err)
 	}
 
@@ -151,7 +158,11 @@ func TestNamespace_VolumeConvergesAcrossReplicas(t *testing.T) {
 		t.Fatalf("CreateVolume: %v", err)
 	}
 	clkA++
-	if err := a.WriteExtent("/vol", 0, "a0"); err != nil {
+	if _, err := a.AcquireLease("/vol", "on-a"); err != nil {
+		t.Fatalf("a acquire: %v", err)
+	}
+	clkA++
+	if err := a.WriteExtent("/vol", 0, "a0", "on-a"); err != nil {
 		t.Fatalf("a WriteExtent: %v", err)
 	}
 
@@ -164,11 +175,15 @@ func TestNamespace_VolumeConvergesAcrossReplicas(t *testing.T) {
 		t.Fatalf("b merge: %v", err)
 	}
 	clkB++
-	if err := b.WriteExtent("/vol", 0, "b0"); err != nil { // overwrite, newer HLC
+	if _, err := b.AcquireLease("/vol", "on-b"); err != nil { // steal the lease
+		t.Fatalf("b acquire: %v", err)
+	}
+	clkB++
+	if err := b.WriteExtent("/vol", 0, "b0", "on-b"); err != nil { // overwrite, newer HLC
 		t.Fatalf("b rewrite: %v", err)
 	}
 	clkB++
-	if err := b.WriteExtent("/vol", 1, "b1"); err != nil { // a new extent
+	if err := b.WriteExtent("/vol", 1, "b1", "on-b"); err != nil { // a new extent
 		t.Fatalf("b WriteExtent: %v", err)
 	}
 

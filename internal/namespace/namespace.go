@@ -471,15 +471,21 @@ func (n *Namespace) CreateVolume(path string, extentSize int64) (string, error) 
 }
 
 // WriteExtent rebinds the extent at index of the volume at path to chunkID,
-// stamped with the current HLC so the latest write wins after a merge. The
-// caller has already stored chunkID; this records where it lives in the
-// volume's address space.
-func (n *Namespace) WriteExtent(path string, index uint64, chunkID string) error {
+// stamped with the current HLC so the latest write wins after a merge. holder
+// must currently hold the volume's lease, or the write is fenced with
+// ErrLeaseHeld: a stale writer that has been stolen from cannot change what
+// backs any extent, so it cannot corrupt the volume (its already-stored chunk
+// bytes are simply left unreferenced). The caller stores chunkID first; this
+// records where it lives in the volume's address space.
+func (n *Namespace) WriteExtent(path string, index uint64, chunkID, holder string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	vol, err := n.resolveVolumeLocked(path)
 	if err != nil {
 		return err
+	}
+	if vol.lease.Value != holder {
+		return fmt.Errorf("namespace: %q is held by %s, not %q; only the lease holder may write: %w", path, leaseHolderName(vol.lease.Value), holder, ErrLeaseHeld)
 	}
 	vol.extents.Set(index, chunkID, n.clock.Now())
 	n.persistLocked()

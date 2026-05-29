@@ -86,6 +86,46 @@ func TestNamespace_LeaseStealFencesOlderHolder(t *testing.T) {
 	}
 }
 
+func TestNamespace_WriteExtentFencesStaleHolder(t *testing.T) {
+	var clk int64 = 100
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.CreateVolume("/vol", 4096); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+
+	// Writing without holding the lease is fenced, even on a vacant volume.
+	if err := ns.WriteExtent("/vol", 0, "c", "writer-1"); !errors.Is(err, namespace.ErrLeaseHeld) {
+		t.Fatalf("write without a lease = %v, want ErrLeaseHeld", err)
+	}
+
+	clk++
+	if _, err := ns.AcquireLease("/vol", "writer-1"); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	clk++
+	if err := ns.WriteExtent("/vol", 0, "c0", "writer-1"); err != nil {
+		t.Fatalf("holder write should succeed: %v", err)
+	}
+
+	// A second writer steals the lease; the original is now fenced.
+	clk++
+	if _, err := ns.AcquireLease("/vol", "writer-2"); err != nil {
+		t.Fatalf("steal: %v", err)
+	}
+	clk++
+	if err := ns.WriteExtent("/vol", 0, "c-stale", "writer-1"); !errors.Is(err, namespace.ErrLeaseHeld) {
+		t.Errorf("fenced write = %v, want ErrLeaseHeld", err)
+	}
+	clk++
+	if err := ns.WriteExtent("/vol", 0, "c-new", "writer-2"); err != nil {
+		t.Errorf("new holder write should succeed: %v", err)
+	}
+	if got, _ := ns.Extents("/vol"); got[0] != "c-new" {
+		t.Errorf("extent 0 = %q, want c-new (the fenced write must not have applied)", got[0])
+	}
+}
+
 func TestNamespace_LeaseOpsRejectWrongTarget(t *testing.T) {
 	var clk int64 = 1
 	ns := nsAt("a", &clk)
