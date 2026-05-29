@@ -4,6 +4,13 @@ modules:
 lint:
   use:
     - STANDARD
+  # csi/ is the upstream Container Storage Interface spec, vendored verbatim so
+  # we generate it with our own toolchain instead of taking a module dependency.
+  # It is not ours to restyle, so it is exempt from our lint and breaking rules.
+  ignore:
+    - csi
 breaking:
   use:
     - WIRE_JSON
+  ignore:
+    - csi
