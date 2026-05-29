@@ -34,6 +34,80 @@ func (r LWWRegister[T]) Merge(o LWWRegister[T]) LWWRegister[T] {
 	return r
 }
 
+// LWWMap is a last-writer-wins map: each key holds a value tagged with the
+// HLC at which it was set, and Merge keeps the higher-HLC value per key.
+// Because HLC timestamps are totally ordered, every replica converges on the
+// same value for each key regardless of merge order. There is no delete — a
+// volume's extent map only ever rebinds an extent to a newer chunk — so an
+// erased key would have to be modelled as a sentinel value if ever needed.
+type LWWMap[K comparable, V any] struct {
+	entries map[K]LWWRegister[V]
+}
+
+// NewLWWMap returns an empty last-writer-wins map.
+func NewLWWMap[K comparable, V any]() *LWWMap[K, V] {
+	return &LWWMap[K, V]{entries: map[K]LWWRegister[V]{}}
+}
+
+// Set binds key to value as of ts, keeping it only when ts is newer than the
+// key's current timestamp — so a replayed or out-of-order write never moves a
+// key backward.
+func (m *LWWMap[K, V]) Set(key K, value V, ts hlc.Timestamp) {
+	if cur, ok := m.entries[key]; !ok || ts.After(cur.TS) {
+		m.entries[key] = LWWRegister[V]{Value: value, TS: ts}
+	}
+}
+
+// Get returns the current value for key and whether it is set.
+func (m *LWWMap[K, V]) Get(key K) (V, bool) {
+	r, ok := m.entries[key]
+	return r.Value, ok
+}
+
+// Len returns the number of bound keys.
+func (m *LWWMap[K, V]) Len() int { return len(m.entries) }
+
+// MapEntry is the serializable shape of one key's winning value and timestamp.
+type MapEntry[K comparable, V any] struct {
+	Key   K             `json:"key"`
+	Value V             `json:"value"`
+	TS    hlc.Timestamp `json:"ts"`
+}
+
+// Entries returns every key's value and timestamp in unspecified order; it is
+// also the map's serializable form (feed it back through Import).
+func (m *LWWMap[K, V]) Entries() []MapEntry[K, V] {
+	out := make([]MapEntry[K, V], 0, len(m.entries))
+	for k, r := range m.entries {
+		out = append(out, MapEntry[K, V]{Key: k, Value: r.Value, TS: r.TS})
+	}
+	return out
+}
+
+// Merge folds o into m, keeping the higher-HLC value per key. It is
+// commutative, associative, and idempotent.
+func (m *LWWMap[K, V]) Merge(o *LWWMap[K, V]) {
+	for k, r := range o.entries {
+		m.Set(k, r.Value, r.TS)
+	}
+}
+
+// Import folds serialized entries into the map with the same per-key LWW
+// semantics as Merge, so reconstructing a peer's map and importing it
+// converges exactly as a direct Merge would.
+func (m *LWWMap[K, V]) Import(entries []MapEntry[K, V]) {
+	for _, e := range entries {
+		m.Set(e.Key, e.Value, e.TS)
+	}
+}
+
+// Clone returns a deep copy that shares no maps with m.
+func (m *LWWMap[K, V]) Clone() *LWWMap[K, V] {
+	c := NewLWWMap[K, V]()
+	c.Merge(m)
+	return c
+}
+
 // ORSet is an observed-remove set. Each Add tags an element with a
 // globally-unique HLC; Remove tombstones exactly the tags observed at the
 // moment of removal. An element is present while it holds at least one add

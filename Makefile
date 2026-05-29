@@ -94,6 +94,7 @@ fuzz: ## Fuzz the parse/merge/placement boundaries on demand (override: make fuz
 	@go test -run='^$$' -fuzz='^FuzzLoadCA$$'       -fuzztime=$(FUZZTIME) ./internal/clustertls/
 	@go test -run='^$$' -fuzz='^FuzzClockMonotonic$$' -fuzztime=$(FUZZTIME) ./internal/hlc/
 	@go test -run='^$$' -fuzz='^FuzzORSetConverges$$' -fuzztime=$(FUZZTIME) ./internal/crdt/
+	@go test -run='^$$' -fuzz='^FuzzLWWMapConverges$$' -fuzztime=$(FUZZTIME) ./internal/crdt/
 	@go test -run='^$$' -fuzz='^FuzzNamespaceConverges$$' -fuzztime=$(FUZZTIME) ./internal/namespace/
 	@go test -run='^$$' -fuzz='^FuzzNamespaceMergeBytes$$' -fuzztime=$(FUZZTIME) ./internal/namespace/
 	@go test -run='^$$' -fuzz='^FuzzNamespacePaths$$' -fuzztime=$(FUZZTIME) ./internal/namespace/

@@ -1,0 +1,188 @@
+package namespace_test
+
+import (
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/hyperized/silo/internal/hlc"
+	"github.com/hyperized/silo/internal/namespace"
+)
+
+func TestNamespace_CreateVolumeWriteReadExtents(t *testing.T) {
+	var clk int64 = 100
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.CreateVolume("/vol", 4096); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+
+	if got, err := ns.ExtentSize("/vol"); err != nil || got != 4096 {
+		t.Fatalf("ExtentSize = (%d,%v), want (4096,nil)", got, err)
+	}
+
+	clk++
+	if err := ns.WriteExtent("/vol", 0, "c0"); err != nil {
+		t.Fatalf("WriteExtent 0: %v", err)
+	}
+	clk++
+	if err := ns.WriteExtent("/vol", 5, "c5"); err != nil {
+		t.Fatalf("WriteExtent 5: %v", err)
+	}
+	if got, err := ns.Extents("/vol"); err != nil || !reflect.DeepEqual(got, map[uint64]string{0: "c0", 5: "c5"}) {
+		t.Fatalf("Extents = (%v,%v), want {0:c0 5:c5}", got, err)
+	}
+
+	// Overwriting a region under a newer HLC rebinds it (copy-on-write).
+	clk++
+	if err := ns.WriteExtent("/vol", 0, "c0-v2"); err != nil {
+		t.Fatalf("rewrite extent 0: %v", err)
+	}
+	if got, _ := ns.Extents("/vol"); got[0] != "c0-v2" {
+		t.Errorf("extent 0 = %q, want c0-v2", got[0])
+	}
+}
+
+func TestNamespace_CreateVolumeDefaultsExtentSize(t *testing.T) {
+	var clk int64 = 1
+	ns := nsAt("a", &clk)
+	for _, p := range []struct {
+		path string
+		size int64
+	}{{"/zero", 0}, {"/neg", -5}} {
+		clk++
+		if _, err := ns.CreateVolume(p.path, p.size); err != nil {
+			t.Fatalf("CreateVolume %s: %v", p.path, err)
+		}
+		if got, _ := ns.ExtentSize(p.path); got != namespace.DefaultExtentSize {
+			t.Errorf("%s extent size = %d, want default %d", p.path, got, namespace.DefaultExtentSize)
+		}
+	}
+}
+
+func TestNamespace_CreateVolumeErrors(t *testing.T) {
+	var clk int64 = 1
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.Mkdir("/dir"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	clk++
+	if _, err := ns.CreateVolume("/dir", 4096); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("CreateVolume over an existing name: got %v, want exists", err)
+	}
+	if _, err := ns.CreateVolume("/", 4096); err == nil || !strings.Contains(err.Error(), "root") {
+		t.Errorf("CreateVolume root: got %v", err)
+	}
+	if _, err := ns.CreateVolume("/a/../b", 4096); err == nil || !strings.Contains(err.Error(), `".."`) {
+		t.Errorf("CreateVolume traversal: got %v", err)
+	}
+	if _, err := ns.CreateVolume("/missing/v", 4096); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("CreateVolume under missing parent: got %v", err)
+	}
+}
+
+func TestNamespace_VolumeOpsRejectWrongTarget(t *testing.T) {
+	var clk int64 = 1
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.Mkdir("/dir"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	clk++
+	if _, err := ns.Touch("/file"); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		do   func() error
+		want string
+	}{
+		{"write missing", func() error { return ns.WriteExtent("/nope", 0, "c") }, "does not exist"},
+		{"write under missing parent", func() error { return ns.WriteExtent("/gone/v", 0, "c") }, "does not exist"},
+		{"write a directory", func() error { return ns.WriteExtent("/dir", 0, "c") }, "not a volume"},
+		{"write a file", func() error { return ns.WriteExtent("/file", 0, "c") }, "not a volume"},
+		{"write root", func() error { return ns.WriteExtent("/", 0, "c") }, "not a volume"},
+		{"write traversal", func() error { return ns.WriteExtent("/a/../b", 0, "c") }, `".."`},
+		{"size of a file", func() error { _, err := ns.ExtentSize("/file"); return err }, "not a volume"},
+		{"extents of a file", func() error { _, err := ns.Extents("/file"); return err }, "not a volume"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.do(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("got %v, want error containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestNamespace_VolumePersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ns.json")
+	first, err := namespace.Open(hlc.New("a"), path, discardLogger())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := first.CreateVolume("/vol", 8192); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if err := first.WriteExtent("/vol", 2, "c2"); err != nil {
+		t.Fatalf("WriteExtent: %v", err)
+	}
+
+	second, err := namespace.Open(hlc.New("a"), path, discardLogger())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if got, _ := second.ExtentSize("/vol"); got != 8192 {
+		t.Errorf("persisted extent size = %d, want 8192", got)
+	}
+	if got, _ := second.Extents("/vol"); !reflect.DeepEqual(got, map[uint64]string{2: "c2"}) {
+		t.Errorf("persisted extents = %v, want {2:c2}", got)
+	}
+}
+
+func TestNamespace_VolumeConvergesAcrossReplicas(t *testing.T) {
+	var clkA, clkB int64 = 10, 100 // b's clock runs ahead, so its writes win
+	a := nsAt("a", &clkA)
+	clkA++
+	if _, err := a.CreateVolume("/vol", 4096); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	clkA++
+	if err := a.WriteExtent("/vol", 0, "a0"); err != nil {
+		t.Fatalf("a WriteExtent: %v", err)
+	}
+
+	state, err := a.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	b := nsAt("b", &clkB)
+	if err := b.MergeBytes(state); err != nil {
+		t.Fatalf("b merge: %v", err)
+	}
+	clkB++
+	if err := b.WriteExtent("/vol", 0, "b0"); err != nil { // overwrite, newer HLC
+		t.Fatalf("b rewrite: %v", err)
+	}
+	clkB++
+	if err := b.WriteExtent("/vol", 1, "b1"); err != nil { // a new extent
+		t.Fatalf("b WriteExtent: %v", err)
+	}
+
+	bState, err := b.Snapshot()
+	if err != nil {
+		t.Fatalf("b snapshot: %v", err)
+	}
+	if err := a.MergeBytes(bState); err != nil {
+		t.Fatalf("a merge: %v", err)
+	}
+	if got, _ := a.Extents("/vol"); !reflect.DeepEqual(got, map[uint64]string{0: "b0", 1: "b1"}) {
+		t.Errorf("converged extents = %v, want {0:b0 1:b1}", got)
+	}
+	if got, _ := a.ExtentSize("/vol"); got != 4096 {
+		t.Errorf("converged extent size = %d, want 4096", got)
+	}
+}

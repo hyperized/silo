@@ -42,6 +42,10 @@ func TestObservePeerClocks_PicksHighestForeignTimestamp(t *testing.T) {
 				Tombstones: []crdt.Tombstone{{Add: ts("peer-a", 160), At: ts("peer-d", 175)}},
 			}},
 		},
+		{
+			ID: "v", Type: Volume, ExtentSize: 4096,
+			Extents: []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c", TS: ts("peer-e", 250)}},
+		},
 	}}
 
 	n.observePeerClocks(w)
@@ -49,9 +53,10 @@ func TestObservePeerClocks_PicksHighestForeignTimestamp(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("observer calls = %d, want 1", calls)
 	}
-	// The highest foreign wall is 200 (peer-c), beating the self tag at 9999.
-	if gotNode != "peer-c" || gotWall != 200 {
-		t.Errorf("observed (%s, %d), want (peer-c, 200)", gotNode, gotWall)
+	// The highest foreign wall is 250 (peer-e, a volume extent), beating the
+	// self tag at 9999 and the tombstone at 200.
+	if gotNode != "peer-e" || gotWall != 250 {
+		t.Errorf("observed (%s, %d), want (peer-e, 250)", gotNode, gotWall)
 	}
 }
 

@@ -37,7 +37,15 @@ var (
 	ErrInvalidPath = errors.New("invalid path")
 	// ErrNotDir means a path component that must be a directory is a file.
 	ErrNotDir = errors.New("not a directory")
+	// ErrNotVolume means a path that must be a block volume is something else.
+	ErrNotVolume = errors.New("not a volume")
 )
+
+// DefaultExtentSize is the copy-on-write unit for a block volume when none is
+// given: the chunk size a single block write rewrites. 64 KiB keeps random
+// write amplification modest without exploding the extent count of a large
+// volume; override per volume at creation.
+const DefaultExtentSize int64 = 64 * 1024
 
 // rootID is the well-known id of the root directory. Every replica shares
 // it so the trees rooted at the same inode converge without coordination.
@@ -49,16 +57,23 @@ type InodeType uint8
 const (
 	// Dir is a directory inode; its children live in an OR-Set.
 	Dir InodeType = iota
-	// File is a leaf inode.
+	// File is a leaf inode whose data is an append-ordered chunk manifest.
 	File
+	// Volume is a leaf inode whose data is an extent map (offset region to
+	// chunk id), the backing store for a block device.
+	Volume
 )
 
 // String renders the type for display.
 func (t InodeType) String() string {
-	if t == Dir {
+	switch t {
+	case Dir:
 		return "dir"
+	case Volume:
+		return "volume"
+	default:
+		return "file"
 	}
-	return "file"
 }
 
 // Entry is a directory child: a name bound to an inode id. It is the
@@ -79,6 +94,12 @@ type Inode struct {
 	ACL      crdt.LWWRegister[string]
 	children *crdt.ORSet[Entry]
 	manifest *crdt.ORSet[string]
+	// extents is non-nil only for volumes: an LWW-map from extent index to the
+	// chunk id currently backing that region. ExtentSize is the bytes per
+	// extent, fixed at creation. Overwriting a region rebinds its extent to a
+	// fresh chunk (chunks are immutable), so a volume is copy-on-write.
+	extents    *crdt.LWWMap[uint64, string]
+	ExtentSize int64
 }
 
 // ResolvedEntry is one listed directory child after conflict resolution.
@@ -396,6 +417,110 @@ func (n *Namespace) resolveFileLocked(path string) (*Inode, error) {
 	return inode, nil
 }
 
+// CreateVolume creates a block volume at path with the given extent size (the
+// copy-on-write unit, in bytes); a non-positive size falls back to
+// DefaultExtentSize. The parent directory must already exist. Returns the new
+// inode id.
+func (n *Namespace) CreateVolume(path string, extentSize int64) (string, error) {
+	if extentSize <= 0 {
+		extentSize = DefaultExtentSize
+	}
+	segs, err := splitPath(path)
+	if err != nil {
+		return "", err
+	}
+	if len(segs) == 0 {
+		return "", fmt.Errorf("namespace: cannot create the root directory as a volume: %w", ErrInvalidPath)
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	parent, err := n.resolveDirLocked(segs[:len(segs)-1])
+	if err != nil {
+		return "", err
+	}
+	name := segs[len(segs)-1]
+	if _, exists := n.primaryChildLocked(parent, name); exists {
+		return "", fmt.Errorf("namespace: %q already exists; remove it first or pick another name: %w", path, ErrExists)
+	}
+
+	ts := n.clock.Now()
+	id := "inode-" + ts.String()
+	n.inodes[id] = &Inode{ID: id, Type: Volume, extents: crdt.NewLWWMap[uint64, string](), ExtentSize: extentSize}
+	parent.children.Add(Entry{Name: name, Inode: id}, ts)
+	n.persistLocked()
+	return id, nil
+}
+
+// WriteExtent rebinds the extent at index of the volume at path to chunkID,
+// stamped with the current HLC so the latest write wins after a merge. The
+// caller has already stored chunkID; this records where it lives in the
+// volume's address space.
+func (n *Namespace) WriteExtent(path string, index uint64, chunkID string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return err
+	}
+	vol.extents.Set(index, chunkID, n.clock.Now())
+	n.persistLocked()
+	return nil
+}
+
+// Extents returns the volume's current extent-to-chunk bindings as a map from
+// extent index to chunk id. Unmapped extents are absent (they read as zeros).
+func (n *Namespace) Extents(path string) (map[uint64]string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint64]string, vol.extents.Len())
+	for _, e := range vol.extents.Entries() {
+		out[e.Key] = e.Value
+	}
+	return out, nil
+}
+
+// ExtentSize returns the volume's copy-on-write unit in bytes.
+func (n *Namespace) ExtentSize(path string) (int64, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return 0, err
+	}
+	return vol.ExtentSize, nil
+}
+
+// resolveVolumeLocked resolves path to a volume inode, erroring if it is the
+// root, is missing, or is not a volume.
+func (n *Namespace) resolveVolumeLocked(path string) (*Inode, error) {
+	segs, err := splitPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(segs) == 0 {
+		return nil, fmt.Errorf("namespace: the root is not a volume: %w", ErrNotVolume)
+	}
+	parent, err := n.resolveDirLocked(segs[:len(segs)-1])
+	if err != nil {
+		return nil, err
+	}
+	name := segs[len(segs)-1]
+	id, ok := n.primaryChildLocked(parent, name)
+	if !ok {
+		return nil, fmt.Errorf("namespace: %q does not exist: %w", path, ErrNotExist)
+	}
+	inode := n.inodes[id]
+	if inode == nil || inode.Type != Volume {
+		return nil, fmt.Errorf("namespace: %q is not a volume: %w", path, ErrNotVolume)
+	}
+	return inode, nil
+}
+
 // Merge folds another replica's state into this one. It is commutative and
 // idempotent: inode ACLs merge last-writer-wins and directory children
 // merge as OR-Sets, so replicas that have exchanged state converge on an
@@ -424,6 +549,9 @@ func (n *Namespace) mergeInodesLocked(snap map[string]*Inode) {
 		if mine.manifest != nil && oi.manifest != nil {
 			mine.manifest.Merge(oi.manifest)
 		}
+		if mine.extents != nil && oi.extents != nil {
+			mine.extents.Merge(oi.extents)
+		}
 	}
 }
 
@@ -434,12 +562,15 @@ func (n *Namespace) snapshot() map[string]*Inode {
 	defer n.mu.Unlock()
 	out := make(map[string]*Inode, len(n.inodes))
 	for id, in := range n.inodes {
-		cp := &Inode{ID: in.ID, Type: in.Type, ACL: in.ACL}
+		cp := &Inode{ID: in.ID, Type: in.Type, ACL: in.ACL, ExtentSize: in.ExtentSize}
 		if in.children != nil {
 			cp.children = in.children.Clone()
 		}
 		if in.manifest != nil {
 			cp.manifest = in.manifest.Clone()
+		}
+		if in.extents != nil {
+			cp.extents = in.extents.Clone()
 		}
 		out[id] = cp
 	}
@@ -464,6 +595,9 @@ type wireInode struct {
 
 	ManifestAdds    []crdt.ElementTags[string]       `json:"manifest_adds,omitempty"`
 	ManifestRemoves []crdt.ElementTombstones[string] `json:"manifest_removes,omitempty"`
+
+	ExtentSize int64                           `json:"extent_size,omitempty"`
+	Extents    []crdt.MapEntry[uint64, string] `json:"extents,omitempty"`
 }
 
 // Snapshot serializes the whole namespace for an anti-entropy exchange.
@@ -482,6 +616,10 @@ func (n *Namespace) snapshotLocked() ([]byte, error) {
 		}
 		if in.manifest != nil {
 			wi.ManifestAdds, wi.ManifestRemoves = in.manifest.Export()
+		}
+		if in.extents != nil {
+			wi.ExtentSize = in.ExtentSize
+			wi.Extents = in.extents.Entries()
 		}
 		w.Inodes = append(w.Inodes, wi)
 	}
@@ -544,6 +682,9 @@ func (n *Namespace) observePeerClocks(w wireNamespace) {
 				consider(tb.At)
 			}
 		}
+		for _, e := range wi.Extents {
+			consider(e.TS)
+		}
 	}
 	if !top.IsZero() {
 		n.peerClock(top.Node, top.Wall)
@@ -560,10 +701,15 @@ func fromWire(w wireNamespace) *Namespace {
 			Type: wi.Type,
 			ACL:  crdt.LWWRegister[string]{Value: wi.ACLValue, TS: wi.ACLTS},
 		}
-		if wi.Type == Dir {
+		switch wi.Type {
+		case Dir:
 			in.children = crdt.NewORSet[Entry]()
 			in.children.Import(wi.Adds, wi.Removes)
-		} else {
+		case Volume:
+			in.ExtentSize = wi.ExtentSize
+			in.extents = crdt.NewLWWMap[uint64, string]()
+			in.extents.Import(wi.Extents)
+		default:
 			in.manifest = crdt.NewORSet[string]()
 			in.manifest.Import(wi.ManifestAdds, wi.ManifestRemoves)
 		}

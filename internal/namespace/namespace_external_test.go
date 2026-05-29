@@ -307,8 +307,9 @@ func TestNamespace_RunGC(t *testing.T) {
 }
 
 func TestInodeType_String(t *testing.T) {
-	if namespace.Dir.String() != "dir" || namespace.File.String() != "file" {
-		t.Errorf("type strings: dir=%q file=%q", namespace.Dir.String(), namespace.File.String())
+	if namespace.Dir.String() != "dir" || namespace.File.String() != "file" || namespace.Volume.String() != "volume" {
+		t.Errorf("type strings: dir=%q file=%q volume=%q",
+			namespace.Dir.String(), namespace.File.String(), namespace.Volume.String())
 	}
 }
 
