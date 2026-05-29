@@ -1,8 +1,9 @@
 // Package exporter renders silod's metrics as Prometheus exposition text and
-// serves them at GET /metrics. Domain packages expose plain getters; the
-// exporter owns every line of Prometheus formatting, so the wire format lives
-// in one place and silod keeps no metrics-library dependency. Register all
-// metrics during startup, before the HTTP server begins serving.
+// serves them at GET /metrics. Instrumented components register their instances
+// (each a metrics.Source that owns its names and namespace); the exporter is
+// the only package that knows the Prometheus wire format, so silod keeps no
+// metrics-library dependency. Register all sources during startup, before the
+// HTTP server begins serving.
 package exporter
 
 import (
@@ -11,64 +12,42 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/hyperized/silo/internal/metrics"
 )
 
-// Exporter is a small registry of metrics that render themselves as
-// Prometheus text. It is safe for concurrent use: registration takes a write
-// lock and each scrape takes a read lock, while the value getters a metric
-// closes over are expected to be thread-safe in their own right.
+// Exporter is a registry of metric sources. It is safe for concurrent use:
+// registration takes a write lock and each scrape takes a read lock, while a
+// source's CollectMetrics is expected to be thread-safe in its own right.
 type Exporter struct {
 	mu      sync.RWMutex
-	metrics []metric
-}
-
-type metric struct {
-	name   string
-	help   string
-	typ    string
-	render func(w io.Writer)
+	sources []metrics.Source
 }
 
 // New builds an empty exporter.
 func New() *Exporter { return &Exporter{} }
 
-// Info registers a constant info metric (value 1) carrying labels — the
-// build_info pattern, where the labels are the payload and the value is just
-// a presence marker.
-func (e *Exporter) Info(name, help string, labels [][2]string) {
-	e.add(name, help, "gauge", func(w io.Writer) {
-		fmt.Fprintf(w, "%s%s 1\n", name, formatLabels(labels))
-	})
-}
-
-// Gauge registers a gauge whose value is read afresh at each scrape.
-func (e *Exporter) Gauge(name, help string, read func() float64) {
-	e.add(name, help, "gauge", func(w io.Writer) {
-		fmt.Fprintf(w, "%s %g\n", name, read())
-	})
-}
-
-// Counter registers a monotonic counter whose value is read at each scrape.
-func (e *Exporter) Counter(name, help string, read func() uint64) {
-	e.add(name, help, "counter", func(w io.Writer) {
-		fmt.Fprintf(w, "%s %d\n", name, read())
-	})
-}
-
-func (e *Exporter) add(name, help, typ string, render func(io.Writer)) {
+// Register adds a metric source. Call it during startup, before serving.
+func (e *Exporter) Register(s metrics.Source) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.metrics = append(e.metrics, metric{name: name, help: help, typ: typ, render: render})
+	e.sources = append(e.sources, s)
 }
 
-// Render writes every registered metric as Prometheus exposition text.
+// Render writes every registered source's metrics as Prometheus exposition
+// text, namespacing each metric with its source's prefix. Values are pulled
+// from the sources at call time, so a scrape always reflects current state.
 func (e *Exporter) Render(w io.Writer) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	for _, m := range e.metrics {
-		fmt.Fprintf(w, "# HELP %s %s\n", m.name, m.help)
-		fmt.Fprintf(w, "# TYPE %s %s\n", m.name, m.typ)
-		m.render(w)
+	for _, s := range e.sources {
+		prefix := s.MetricPrefix()
+		for _, m := range s.CollectMetrics() {
+			name := prefix + "_" + m.Name
+			fmt.Fprintf(w, "# HELP %s %s\n", name, m.Help)
+			fmt.Fprintf(w, "# TYPE %s %s\n", name, kindString(m.Kind))
+			fmt.Fprintf(w, "%s%s %g\n", name, formatLabels(m.Labels), m.Value)
+		}
 	}
 }
 
@@ -78,6 +57,13 @@ func (e *Exporter) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		e.Render(w)
 	})
+}
+
+func kindString(k metrics.Kind) string {
+	if k == metrics.Counter {
+		return "counter"
+	}
+	return "gauge"
 }
 
 func formatLabels(labels [][2]string) string {

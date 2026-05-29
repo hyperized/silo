@@ -7,57 +7,66 @@ import (
 	"testing"
 
 	"github.com/hyperized/silo/internal/exporter"
+	"github.com/hyperized/silo/internal/metrics"
 )
 
-func TestExporter_RendersRegisteredMetrics(t *testing.T) {
-	e := exporter.New()
-	e.Info("silo_build_info", "Build information.", [][2]string{{"node", "n1"}, {"version", "v1"}})
+// dynSource is a metric source whose readings are produced by a closure, so a
+// test can change the values it reports between scrapes.
+type dynSource struct {
+	prefix  string
+	collect func() []metrics.Metric
+}
 
-	skew := 1.5
-	var alerts uint64 = 3
-	e.Gauge("silo_skew_seconds", "Observed skew.", func() float64 { return skew })
-	e.Counter("silo_alerts_total", "Alert count.", func() uint64 { return alerts })
+func (d dynSource) MetricPrefix() string             { return d.prefix }
+func (d dynSource) CollectMetrics() []metrics.Metric { return d.collect() }
+
+func TestExporter_RendersRegisteredSources(t *testing.T) {
+	e := exporter.New()
+	e.Register(metrics.Static("silo", metrics.Metric{
+		Name: "build_info", Help: "Build information.", Kind: metrics.Gauge, Value: 1,
+		Labels: [][2]string{{"node", "n1"}, {"version", "v1"}},
+	}))
+
+	skew, alerts := 1.5, 3.0
+	e.Register(dynSource{prefix: "silo_hlc", collect: func() []metrics.Metric {
+		return []metrics.Metric{
+			{Name: "peer_clock_skew_seconds", Help: "Skew.", Kind: metrics.Gauge, Value: skew},
+			{Name: "clock_skew_alerts_total", Help: "Alerts.", Kind: metrics.Counter, Value: alerts},
+		}
+	}})
 
 	var b strings.Builder
 	e.Render(&b)
 	out := b.String()
-
 	for _, want := range []string{
 		"# HELP silo_build_info Build information.",
 		"# TYPE silo_build_info gauge",
 		`silo_build_info{node="n1",version="v1"} 1`,
-		"# TYPE silo_skew_seconds gauge",
-		"silo_skew_seconds 1.5",
-		"# TYPE silo_alerts_total counter",
-		"silo_alerts_total 3",
+		"# TYPE silo_hlc_peer_clock_skew_seconds gauge",
+		"silo_hlc_peer_clock_skew_seconds 1.5",
+		"# TYPE silo_hlc_clock_skew_alerts_total counter",
+		"silo_hlc_clock_skew_alerts_total 3",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render missing %q\n--- got ---\n%s", want, out)
 		}
 	}
 
-	// Getters are read at render time, not registration time.
+	// Sources are pulled at render time, not registration time.
 	skew, alerts = -2, 4
 	var b2 strings.Builder
 	e.Render(&b2)
-	if !strings.Contains(b2.String(), "silo_skew_seconds -2") || !strings.Contains(b2.String(), "silo_alerts_total 4") {
-		t.Errorf("render did not re-read getters: %s", b2.String())
-	}
-}
-
-func TestExporter_InfoWithoutLabels(t *testing.T) {
-	e := exporter.New()
-	e.Info("silo_up", "Up marker.", nil)
-	var b strings.Builder
-	e.Render(&b)
-	if !strings.Contains(b.String(), "silo_up 1\n") {
-		t.Errorf("label-less info metric malformed: %q", b.String())
+	if !strings.Contains(b2.String(), "silo_hlc_peer_clock_skew_seconds -2") ||
+		!strings.Contains(b2.String(), "silo_hlc_clock_skew_alerts_total 4") {
+		t.Errorf("render did not re-pull source values: %s", b2.String())
 	}
 }
 
 func TestExporter_HandlerServesText(t *testing.T) {
 	e := exporter.New()
-	e.Gauge("silo_g", "A gauge.", func() float64 { return 0.5 })
+	e.Register(dynSource{prefix: "silo", collect: func() []metrics.Metric {
+		return []metrics.Metric{{Name: "g", Help: "A gauge.", Kind: metrics.Gauge, Value: 0.5}}
+	}})
 
 	rec := httptest.NewRecorder()
 	e.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))

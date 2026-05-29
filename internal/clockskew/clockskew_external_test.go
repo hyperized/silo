@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hyperized/silo/internal/clockskew"
+	"github.com/hyperized/silo/internal/metrics"
 )
+
+// A Monitor is a metric source the exporter can register.
+var _ metrics.Source = (*clockskew.Monitor)(nil)
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -82,6 +87,24 @@ func TestMonitor_WarnIntervalZeroKeepsDefault(t *testing.T) {
 	m.Observe("p", now.Add(time.Second).UnixNano())
 	if m.Alerts() != 1 {
 		t.Errorf("alerts = %d, want 1 — a zero warn interval should fall back to the default", m.Alerts())
+	}
+}
+
+func TestMonitor_CollectMetrics(t *testing.T) {
+	now := time.Unix(6_000, 0)
+	m := clockskew.New(500*time.Millisecond, discardLogger(), clockskew.WithNow(func() time.Time { return now }))
+	m.Observe("p", now.Add(2*time.Second).UnixNano()) // 2s ahead -> last=2s, one alert
+
+	if m.MetricPrefix() != "silo_hlc" {
+		t.Errorf("prefix = %q, want silo_hlc", m.MetricPrefix())
+	}
+	got := m.CollectMetrics()
+	want := []metrics.Metric{
+		{Name: "peer_clock_skew_seconds", Help: "Last observed clock skew to a peer; positive means the peer is ahead of this node.", Kind: metrics.Gauge, Value: 2},
+		{Name: "clock_skew_alerts_total", Help: "Times a peer's clock exceeded the configured skew threshold.", Kind: metrics.Counter, Value: 1},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CollectMetrics = %+v, want %+v", got, want)
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/hyperized/silo/internal/metrics"
 )
 
 // DefaultWarnInterval rate-limits the skew warning so a sustained skew logs
@@ -103,4 +105,29 @@ func (m *Monitor) Alerts() uint64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.alerts
+}
+
+// MetricPrefix namespaces the monitor's metrics under the HLC subsystem.
+func (m *Monitor) MetricPrefix() string { return "silo_hlc" }
+
+// CollectMetrics reports the current skew and alert count for the exporter.
+func (m *Monitor) CollectMetrics() []metrics.Metric {
+	m.mu.Lock()
+	last := m.last.Seconds()
+	alerts := float64(m.alerts)
+	m.mu.Unlock()
+	return []metrics.Metric{
+		{
+			Name:  "peer_clock_skew_seconds",
+			Help:  "Last observed clock skew to a peer; positive means the peer is ahead of this node.",
+			Kind:  metrics.Gauge,
+			Value: last,
+		},
+		{
+			Name:  "clock_skew_alerts_total",
+			Help:  "Times a peer's clock exceeded the configured skew threshold.",
+			Kind:  metrics.Counter,
+			Value: alerts,
+		},
+	}
 }

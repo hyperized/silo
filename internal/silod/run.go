@@ -24,6 +24,7 @@ import (
 	"github.com/hyperized/silo/internal/gossip"
 	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/membership"
+	"github.com/hyperized/silo/internal/metrics"
 	"github.com/hyperized/silo/internal/namespace"
 	"github.com/hyperized/silo/internal/observability"
 	"github.com/hyperized/silo/internal/replication"
@@ -397,13 +398,19 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	defer func() { _ = peers.Close() }()
 	coord := replication.New(router, store, peers, cfg.Replication, logger)
 
-	// The exporter owns silod's Prometheus exposition: it reads plain getters
-	// (build info, the skew monitor) and renders them at /metrics, which the
-	// observability server hosts on its shared listener.
+	// The exporter renders silod's Prometheus exposition at /metrics, which the
+	// observability server hosts on its shared listener. Instrumented
+	// components register their instances; each owns its metric names and
+	// namespace, and the exporter pulls current values on every scrape.
 	exp := exporter.New()
-	exp.Info("silo_build_info", "Build information for the running silod.", [][2]string{{"node", cfg.NodeID}, {"version", version}})
-	exp.Gauge("silo_hlc_peer_clock_skew_seconds", "Last observed clock skew to a peer; positive means the peer is ahead of this node.", func() float64 { return skew.Last().Seconds() })
-	exp.Counter("silo_hlc_clock_skew_alerts_total", "Times a peer's clock exceeded the configured skew threshold.", skew.Alerts)
+	exp.Register(metrics.Static("silo", metrics.Metric{
+		Name:   "build_info",
+		Help:   "Build information for the running silod.",
+		Kind:   metrics.Gauge,
+		Value:  1,
+		Labels: [][2]string{{"node", cfg.NodeID}, {"version", version}},
+	}))
+	exp.Register(skew)
 
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger, exp.Handler()),
