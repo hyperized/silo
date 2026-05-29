@@ -117,8 +117,8 @@ Each milestone is a usable, demoable, shippable artifact.
 | M3  | done        | consistent-hash placement, quorum-replicated writes, replica-preferring reads, re-replication scrubber |
 | M4  | done        | HLC + CRDT namespace (OR-Set dirs, LWW ACLs), gossip-propagated, conflict surfacing, tombstone GC |
 | M5  | done        | writer-owned chunks (writer/reader SDKs, inode manifest, clock-skew monitor) |
-| M6  | next        | block volume surface |
-| M7  | not started | CSI driver |
+| M6  | done        | block volume surface (extent-mapped inode, fenced single-writer lease, NBD server, COW snapshot) |
+| M7  | next        | CSI driver |
 | M8  | not started | FUSE filesystem integration (gated on F1) |
 | M9  | not started | observability + ops |
 | M10 | not started | production hardening |
@@ -189,15 +189,15 @@ The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI 
 
 > **At M5 the system is usable end-to-end** as a programmable distributed store. Everything above is surfacing.
 
-### M6 — Block volume surface
+### M6 — Block volume surface  [done]
 
 - "Volume" = special inode where chunks are extent-mapped (offset → chunk_id) instead of append-ordered
 - Single-writer lease registered in the CRDT namespace (LWW with HLC; on conflict, newer holder wins, older fences off)
 - Data nodes refuse writes from stale lease-holders (fencing, not just revocation)
 - Local node runs an NBD server that translates kernel block ops to chunk reads/writes
-- COW snapshot via chunk-list cloning (chunks are immutable; snapshot = freeze the extent map)
+- COW snapshot via chunk-list cloning (chunks are immutable; snapshot = freeze the extent map). `Namespace.SnapshotVolume` clones the source's extent-map CRDT into a new vacant volume inode that inherits the source's extent and device size; the two share immutable chunks and diverge cleanly on the next write to either side. Surfaced as the `SnapshotVolume` gRPC RPC and `siloctl volume snapshot <src> <dst>`. (Chunk reference-counting/GC across snapshots is deferred — nothing currently reclaims chunks, so shared chunks are safe; reclamation lands with the M9 ops work.)
 
-**Demo:** `mkfs.ext4` + mount a 10GB volume on a Linux host; pull the underlying node's plug, volume reattaches elsewhere via lease takeover.
+**Demo:** `mkfs.ext4` + mount a 10GB volume on a Linux host; pull the underlying node's plug, volume reattaches elsewhere via lease takeover. `siloctl volume snapshot /vol /vol-backup` freezes a point-in-time copy that survives writes to the source.
 
 ### M7 — CSI driver
 

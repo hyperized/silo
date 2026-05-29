@@ -21,6 +21,8 @@ type fakeNamespaceOps struct {
 	ids           []string    // returned by Manifest
 	appended      [][2]string // records (path, chunkID) passed to AppendChunk
 	volExtentSize int64       // records the extent size passed to CreateVolume
+	snapSrc       string      // records the source path passed to SnapshotVolume
+	snapDst       string      // records the dest path passed to SnapshotVolume
 }
 
 func (f *fakeNamespaceOps) Mkdir(string) (string, error) { return f.id, f.err }
@@ -39,6 +41,11 @@ func (f *fakeNamespaceOps) Manifest(string) ([]string, error) { return f.ids, f.
 
 func (f *fakeNamespaceOps) CreateVolume(_ string, extentSize int64, _ ...namespace.VolumeOption) (string, error) {
 	f.volExtentSize = extentSize
+	return f.id, f.err
+}
+
+func (f *fakeNamespaceOps) SnapshotVolume(src, dst string) (string, error) {
+	f.snapSrc, f.snapDst = src, dst
 	return f.id, f.err
 }
 
@@ -139,6 +146,26 @@ func TestNamespaceService_CreateVolume(t *testing.T) {
 	}
 }
 
+func TestNamespaceService_SnapshotVolume(t *testing.T) {
+	ctx := context.Background()
+	ops := &fakeNamespaceOps{id: "inode-snap"}
+	svc := nsService(ops)
+
+	resp, err := svc.SnapshotVolume(ctx, &namespacev1.SnapshotVolumeRequest{SourcePath: "/vol", DestPath: "/snap"})
+	if err != nil || resp.GetInode() != "inode-snap" {
+		t.Fatalf("SnapshotVolume = (%v, %v), want inode-snap", resp, err)
+	}
+	if ops.snapSrc != "/vol" || ops.snapDst != "/snap" {
+		t.Errorf("paths passed = (%q, %q), want (/vol, /snap)", ops.snapSrc, ops.snapDst)
+	}
+
+	// Snapshotting a non-volume source surfaces FailedPrecondition.
+	bad := nsService(&fakeNamespaceOps{err: namespace.ErrNotVolume})
+	if _, err := bad.SnapshotVolume(ctx, &namespacev1.SnapshotVolumeRequest{SourcePath: "/file", DestPath: "/snap"}); status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("SnapshotVolume of a non-volume = %v, want FailedPrecondition", status.Code(err))
+	}
+}
+
 func TestNamespaceService_ListReportsVolumeType(t *testing.T) {
 	svc := nsService(&fakeNamespaceOps{entries: []namespace.ResolvedEntry{
 		{Name: "vol", Inode: "inode-1", Type: namespace.Volume},
@@ -162,6 +189,7 @@ func TestNamespaceService_ErrorMapping(t *testing.T) {
 		{"not exist", namespace.ErrNotExist, codes.NotFound},
 		{"invalid path", namespace.ErrInvalidPath, codes.InvalidArgument},
 		{"not dir", namespace.ErrNotDir, codes.InvalidArgument},
+		{"not volume", namespace.ErrNotVolume, codes.FailedPrecondition},
 		{"other", errors.New("disk on fire"), codes.Internal},
 	}
 	ctx := context.Background()

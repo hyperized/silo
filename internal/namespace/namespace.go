@@ -487,6 +487,56 @@ func (n *Namespace) CreateVolume(path string, extentSize int64, opts ...VolumeOp
 	return id, nil
 }
 
+// SnapshotVolume creates a point-in-time copy of the volume at srcPath as a new
+// volume at dstPath. The snapshot freezes the source's extent map: it clones the
+// extent-to-chunk bindings as they stand now, so the two volumes share the same
+// (immutable) chunks but their maps are independent. Because every write is
+// copy-on-write — it stores a fresh chunk and rebinds only the writing volume's
+// own extent — the source and the snapshot diverge cleanly from this instant; a
+// later write to one never disturbs the other's bytes. The snapshot inherits the
+// source's extent size and advertised device size and is created vacant (no
+// lease holder), so it is safe to mount read-only for backup or to acquire its
+// lease and branch from it. dstPath's parent directory must already exist and
+// its name must be free. Returns the snapshot's inode id.
+func (n *Namespace) SnapshotVolume(srcPath, dstPath string) (string, error) {
+	dstSegs, err := splitPath(dstPath)
+	if err != nil {
+		return "", err
+	}
+	if len(dstSegs) == 0 {
+		return "", fmt.Errorf("namespace: cannot create the root directory as a snapshot: %w", ErrInvalidPath)
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	src, err := n.resolveVolumeLocked(srcPath)
+	if err != nil {
+		return "", err
+	}
+	parent, err := n.resolveDirLocked(dstSegs[:len(dstSegs)-1])
+	if err != nil {
+		return "", err
+	}
+	name := dstSegs[len(dstSegs)-1]
+	if _, exists := n.primaryChildLocked(parent, name); exists {
+		return "", fmt.Errorf("namespace: %q already exists; remove it first or pick another name for the snapshot: %w", dstPath, ErrExists)
+	}
+
+	ts := n.clock.Now()
+	id := "inode-" + ts.String()
+	inode := &Inode{
+		ID:         id,
+		Type:       Volume,
+		extents:    src.extents.Clone(),
+		ExtentSize: src.ExtentSize,
+		Size:       src.Size,
+	}
+	n.inodes[id] = inode
+	parent.children.Add(Entry{Name: name, Inode: id}, ts)
+	n.persistLocked()
+	return id, nil
+}
+
 // WriteExtent rebinds the extent at index of the volume at path to chunkID,
 // stamped with the current HLC so the latest write wins after a merge. holder
 // must currently hold the volume's lease, or the write is fenced with

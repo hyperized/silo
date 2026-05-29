@@ -23,6 +23,7 @@ type NamespaceOps interface {
 	AppendChunk(path, chunkID string) error
 	Manifest(path string) ([]string, error)
 	CreateVolume(path string, extentSize int64, opts ...namespace.VolumeOption) (string, error)
+	SnapshotVolume(srcPath, dstPath string) (string, error)
 }
 
 // NamespaceService exposes the node's namespace replica over gRPC. Writes
@@ -117,6 +118,16 @@ func (s *NamespaceService) CreateVolume(_ context.Context, req *namespacev1.Crea
 	return &namespacev1.CreateVolumeResponse{Inode: id}, nil
 }
 
+// SnapshotVolume freezes the source volume's extent map into a new volume at
+// the destination path — a point-in-time, copy-on-write copy.
+func (s *NamespaceService) SnapshotVolume(_ context.Context, req *namespacev1.SnapshotVolumeRequest) (*namespacev1.SnapshotVolumeResponse, error) {
+	id, err := s.ns.SnapshotVolume(req.GetSourcePath(), req.GetDestPath())
+	if err != nil {
+		return nil, mapNamespaceError(err)
+	}
+	return &namespacev1.SnapshotVolumeResponse{Inode: id}, nil
+}
+
 func protoEntryType(t namespace.InodeType) namespacev1.EntryType {
 	switch t {
 	case namespace.Dir:
@@ -138,6 +149,8 @@ func mapNamespaceError(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, namespace.ErrInvalidPath), errors.Is(err, namespace.ErrNotDir):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, namespace.ErrNotVolume):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}

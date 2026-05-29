@@ -19,13 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NamespaceStore_Mkdir_FullMethodName        = "/silo.namespace.v1.NamespaceStore/Mkdir"
-	NamespaceStore_Touch_FullMethodName        = "/silo.namespace.v1.NamespaceStore/Touch"
-	NamespaceStore_List_FullMethodName         = "/silo.namespace.v1.NamespaceStore/List"
-	NamespaceStore_Remove_FullMethodName       = "/silo.namespace.v1.NamespaceStore/Remove"
-	NamespaceStore_AppendChunk_FullMethodName  = "/silo.namespace.v1.NamespaceStore/AppendChunk"
-	NamespaceStore_Manifest_FullMethodName     = "/silo.namespace.v1.NamespaceStore/Manifest"
-	NamespaceStore_CreateVolume_FullMethodName = "/silo.namespace.v1.NamespaceStore/CreateVolume"
+	NamespaceStore_Mkdir_FullMethodName          = "/silo.namespace.v1.NamespaceStore/Mkdir"
+	NamespaceStore_Touch_FullMethodName          = "/silo.namespace.v1.NamespaceStore/Touch"
+	NamespaceStore_List_FullMethodName           = "/silo.namespace.v1.NamespaceStore/List"
+	NamespaceStore_Remove_FullMethodName         = "/silo.namespace.v1.NamespaceStore/Remove"
+	NamespaceStore_AppendChunk_FullMethodName    = "/silo.namespace.v1.NamespaceStore/AppendChunk"
+	NamespaceStore_Manifest_FullMethodName       = "/silo.namespace.v1.NamespaceStore/Manifest"
+	NamespaceStore_CreateVolume_FullMethodName   = "/silo.namespace.v1.NamespaceStore/CreateVolume"
+	NamespaceStore_SnapshotVolume_FullMethodName = "/silo.namespace.v1.NamespaceStore/SnapshotVolume"
 )
 
 // NamespaceStoreClient is the client API for NamespaceStore service.
@@ -51,6 +52,10 @@ type NamespaceStoreClient interface {
 	// CreateVolume creates a block volume: an inode whose data is an extent map
 	// backing a fixed-size block device, the surface an NBD client mounts.
 	CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error)
+	// SnapshotVolume creates a point-in-time copy of a volume by freezing its
+	// extent map: the snapshot shares the source's immutable chunks, and because
+	// writes are copy-on-write the two diverge cleanly from the snapshot instant.
+	SnapshotVolume(ctx context.Context, in *SnapshotVolumeRequest, opts ...grpc.CallOption) (*SnapshotVolumeResponse, error)
 }
 
 type namespaceStoreClient struct {
@@ -131,6 +136,16 @@ func (c *namespaceStoreClient) CreateVolume(ctx context.Context, in *CreateVolum
 	return out, nil
 }
 
+func (c *namespaceStoreClient) SnapshotVolume(ctx context.Context, in *SnapshotVolumeRequest, opts ...grpc.CallOption) (*SnapshotVolumeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SnapshotVolumeResponse)
+	err := c.cc.Invoke(ctx, NamespaceStore_SnapshotVolume_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NamespaceStoreServer is the server API for NamespaceStore service.
 // All implementations should embed UnimplementedNamespaceStoreServer
 // for forward compatibility.
@@ -154,6 +169,10 @@ type NamespaceStoreServer interface {
 	// CreateVolume creates a block volume: an inode whose data is an extent map
 	// backing a fixed-size block device, the surface an NBD client mounts.
 	CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error)
+	// SnapshotVolume creates a point-in-time copy of a volume by freezing its
+	// extent map: the snapshot shares the source's immutable chunks, and because
+	// writes are copy-on-write the two diverge cleanly from the snapshot instant.
+	SnapshotVolume(context.Context, *SnapshotVolumeRequest) (*SnapshotVolumeResponse, error)
 }
 
 // UnimplementedNamespaceStoreServer should be embedded to have
@@ -183,6 +202,9 @@ func (UnimplementedNamespaceStoreServer) Manifest(context.Context, *ManifestRequ
 }
 func (UnimplementedNamespaceStoreServer) CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateVolume not implemented")
+}
+func (UnimplementedNamespaceStoreServer) SnapshotVolume(context.Context, *SnapshotVolumeRequest) (*SnapshotVolumeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SnapshotVolume not implemented")
 }
 func (UnimplementedNamespaceStoreServer) testEmbeddedByValue() {}
 
@@ -330,6 +352,24 @@ func _NamespaceStore_CreateVolume_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NamespaceStore_SnapshotVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SnapshotVolumeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NamespaceStoreServer).SnapshotVolume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NamespaceStore_SnapshotVolume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NamespaceStoreServer).SnapshotVolume(ctx, req.(*SnapshotVolumeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NamespaceStore_ServiceDesc is the grpc.ServiceDesc for NamespaceStore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -364,6 +404,10 @@ var NamespaceStore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateVolume",
 			Handler:    _NamespaceStore_CreateVolume_Handler,
+		},
+		{
+			MethodName: "SnapshotVolume",
+			Handler:    _NamespaceStore_SnapshotVolume_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

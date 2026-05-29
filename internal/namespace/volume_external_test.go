@@ -248,3 +248,109 @@ func TestNamespace_VolumeConvergesAcrossReplicas(t *testing.T) {
 		t.Errorf("converged extent size = %d, want 4096", got)
 	}
 }
+
+func TestNamespace_SnapshotVolume(t *testing.T) {
+	var clk int64 = 1
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.CreateVolume("/vol", 4096, namespace.WithSize(10<<20)); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	clk++
+	if _, err := ns.AcquireLease("/vol", "w"); err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	clk++
+	if err := ns.WriteExtent("/vol", 0, "c0", "w"); err != nil {
+		t.Fatalf("WriteExtent 0: %v", err)
+	}
+	clk++
+	if err := ns.WriteExtent("/vol", 3, "c3", "w"); err != nil {
+		t.Fatalf("WriteExtent 3: %v", err)
+	}
+
+	// Snapshot freezes the current extent map and inherits size/extent size.
+	clk++
+	if _, err := ns.SnapshotVolume("/vol", "/snap"); err != nil {
+		t.Fatalf("SnapshotVolume: %v", err)
+	}
+	if got, _ := ns.Extents("/snap"); !reflect.DeepEqual(got, map[uint64]string{0: "c0", 3: "c3"}) {
+		t.Fatalf("snapshot extents = %v, want {0:c0 3:c3}", got)
+	}
+	if got, _ := ns.ExtentSize("/snap"); got != 4096 {
+		t.Errorf("snapshot extent size = %d, want 4096", got)
+	}
+	if got, _ := ns.Size("/snap"); got != 10<<20 {
+		t.Errorf("snapshot size = %d, want %d", got, 10<<20)
+	}
+	// The snapshot is created vacant — nobody holds its lease.
+	if l, _ := ns.Lease("/snap"); l.Holder != "" {
+		t.Errorf("snapshot lease holder = %q, want vacant", l.Holder)
+	}
+
+	// Copy-on-write divergence: writing the source after the snapshot rebinds
+	// only the source's extent; the snapshot keeps the frozen chunk. And the
+	// snapshot can be written independently (via its own lease) without
+	// disturbing the source.
+	clk++
+	if err := ns.WriteExtent("/vol", 0, "c0-v2", "w"); err != nil {
+		t.Fatalf("rewrite source extent 0: %v", err)
+	}
+	clk++
+	if _, err := ns.AcquireLease("/snap", "s"); err != nil {
+		t.Fatalf("AcquireLease snap: %v", err)
+	}
+	clk++
+	if err := ns.WriteExtent("/snap", 3, "s3", "s"); err != nil {
+		t.Fatalf("WriteExtent snap 3: %v", err)
+	}
+	if got, _ := ns.Extents("/vol"); !reflect.DeepEqual(got, map[uint64]string{0: "c0-v2", 3: "c3"}) {
+		t.Errorf("source extents after divergence = %v, want {0:c0-v2 3:c3}", got)
+	}
+	if got, _ := ns.Extents("/snap"); !reflect.DeepEqual(got, map[uint64]string{0: "c0", 3: "s3"}) {
+		t.Errorf("snapshot extents after divergence = %v, want {0:c0 3:s3}", got)
+	}
+
+	// The snapshot is a volume that lists and survives gossip merge.
+	state, _ := ns.Snapshot()
+	clk++
+	other := nsAt("b", &clk)
+	if err := other.MergeBytes(state); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if got, _ := other.Extents("/snap"); !reflect.DeepEqual(got, map[uint64]string{0: "c0", 3: "s3"}) {
+		t.Errorf("snapshot extents after merge = %v, want {0:c0 3:s3}", got)
+	}
+}
+
+func TestNamespace_SnapshotVolumeErrors(t *testing.T) {
+	var clk int64 = 1
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.Touch("/file"); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	clk++
+	if _, err := ns.CreateVolume("/vol", 4096); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+
+	if _, err := ns.SnapshotVolume("/missing", "/snap"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("snapshot of missing source: got %v, want not-exist", err)
+	}
+	if _, err := ns.SnapshotVolume("/file", "/snap"); err == nil || !strings.Contains(err.Error(), "not a volume") {
+		t.Errorf("snapshot of a non-volume source: got %v, want not-a-volume", err)
+	}
+	if _, err := ns.SnapshotVolume("/vol", "/"); err == nil || !strings.Contains(err.Error(), "root") {
+		t.Errorf("snapshot to root: got %v", err)
+	}
+	if _, err := ns.SnapshotVolume("/vol", "/a/../b"); err == nil || !strings.Contains(err.Error(), `".."`) {
+		t.Errorf("snapshot to a traversal path: got %v", err)
+	}
+	if _, err := ns.SnapshotVolume("/vol", "/vol"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("snapshot over an existing name: got %v, want exists", err)
+	}
+	if _, err := ns.SnapshotVolume("/vol", "/missing/snap"); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("snapshot under a missing parent: got %v, want not-exist", err)
+	}
+}

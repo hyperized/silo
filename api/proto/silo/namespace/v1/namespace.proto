@@ -23,6 +23,10 @@ service NamespaceStore {
   // CreateVolume creates a block volume: an inode whose data is an extent map
   // backing a fixed-size block device, the surface an NBD client mounts.
   rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+  // SnapshotVolume creates a point-in-time copy of a volume by freezing its
+  // extent map: the snapshot shares the source's immutable chunks, and because
+  // writes are copy-on-write the two diverge cleanly from the snapshot instant.
+  rpc SnapshotVolume(SnapshotVolumeRequest) returns (SnapshotVolumeResponse);
 }
 
 // EntryType distinguishes a directory, a file, and a block volume.
@@ -96,5 +100,17 @@ message CreateVolumeRequest {
 }
 
 message CreateVolumeResponse {
+  string inode = 1;
+}
+
+message SnapshotVolumeRequest {
+  // source_path is the existing volume to snapshot.
+  string source_path = 1;
+  // dest_path is where the new point-in-time copy is created; its parent
+  // directory must exist and the name must be free.
+  string dest_path = 2;
+}
+
+message SnapshotVolumeResponse {
   string inode = 1;
 }

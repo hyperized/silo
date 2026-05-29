@@ -21,6 +21,8 @@ func runVolume(args []string, stdout, stderr io.Writer) int {
 	switch sub {
 	case "create":
 		return runVolumeCreate(rest, stdout, stderr)
+	case "snapshot":
+		return runVolumeSnapshot(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "siloctl volume: unknown subcommand %q. Run 'siloctl volume help'.\n", sub)
 		return 2
@@ -32,10 +34,16 @@ func printVolumeUsage(w io.Writer) {
 
 Usage:
   siloctl volume create <path> --size <size> [--extent-size <size>]
+  siloctl volume snapshot <source-path> <dest-path>
 
 Sizes take an optional unit suffix: K, M, G, or T (powers of 1024); a bare
 number is bytes. A volume backs an NBD block device — mount it with
 nbd-client using the volume path as the export name.
+
+A snapshot is a point-in-time, copy-on-write copy: it shares the source's
+data until either side is written, so it is cheap to take and never blocks
+the source. Take a snapshot while the source is idle (unmounted or quiesced)
+for a crash-consistent image.
 
 Each subcommand accepts --server=host:port to point at a different silod.
 `)
@@ -91,6 +99,38 @@ func runVolumeCreate(args []string, stdout, stderr io.Writer) int {
 		return reportRPC(stderr, "volume create", err)
 	}
 	fmt.Fprintf(stdout, "Created volume %s (%d bytes) as inode %s.\n", path, size, resp.GetInode())
+	return 0
+}
+
+func runVolumeSnapshot(args []string, stdout, stderr io.Writer) int {
+	fs, server := newSubFlagSet("volume snapshot", stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	rest := fs.Args()
+	if len(rest) != 2 {
+		fmt.Fprintln(stderr, "Usage: siloctl volume snapshot [--server=host:port] <source-path> <dest-path>")
+		return 2
+	}
+	source, dest := rest[0], rest[1]
+
+	conn, err := dialer(*server)
+	if err != nil {
+		fmt.Fprintf(stderr, "siloctl: could not dial silod at %q (%v); check that silod is running and SILO_SERVER points at its gRPC address\n", *server, err)
+		return 1
+	}
+	defer func() { _ = conn.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
+	defer cancel()
+	resp, err := newNamespaceClient(conn).SnapshotVolume(ctx, &namespacev1.SnapshotVolumeRequest{
+		SourcePath: source,
+		DestPath:   dest,
+	})
+	if err != nil {
+		return reportRPC(stderr, "volume snapshot", err)
+	}
+	fmt.Fprintf(stdout, "Snapshotted %s to %s as inode %s.\n", source, dest, resp.GetInode())
 	return 0
 }
 
