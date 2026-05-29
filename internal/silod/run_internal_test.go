@@ -1051,3 +1051,21 @@ func TestNamespaceSyncExt_RoundTrips(t *testing.T) {
 		t.Fatalf("MergeRemote: %v", err)
 	}
 }
+
+func TestRun_NamespaceOpenFailure(t *testing.T) {
+	installFakes(t,
+		newFakeSubsystem("http", nil, nil, true),
+		newFakeSubsystem("grpc", nil, nil, true),
+		newFakeSubsystem("bootstrap", nil, nil, true),
+		newFakeSubsystem("gossip", nil, nil, true),
+	)
+	prev := newNamespace
+	t.Cleanup(func() { newNamespace = prev })
+	newNamespace = func(*hlc.Clock, string, *slog.Logger) (*namespace.Namespace, error) {
+		return nil, errors.New("simulated namespace open failure")
+	}
+	err := Run(context.Background(), testConfig(t), discardLogger(), io.Discard, "v0")
+	if err == nil || !strings.Contains(err.Error(), "namespace state") {
+		t.Errorf("got %v, want a namespace-open failure", err)
+	}
+}

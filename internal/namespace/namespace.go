@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -87,17 +88,26 @@ type ResolvedEntry struct {
 	Conflict bool
 }
 
+// marshalNamespace is the serialization seam. Production uses json.Marshal;
+// tests override it to exercise the persistence error paths.
+var marshalNamespace = json.Marshal
+
 // Namespace is a single replica of the cluster namespace. It is safe for
-// concurrent use; every method takes an internal lock.
+// concurrent use; every method takes an internal lock. When opened with a
+// path it persists local mutations to disk and reloads them on the next
+// Open; an empty path means in-memory only.
 type Namespace struct {
-	clock *hlc.Clock
+	clock  *hlc.Clock
+	path   string
+	logger *slog.Logger
 
 	mu     sync.Mutex
 	inodes map[string]*Inode
 }
 
-// New builds an empty namespace whose clock stamps local mutations. The
-// root directory is seeded with the shared well-known id.
+// New builds an in-memory namespace whose clock stamps local mutations. The
+// root directory is seeded with the shared well-known id. Use Open to back
+// the namespace with a file on disk.
 func New(clock *hlc.Clock) *Namespace {
 	return &Namespace{
 		clock: clock,
@@ -105,6 +115,78 @@ func New(clock *hlc.Clock) *Namespace {
 			rootID: {ID: rootID, Type: Dir, children: crdt.NewORSet[Entry]()},
 		},
 	}
+}
+
+// Open builds a namespace backed by the file at path: it loads any state
+// previously persisted there and persists local mutations going forward. A
+// missing file is a fresh start; a corrupt file is logged and ignored
+// (the namespace re-converges from peers over gossip). A nil logger
+// defaults to slog.Default.
+func Open(clock *hlc.Clock, path string, logger *slog.Logger) (*Namespace, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	ns := New(clock)
+	ns.path = path
+	ns.logger = logger
+
+	ns.mu.Lock()
+	defer ns.mu.Unlock()
+	if err := ns.loadLocked(); err != nil {
+		return nil, err
+	}
+	return ns, nil
+}
+
+// loadLocked merges any persisted state from n.path into the namespace.
+func (n *Namespace) loadLocked() error {
+	raw, err := os.ReadFile(n.path) // #nosec G304 -- path is operator config under DataDir, not request input
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // fresh node; state arrives via local mutations or gossip
+	}
+	if err != nil {
+		return fmt.Errorf("namespace: could not read the state file at %s (%w); check the data directory is readable", n.path, err)
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	var w wireNamespace
+	if err := json.Unmarshal(raw, &w); err != nil {
+		// A corrupt cache file must not stop the node booting — it
+		// re-learns the namespace from peers over gossip.
+		n.logger.Warn("namespace: state file is corrupt; ignoring it and recovering from peers", "path", n.path, "error", err)
+		return nil
+	}
+	n.mergeInodesLocked(fromWire(w).inodes)
+	return nil
+}
+
+// persistLocked writes the current state to disk for namespaces opened with
+// a path. It is best-effort: a failure is logged, not returned, because the
+// mutation already applied in memory and will reach peers over gossip — the
+// on-disk copy is a recovery cache, not the source of truth.
+func (n *Namespace) persistLocked() {
+	if n.path == "" {
+		return
+	}
+	b, err := n.snapshotLocked()
+	if err != nil {
+		n.logger.Warn("namespace: could not serialise state to persist it", "error", err)
+		return
+	}
+	if err := writeFileAtomic(n.path, b); err != nil {
+		n.logger.Warn("namespace: could not persist state to disk; it will be recovered from peers on restart", "path", n.path, "error", err)
+	}
+}
+
+// writeFileAtomic writes data via a temp file + rename so a crash leaves
+// either the old state or the new, never a torn file.
+func writeFileAtomic(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // Mkdir creates a directory at path; the parent must already exist.
@@ -141,6 +223,7 @@ func (n *Namespace) create(path string, typ InodeType) (string, error) {
 	}
 	n.inodes[id] = inode
 	parent.children.Add(Entry{Name: name, Inode: id}, ts)
+	n.persistLocked()
 	return id, nil
 }
 
@@ -173,6 +256,7 @@ func (n *Namespace) Remove(path string) error {
 	if !removed {
 		return fmt.Errorf("namespace: %q does not exist: %w", path, ErrNotExist)
 	}
+	n.persistLocked()
 	return nil
 }
 
@@ -235,6 +319,12 @@ func (n *Namespace) Merge(other *Namespace) {
 
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.mergeInodesLocked(snap)
+}
+
+// mergeInodesLocked folds a snapshot of inodes into the table: new inodes
+// are adopted, shared ones merge their ACL (LWW) and children (OR-Set).
+func (n *Namespace) mergeInodesLocked(snap map[string]*Inode) {
 	for id, oi := range snap {
 		mine, ok := n.inodes[id]
 		if !ok {
@@ -285,6 +375,10 @@ type wireInode struct {
 func (n *Namespace) Snapshot() ([]byte, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	return n.snapshotLocked()
+}
+
+func (n *Namespace) snapshotLocked() ([]byte, error) {
 	w := wireNamespace{Inodes: make([]wireInode, 0, len(n.inodes))}
 	for _, in := range n.inodes {
 		wi := wireInode{ID: in.ID, Type: in.Type, ACLValue: in.ACL.Value, ACLTS: in.ACL.TS}
@@ -293,7 +387,7 @@ func (n *Namespace) Snapshot() ([]byte, error) {
 		}
 		w.Inodes = append(w.Inodes, wi)
 	}
-	return json.Marshal(w)
+	return marshalNamespace(w)
 }
 
 // MergeBytes decodes a peer's snapshot and merges it. Because Merge is

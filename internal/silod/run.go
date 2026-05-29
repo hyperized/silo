@@ -93,6 +93,10 @@ var (
 	// substitute it to exercise the "could not initialise" branch
 	// without smuggling an invalid NodeID past the config validator.
 	newMembership = membership.New
+	// newNamespace is the seam Run goes through to open the persistent
+	// namespace. Defaults to namespace.Open; tests substitute it to exercise
+	// the "could not open" branch without an unreadable data dir.
+	newNamespace = namespace.Open
 	// loadClusterTLS loads (and bootstraps if needed) the cluster CA
 	// and this node's TLS material. Swappable so tests can inject a
 	// minimal in-memory pair without writing files.
@@ -361,10 +365,14 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		return fmt.Errorf("silod.Run: could not initialise the membership table (%w)", err)
 	}
 	// The namespace is this node's replica of the cluster filesystem tree.
-	// It rides the gossip anti-entropy exchange to converge with peers, and
-	// a background sweep reclaims tombstones once they are older than the
-	// retention window. The sweep stops when ctx is cancelled on shutdown.
-	ns := namespace.New(hlc.New(cfg.NodeID))
+	// It persists local mutations under DataDir and reloads them on restart,
+	// rides the gossip anti-entropy exchange to converge with peers, and a
+	// background sweep reclaims tombstones older than the retention window.
+	// The sweep stops when ctx is cancelled on shutdown.
+	ns, err := newNamespace(hlc.New(cfg.NodeID), filepath.Join(cfg.DataDir, "namespace.json"), logger)
+	if err != nil {
+		return fmt.Errorf("silod.Run: could not open the namespace state (%w)", err)
+	}
 	go ns.RunGC(ctx, cfg.TombstoneRetention, 0, logger)
 	gossipSubsys, err := newGossipSubsystem(cfg, serverTLS, peerTLS, members, namespaceSyncExt{ns: ns}, logger)
 	if err != nil {
