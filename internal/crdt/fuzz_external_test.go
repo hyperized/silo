@@ -33,7 +33,7 @@ func FuzzORSetConverges(f *testing.F) {
 			if data[i+1]%2 == 0 {
 				set.Add(elem, hlc.Timestamp{Wall: wall, Node: node})
 			} else {
-				set.Remove(elem)
+				set.Remove(elem, hlc.Timestamp{Wall: wall, Node: node})
 			}
 		}
 

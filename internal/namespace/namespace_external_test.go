@@ -1,6 +1,9 @@
 package namespace_test
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -241,6 +244,65 @@ func TestNamespace_MergeBytesRejectsGarbage(t *testing.T) {
 	b := nsAt("b", new(int64))
 	if err := b.MergeBytes([]byte("not json")); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("got %v, want a decode error", err)
+	}
+}
+
+func TestNamespace_GC(t *testing.T) {
+	var clk int64 = 100
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.Touch("/tmp"); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	clk += 10
+	if err := ns.Remove("/tmp"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// A long retention keeps the tombstone (it may not have propagated).
+	clk += 5
+	if got := ns.GC(time.Hour); got != 0 {
+		t.Errorf("GC with a long retention reclaimed %d, want 0", got)
+	}
+
+	// Advancing the clock far past the removal and using a tiny retention
+	// reclaims it.
+	clk += 1_000_000
+	if got := ns.GC(time.Nanosecond); got == 0 {
+		t.Error("GC should reclaim the /tmp tombstone once it is old enough")
+	}
+	// The entry stays removed regardless.
+	if root := names(mustList(t, ns, "/")); len(root) != 0 {
+		t.Errorf("root not empty after GC: %v", root)
+	}
+}
+
+func TestNamespace_RunGC(t *testing.T) {
+	var clk int64 = 1
+	ns := nsAt("a", &clk)
+	clk++
+	ns.Touch("/x")
+	clk += 10
+	ns.Remove("/x")
+	clk += 1_000_000 // now far past the removal so a sweep reclaims it
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// A non-positive interval falls back to the default; an already-cancelled
+	// context returns immediately.
+	cancelled, cancel0 := context.WithCancel(context.Background())
+	cancel0()
+	ns.RunGC(cancelled, time.Hour, 0, logger)
+
+	// A live loop ticks and sweeps until cancelled.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { ns.RunGC(ctx, time.Nanosecond, time.Millisecond, logger); close(done) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunGC did not stop after ctx cancel")
 	}
 }
 

@@ -361,8 +361,11 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		return fmt.Errorf("silod.Run: could not initialise the membership table (%w)", err)
 	}
 	// The namespace is this node's replica of the cluster filesystem tree.
-	// It rides the gossip anti-entropy exchange to converge with peers.
+	// It rides the gossip anti-entropy exchange to converge with peers, and
+	// a background sweep reclaims tombstones once they are older than the
+	// retention window. The sweep stops when ctx is cancelled on shutdown.
 	ns := namespace.New(hlc.New(cfg.NodeID))
+	go ns.RunGC(ctx, cfg.TombstoneRetention, 0, logger)
 	gossipSubsys, err := newGossipSubsystem(cfg, serverTLS, peerTLS, members, namespaceSyncExt{ns: ns}, logger)
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not initialise the gossip subsystem (%w)", err)

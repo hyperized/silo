@@ -92,6 +92,22 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.ScrubInterval != 0 {
 		t.Errorf("ScrubInterval default: got %v, want 0", cfg.ScrubInterval)
 	}
+	// Retention, unlike the scrub interval, defaults to a concrete value:
+	// zero would let GC resurrect deleted entries.
+	if cfg.TombstoneRetention != DefaultTombstoneRetention {
+		t.Errorf("TombstoneRetention default: got %v, want %v", cfg.TombstoneRetention, DefaultTombstoneRetention)
+	}
+}
+
+func TestLoad_BadTombstoneRetention(t *testing.T) {
+	_, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":             "n",
+		"SILO_ENCRYPTION_KEY":      validBase64Key(t),
+		"SILO_TOMBSTONE_RETENTION": "eventually",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "SILO_TOMBSTONE_RETENTION") {
+		t.Fatalf("got %v, want a SILO_TOMBSTONE_RETENTION parse error", err)
+	}
 }
 
 func TestLoad_BadScrubInterval(t *testing.T) {
@@ -129,6 +145,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_CHUNK_SIZE":            "1048576",
 		"SILO_REPLICATION":           "5",
 		"SILO_SCRUB_INTERVAL":        "5s",
+		"SILO_TOMBSTONE_RETENTION":   "12h",
 		"SILO_LOG_LEVEL":             "debug",
 		"SILO_LOG_FORMAT":            "json",
 		"SILO_ENCRYPTION_KEY":        validBase64Key(t),
@@ -157,6 +174,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		ChunkSize:           1 << 20,
 		Replication:         5,
 		ScrubInterval:       5 * time.Second,
+		TombstoneRetention:  12 * time.Hour,
 		KeySource:           KeySourceStatic,
 		LogLevel:            "debug",
 		LogFormat:           "json",

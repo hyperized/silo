@@ -48,6 +48,11 @@ const (
 	DefaultLogFormat     = "text"
 )
 
+// DefaultTombstoneRetention is how long deleted-entry tombstones are kept
+// before GC. Generous so a removal reaches every replica — even one that
+// was partitioned for hours — before its tombstone is reclaimed.
+const DefaultTombstoneRetention = 24 * time.Hour
+
 // Config is silod's fully-resolved runtime configuration. Load builds it
 // from the environment and Validate must pass before it is used.
 type Config struct {
@@ -69,11 +74,15 @@ type Config struct {
 	// scrubber's built-in default"; set SILO_SCRUB_INTERVAL to a Go
 	// duration (e.g. 5s, 1m) to override.
 	ScrubInterval time.Duration
-	KeySource     KeySource
-	EncryptionKey []byte
-	KeyPath       string
-	LogLevel      string
-	LogFormat     string
+	// TombstoneRetention is how long a deleted namespace entry's tombstone
+	// is kept before GC reclaims it — long enough to propagate to every
+	// replica. Set SILO_TOMBSTONE_RETENTION to override the 24h default.
+	TombstoneRetention time.Duration
+	KeySource          KeySource
+	EncryptionKey      []byte
+	KeyPath            string
+	LogLevel           string
+	LogFormat          string
 
 	// TLS material for inter-node and client traffic. All four paths
 	// default to siblings under DataDir so a fresh silod boots without
@@ -177,6 +186,12 @@ func Load(env EnvFunc) (*Config, error) {
 	}
 	cfg.ScrubInterval = scrubInterval
 
+	retention, err := envDuration(env, "SILO_TOMBSTONE_RETENTION")
+	if err != nil {
+		return nil, err
+	}
+	cfg.TombstoneRetention = retention
+
 	if err := loadEncryptionKey(env, cfg); err != nil {
 		return nil, err
 	}
@@ -228,6 +243,12 @@ func Load(env EnvFunc) (*Config, error) {
 	}
 	if cfg.BootstrapAdvertise == "" {
 		cfg.BootstrapAdvertise = advertiseFallback(cfg.BootstrapAddr)
+	}
+	// A zero retention would reclaim tombstones the instant they are made,
+	// letting an unsynced replica resurrect a deleted entry. Fall back to a
+	// safe default rather than honour it.
+	if cfg.TombstoneRetention == 0 {
+		cfg.TombstoneRetention = DefaultTombstoneRetention
 	}
 
 	if err := cfg.Validate(); err != nil {

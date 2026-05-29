@@ -6,16 +6,24 @@
 package namespace
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/hyperized/silo/internal/crdt"
 	"github.com/hyperized/silo/internal/hlc"
 )
+
+// DefaultGCInterval is how often RunGC sweeps tombstones when no interval is
+// given. Tombstones live roughly between retention and retention+interval,
+// so a sweep well under the retention window keeps that overshoot small.
+const DefaultGCInterval = time.Hour
 
 // Sentinel errors the gRPC layer matches with errors.Is to choose a status
 // code; the wrapped message stays the human-facing instruction.
@@ -154,10 +162,11 @@ func (n *Namespace) Remove(path string) error {
 		return err
 	}
 	name := segs[len(segs)-1]
+	at := n.clock.Now()
 	removed := false
 	for _, e := range parent.children.Elements() {
 		if e.Name == name {
-			parent.children.Remove(e)
+			parent.children.Remove(e, at)
 			removed = true
 		}
 	}
@@ -258,12 +267,12 @@ type wireNamespace struct {
 }
 
 type wireInode struct {
-	ID       string                    `json:"id"`
-	Type     InodeType                 `json:"type"`
-	ACLValue string                    `json:"acl_value,omitempty"`
-	ACLTS    hlc.Timestamp             `json:"acl_ts"`
-	Adds     []crdt.ElementTags[Entry] `json:"adds,omitempty"`
-	Removes  []crdt.ElementTags[Entry] `json:"removes,omitempty"`
+	ID       string                          `json:"id"`
+	Type     InodeType                       `json:"type"`
+	ACLValue string                          `json:"acl_value,omitempty"`
+	ACLTS    hlc.Timestamp                   `json:"acl_ts"`
+	Adds     []crdt.ElementTags[Entry]       `json:"adds,omitempty"`
+	Removes  []crdt.ElementTombstones[Entry] `json:"removes,omitempty"`
 }
 
 // Snapshot serializes the whole namespace for an anti-entropy exchange.
@@ -310,6 +319,45 @@ func fromWire(w wireNamespace) *Namespace {
 		ns.inodes[wi.ID] = in
 	}
 	return ns
+}
+
+// GC reclaims tombstones older than retention across every directory,
+// returning the number of tag entries reclaimed. A tombstone must outlive
+// retention so its removal reaches every replica before the memory is
+// freed; reclaiming sooner would let a replica that never saw the removal
+// resurrect the entry on the next merge.
+func (n *Namespace) GC(retention time.Duration) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	cutoff := hlc.Timestamp{Wall: n.clock.Now().Wall - retention.Nanoseconds()}
+	reclaimed := 0
+	for _, in := range n.inodes {
+		if in.children != nil {
+			reclaimed += in.children.GC(cutoff)
+		}
+	}
+	return reclaimed
+}
+
+// RunGC sweeps tombstones every interval until ctx is cancelled. A
+// non-positive interval falls back to DefaultGCInterval. Intended to run in
+// its own goroutine for the life of the daemon.
+func (n *Namespace) RunGC(ctx context.Context, retention, interval time.Duration, logger *slog.Logger) {
+	if interval <= 0 {
+		interval = DefaultGCInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if reclaimed := n.GC(retention); reclaimed > 0 {
+				logger.Info("namespace tombstone GC reclaimed entries", "count", reclaimed)
+			}
+		}
+	}
 }
 
 // resolveDirLocked walks segments from the root, following the primary

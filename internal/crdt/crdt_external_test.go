@@ -44,12 +44,12 @@ func TestORSet_AddRemoveContains(t *testing.T) {
 	if !s.Contains("x") {
 		t.Error("x should be present after Add")
 	}
-	s.Remove("x")
+	s.Remove("x", ts(100, "gc"))
 	if s.Contains("x") {
 		t.Error("x should be gone after Remove tombstones its tag")
 	}
 	// Removing an absent element is a no-op.
-	s.Remove("never-added")
+	s.Remove("never-added", ts(100, "gc"))
 
 	// Re-adding with a fresh tag revives the element.
 	s.Add("x", ts(2, "a"))
@@ -63,7 +63,7 @@ func TestORSet_Elements(t *testing.T) {
 	s.Add("a", ts(1, "n"))
 	s.Add("b", ts(2, "n"))
 	s.Add("c", ts(3, "n"))
-	s.Remove("b")
+	s.Remove("b", ts(100, "gc"))
 
 	got := s.Elements()
 	sort.Strings(got)
@@ -84,7 +84,7 @@ func TestORSet_LiveTag(t *testing.T) {
 	if !ok || got.Compare(ts(3, "a")) != 0 {
 		t.Errorf("LiveTag = %v (ok=%v), want the greatest tag ts(3,a)", got, ok)
 	}
-	s.Remove("x")
+	s.Remove("x", ts(100, "gc"))
 	if _, ok := s.LiveTag("x"); ok {
 		t.Error("LiveTag should report absent once all tags are tombstoned")
 	}
@@ -98,7 +98,7 @@ func TestORSet_AddWinsOverConcurrentRemove(t *testing.T) {
 	a.Add("x", ts(1, "a"))
 
 	b := a.Clone()
-	b.Remove("x") // tombstones t1, the only tag B has seen
+	b.Remove("x", ts(100, "gc")) // tombstones t1, the only tag B has seen
 
 	a.Add("x", ts(2, "a")) // concurrent add with a tag B never observed
 
@@ -108,11 +108,49 @@ func TestORSet_AddWinsOverConcurrentRemove(t *testing.T) {
 	}
 }
 
+func TestORSet_GC(t *testing.T) {
+	s := crdt.NewORSet[string]()
+	s.Add("old", ts(1, "a"))
+	s.Add("recent", ts(2, "a"))
+	s.Add("live", ts(3, "a"))
+	// "revived" is removed then re-added with a fresh tag, so it keeps a
+	// live tag even after its old tombstone is reclaimed.
+	s.Add("revived", ts(4, "a"))
+	s.Remove("revived", ts(50, "a"))
+	s.Add("revived", ts(60, "a"))
+
+	s.Remove("old", ts(100, "a"))    // tombstoned at wall 100
+	s.Remove("recent", ts(500, "a")) // tombstoned at wall 500
+
+	// Cutoff wall 300 reclaims tombstones removed at or before it: "old"
+	// (100) and "revived"'s old tag (50); "recent" (500) is kept.
+	if got := s.GC(ts(300, "z")); got != 2 {
+		t.Fatalf("GC reclaimed %d, want 2 (old + revived's stale tag)", got)
+	}
+	if s.Contains("old") {
+		t.Error("old must stay absent after GC")
+	}
+	if s.Contains("recent") {
+		t.Error("recent's tombstone is too recent to GC; it must stay removed")
+	}
+	if !s.Contains("live") {
+		t.Error("an element with no tombstone must survive GC")
+	}
+	if !s.Contains("revived") {
+		t.Error("a re-added element must survive GC of its stale tombstone")
+	}
+
+	// A later cutoff finally reclaims recent.
+	if got := s.GC(ts(1000, "z")); got != 1 {
+		t.Errorf("later GC reclaimed %d, want 1 (recent)", got)
+	}
+}
+
 func TestORSet_ExportImportRoundTrip(t *testing.T) {
 	src := crdt.NewORSet[string]()
 	src.Add("keep", ts(1, "a"))
 	src.Add("drop", ts(2, "a"))
-	src.Remove("drop")
+	src.Remove("drop", ts(100, "gc"))
 
 	adds, removes := src.Export()
 	dst := crdt.NewORSet[string]()
@@ -130,7 +168,7 @@ func TestORSet_MergeConverges(t *testing.T) {
 	a := crdt.NewORSet[string]()
 	a.Add("keep", ts(1, "a"))
 	a.Add("drop", ts(2, "a"))
-	a.Remove("drop")
+	a.Remove("drop", ts(100, "gc"))
 
 	b := crdt.NewORSet[string]()
 	b.Add("other", ts(3, "b"))
