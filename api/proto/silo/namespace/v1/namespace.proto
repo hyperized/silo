@@ -13,6 +13,13 @@ service NamespaceStore {
   rpc Touch(TouchRequest) returns (TouchResponse);
   rpc List(ListRequest) returns (ListResponse);
   rpc Remove(RemoveRequest) returns (RemoveResponse);
+  // AppendChunk records a chunk id in a file's manifest. Writers call this
+  // after storing the chunk so a reader can later reassemble the file in
+  // append (HLC) order.
+  rpc AppendChunk(AppendChunkRequest) returns (AppendChunkResponse);
+  // Manifest returns a file's chunk ids in the order a reader concatenates
+  // them to reconstruct the byte stream.
+  rpc Manifest(ManifestRequest) returns (ManifestResponse);
 }
 
 // EntryType distinguishes a directory from a file.
@@ -60,3 +67,18 @@ message RemoveRequest {
 }
 
 message RemoveResponse {}
+
+message AppendChunkRequest {
+  string path = 1;
+  string chunk_id = 2;
+}
+
+message AppendChunkResponse {}
+
+message ManifestRequest {
+  string path = 1;
+}
+
+message ManifestResponse {
+  repeated string chunk_ids = 1;
+}

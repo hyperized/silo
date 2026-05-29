@@ -33,3 +33,13 @@ func TestNewWriterID_EntropyFailure(t *testing.T) {
 		t.Fatalf("got %v, want an entropy error", err)
 	}
 }
+
+func TestNew_EntropyFailure(t *testing.T) {
+	prev := randRead
+	t.Cleanup(func() { randRead = prev })
+	randRead = func([]byte) (int, error) { return 0, errors.New("no entropy") }
+
+	if _, err := New(nil, nil, "silo-a"); err == nil || !strings.Contains(err.Error(), "entropy") {
+		t.Fatalf("got %v, want an entropy error", err)
+	}
+}

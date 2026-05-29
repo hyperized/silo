@@ -19,10 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NamespaceStore_Mkdir_FullMethodName  = "/silo.namespace.v1.NamespaceStore/Mkdir"
-	NamespaceStore_Touch_FullMethodName  = "/silo.namespace.v1.NamespaceStore/Touch"
-	NamespaceStore_List_FullMethodName   = "/silo.namespace.v1.NamespaceStore/List"
-	NamespaceStore_Remove_FullMethodName = "/silo.namespace.v1.NamespaceStore/Remove"
+	NamespaceStore_Mkdir_FullMethodName       = "/silo.namespace.v1.NamespaceStore/Mkdir"
+	NamespaceStore_Touch_FullMethodName       = "/silo.namespace.v1.NamespaceStore/Touch"
+	NamespaceStore_List_FullMethodName        = "/silo.namespace.v1.NamespaceStore/List"
+	NamespaceStore_Remove_FullMethodName      = "/silo.namespace.v1.NamespaceStore/Remove"
+	NamespaceStore_AppendChunk_FullMethodName = "/silo.namespace.v1.NamespaceStore/AppendChunk"
+	NamespaceStore_Manifest_FullMethodName    = "/silo.namespace.v1.NamespaceStore/Manifest"
 )
 
 // NamespaceStoreClient is the client API for NamespaceStore service.
@@ -38,6 +40,13 @@ type NamespaceStoreClient interface {
 	Touch(ctx context.Context, in *TouchRequest, opts ...grpc.CallOption) (*TouchResponse, error)
 	List(ctx context.Context, in *ListRequest, opts ...grpc.CallOption) (*ListResponse, error)
 	Remove(ctx context.Context, in *RemoveRequest, opts ...grpc.CallOption) (*RemoveResponse, error)
+	// AppendChunk records a chunk id in a file's manifest. Writers call this
+	// after storing the chunk so a reader can later reassemble the file in
+	// append (HLC) order.
+	AppendChunk(ctx context.Context, in *AppendChunkRequest, opts ...grpc.CallOption) (*AppendChunkResponse, error)
+	// Manifest returns a file's chunk ids in the order a reader concatenates
+	// them to reconstruct the byte stream.
+	Manifest(ctx context.Context, in *ManifestRequest, opts ...grpc.CallOption) (*ManifestResponse, error)
 }
 
 type namespaceStoreClient struct {
@@ -88,6 +97,26 @@ func (c *namespaceStoreClient) Remove(ctx context.Context, in *RemoveRequest, op
 	return out, nil
 }
 
+func (c *namespaceStoreClient) AppendChunk(ctx context.Context, in *AppendChunkRequest, opts ...grpc.CallOption) (*AppendChunkResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AppendChunkResponse)
+	err := c.cc.Invoke(ctx, NamespaceStore_AppendChunk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *namespaceStoreClient) Manifest(ctx context.Context, in *ManifestRequest, opts ...grpc.CallOption) (*ManifestResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ManifestResponse)
+	err := c.cc.Invoke(ctx, NamespaceStore_Manifest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NamespaceStoreServer is the server API for NamespaceStore service.
 // All implementations should embed UnimplementedNamespaceStoreServer
 // for forward compatibility.
@@ -101,6 +130,13 @@ type NamespaceStoreServer interface {
 	Touch(context.Context, *TouchRequest) (*TouchResponse, error)
 	List(context.Context, *ListRequest) (*ListResponse, error)
 	Remove(context.Context, *RemoveRequest) (*RemoveResponse, error)
+	// AppendChunk records a chunk id in a file's manifest. Writers call this
+	// after storing the chunk so a reader can later reassemble the file in
+	// append (HLC) order.
+	AppendChunk(context.Context, *AppendChunkRequest) (*AppendChunkResponse, error)
+	// Manifest returns a file's chunk ids in the order a reader concatenates
+	// them to reconstruct the byte stream.
+	Manifest(context.Context, *ManifestRequest) (*ManifestResponse, error)
 }
 
 // UnimplementedNamespaceStoreServer should be embedded to have
@@ -121,6 +157,12 @@ func (UnimplementedNamespaceStoreServer) List(context.Context, *ListRequest) (*L
 }
 func (UnimplementedNamespaceStoreServer) Remove(context.Context, *RemoveRequest) (*RemoveResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Remove not implemented")
+}
+func (UnimplementedNamespaceStoreServer) AppendChunk(context.Context, *AppendChunkRequest) (*AppendChunkResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AppendChunk not implemented")
+}
+func (UnimplementedNamespaceStoreServer) Manifest(context.Context, *ManifestRequest) (*ManifestResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Manifest not implemented")
 }
 func (UnimplementedNamespaceStoreServer) testEmbeddedByValue() {}
 
@@ -214,6 +256,42 @@ func _NamespaceStore_Remove_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NamespaceStore_AppendChunk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AppendChunkRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NamespaceStoreServer).AppendChunk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NamespaceStore_AppendChunk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NamespaceStoreServer).AppendChunk(ctx, req.(*AppendChunkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _NamespaceStore_Manifest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ManifestRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NamespaceStoreServer).Manifest(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NamespaceStore_Manifest_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NamespaceStoreServer).Manifest(ctx, req.(*ManifestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NamespaceStore_ServiceDesc is the grpc.ServiceDesc for NamespaceStore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -236,6 +314,14 @@ var NamespaceStore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Remove",
 			Handler:    _NamespaceStore_Remove_Handler,
+		},
+		{
+			MethodName: "AppendChunk",
+			Handler:    _NamespaceStore_AppendChunk_Handler,
+		},
+		{
+			MethodName: "Manifest",
+			Handler:    _NamespaceStore_Manifest_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -15,9 +15,11 @@ import (
 )
 
 type fakeNamespaceOps struct {
-	id      string
-	err     error
-	entries []namespace.ResolvedEntry
+	id       string
+	err      error
+	entries  []namespace.ResolvedEntry
+	ids      []string    // returned by Manifest
+	appended [][2]string // records (path, chunkID) passed to AppendChunk
 }
 
 func (f *fakeNamespaceOps) Mkdir(string) (string, error) { return f.id, f.err }
@@ -26,6 +28,13 @@ func (f *fakeNamespaceOps) Remove(string) error          { return f.err }
 func (f *fakeNamespaceOps) List(string) ([]namespace.ResolvedEntry, error) {
 	return f.entries, f.err
 }
+
+func (f *fakeNamespaceOps) AppendChunk(path, chunkID string) error {
+	f.appended = append(f.appended, [2]string{path, chunkID})
+	return f.err
+}
+
+func (f *fakeNamespaceOps) Manifest(string) ([]string, error) { return f.ids, f.err }
 
 func nsService(ops NamespaceOps) *NamespaceService {
 	return NewNamespaceService(ops, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -60,6 +69,48 @@ func TestNamespaceService_HappyPaths(t *testing.T) {
 	}
 	if resp.Entries[1].GetType() != namespacev1.EntryType_ENTRY_TYPE_FILE || !resp.Entries[1].GetConflict() {
 		t.Errorf("entry 1 = %+v, want file+conflict", resp.Entries[1])
+	}
+}
+
+func TestNamespaceService_AppendChunkAndManifest(t *testing.T) {
+	ctx := context.Background()
+
+	// A valid id is stored verbatim and reaches the namespace.
+	ops := &fakeNamespaceOps{}
+	svc := nsService(ops)
+	if _, err := svc.AppendChunk(ctx, &namespacev1.AppendChunkRequest{Path: "/f", ChunkId: "w-1-0-0"}); err != nil {
+		t.Fatalf("AppendChunk: %v", err)
+	}
+	if len(ops.appended) != 1 || ops.appended[0] != [2]string{"/f", "w-1-0-0"} {
+		t.Fatalf("AppendChunk recorded %v, want one (/f, w-1-0-0)", ops.appended)
+	}
+
+	// A store-invalid id is rejected at the boundary and never reaches the
+	// namespace, so a bad client cannot poison the manifest.
+	if _, err := svc.AppendChunk(ctx, &namespacev1.AppendChunkRequest{Path: "/f", ChunkId: "bad/slash"}); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("AppendChunk bad id code = %v, want InvalidArgument", status.Code(err))
+	}
+	if len(ops.appended) != 1 {
+		t.Errorf("a rejected id still reached the namespace: %v", ops.appended)
+	}
+
+	// A namespace error on a valid id maps through to a gRPC status.
+	bad := nsService(&fakeNamespaceOps{err: namespace.ErrNotExist})
+	if _, err := bad.AppendChunk(ctx, &namespacev1.AppendChunkRequest{Path: "/missing", ChunkId: "w-1-0-0"}); status.Code(err) != codes.NotFound {
+		t.Errorf("AppendChunk on missing path code = %v, want NotFound", status.Code(err))
+	}
+
+	// Manifest returns the ids in order, and maps errors.
+	readSvc := nsService(&fakeNamespaceOps{ids: []string{"c0", "c1", "c2"}})
+	resp, err := readSvc.Manifest(ctx, &namespacev1.ManifestRequest{Path: "/f"})
+	if err != nil {
+		t.Fatalf("Manifest: %v", err)
+	}
+	if got := resp.GetChunkIds(); len(got) != 3 || got[0] != "c0" || got[2] != "c2" {
+		t.Errorf("Manifest ids = %v, want [c0 c1 c2]", got)
+	}
+	if _, err := bad.Manifest(ctx, &namespacev1.ManifestRequest{Path: "/missing"}); status.Code(err) != codes.NotFound {
+		t.Errorf("Manifest on missing path code = %v, want NotFound", status.Code(err))
 	}
 }
 

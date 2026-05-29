@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	namespacev1 "github.com/hyperized/silo/api/proto/silo/namespace/v1"
+	"github.com/hyperized/silo/internal/chunkstore"
 	"github.com/hyperized/silo/internal/namespace"
 )
 
@@ -19,6 +20,8 @@ type NamespaceOps interface {
 	Touch(path string) (string, error)
 	Remove(path string) error
 	List(path string) ([]namespace.ResolvedEntry, error)
+	AppendChunk(path, chunkID string) error
+	Manifest(path string) ([]string, error)
 }
 
 // NamespaceService exposes the node's namespace replica over gRPC. Writes
@@ -78,6 +81,29 @@ func (s *NamespaceService) List(_ context.Context, req *namespacev1.ListRequest)
 		})
 	}
 	return resp, nil
+}
+
+// AppendChunk records a chunk id in the file's manifest. The chunk id is
+// validated against the chunk store's allowlist before it is stored, so a
+// misbehaving client cannot poison the manifest with an id the store would
+// reject (or one that could traverse the data directory).
+func (s *NamespaceService) AppendChunk(_ context.Context, req *namespacev1.AppendChunkRequest) (*namespacev1.AppendChunkResponse, error) {
+	if err := chunkstore.ValidateID(req.GetChunkId()); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "the chunk id %q is not valid (%v); append the id silod returned from a chunk put", req.GetChunkId(), err)
+	}
+	if err := s.ns.AppendChunk(req.GetPath(), req.GetChunkId()); err != nil {
+		return nil, mapNamespaceError(err)
+	}
+	return &namespacev1.AppendChunkResponse{}, nil
+}
+
+// Manifest returns the file's chunk ids in append (HLC) order.
+func (s *NamespaceService) Manifest(_ context.Context, req *namespacev1.ManifestRequest) (*namespacev1.ManifestResponse, error) {
+	ids, err := s.ns.Manifest(req.GetPath())
+	if err != nil {
+		return nil, mapNamespaceError(err)
+	}
+	return &namespacev1.ManifestResponse{ChunkIds: ids}, nil
 }
 
 func protoEntryType(t namespace.InodeType) namespacev1.EntryType {
