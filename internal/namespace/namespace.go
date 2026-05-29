@@ -69,12 +69,16 @@ type Entry struct {
 }
 
 // Inode is a directory or file. ACL is a last-writer-wins register;
-// children is non-nil only for directories.
+// children is non-nil only for directories, manifest only for files. The
+// manifest is an OR-Set of chunk ids tagged with the HLC at which the
+// writer appended them, so reading it back in tag order reconstructs the
+// byte stream in write order.
 type Inode struct {
 	ID       string
 	Type     InodeType
 	ACL      crdt.LWWRegister[string]
 	children *crdt.ORSet[Entry]
+	manifest *crdt.ORSet[string]
 }
 
 // ResolvedEntry is one listed directory child after conflict resolution.
@@ -220,6 +224,8 @@ func (n *Namespace) create(path string, typ InodeType) (string, error) {
 	inode := &Inode{ID: id, Type: typ}
 	if typ == Dir {
 		inode.children = crdt.NewORSet[Entry]()
+	} else {
+		inode.manifest = crdt.NewORSet[string]()
 	}
 	n.inodes[id] = inode
 	parent.children.Add(Entry{Name: name, Inode: id}, ts)
@@ -310,6 +316,68 @@ func (n *Namespace) List(path string) ([]ResolvedEntry, error) {
 	return out, nil
 }
 
+// AppendChunk records that chunkID belongs to the file at path, tagged with
+// the current HLC so the manifest reads back in write order. The file must
+// already exist (a writer creates it first). Concurrent appends from
+// different writers converge because the manifest is an OR-Set.
+func (n *Namespace) AppendChunk(path, chunkID string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	file, err := n.resolveFileLocked(path)
+	if err != nil {
+		return err
+	}
+	file.manifest.Add(chunkID, n.clock.Now())
+	n.persistLocked()
+	return nil
+}
+
+// Manifest returns the chunk ids of the file at path in write order (sorted
+// by the HLC each was appended at), which is the order a reader concatenates
+// them to reconstruct the byte stream.
+func (n *Namespace) Manifest(path string) ([]string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	file, err := n.resolveFileLocked(path)
+	if err != nil {
+		return nil, err
+	}
+	ids := file.manifest.Elements()
+	sort.Slice(ids, func(i, j int) bool {
+		ti, _ := file.manifest.LiveTag(ids[i])
+		tj, _ := file.manifest.LiveTag(ids[j])
+		return ti.Before(tj)
+	})
+	return ids, nil
+}
+
+// resolveFileLocked resolves path to a file inode, erroring if it is the
+// root, is missing, or is a directory (or references a missing inode after
+// a corrupt merge).
+func (n *Namespace) resolveFileLocked(path string) (*Inode, error) {
+	segs, err := splitPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(segs) == 0 {
+		return nil, fmt.Errorf("namespace: the root is not a file: %w", ErrNotDir)
+	}
+	parent, err := n.resolveDirLocked(segs[:len(segs)-1])
+	if err != nil {
+		return nil, err
+	}
+	name := segs[len(segs)-1]
+	id, ok := n.primaryChildLocked(parent, name)
+	if !ok {
+		return nil, fmt.Errorf("namespace: %q does not exist: %w", path, ErrNotExist)
+	}
+	inode := n.inodes[id]
+	if inode == nil || inode.Type != File {
+		return nil, fmt.Errorf("namespace: %q is not a file: %w", path, ErrNotDir)
+	}
+	return inode, nil
+}
+
 // Merge folds another replica's state into this one. It is commutative and
 // idempotent: inode ACLs merge last-writer-wins and directory children
 // merge as OR-Sets, so replicas that have exchanged state converge on an
@@ -335,6 +403,9 @@ func (n *Namespace) mergeInodesLocked(snap map[string]*Inode) {
 		if mine.children != nil && oi.children != nil {
 			mine.children.Merge(oi.children)
 		}
+		if mine.manifest != nil && oi.manifest != nil {
+			mine.manifest.Merge(oi.manifest)
+		}
 	}
 }
 
@@ -348,6 +419,9 @@ func (n *Namespace) snapshot() map[string]*Inode {
 		cp := &Inode{ID: in.ID, Type: in.Type, ACL: in.ACL}
 		if in.children != nil {
 			cp.children = in.children.Clone()
+		}
+		if in.manifest != nil {
+			cp.manifest = in.manifest.Clone()
 		}
 		out[id] = cp
 	}
@@ -369,6 +443,9 @@ type wireInode struct {
 	ACLTS    hlc.Timestamp                   `json:"acl_ts"`
 	Adds     []crdt.ElementTags[Entry]       `json:"adds,omitempty"`
 	Removes  []crdt.ElementTombstones[Entry] `json:"removes,omitempty"`
+
+	ManifestAdds    []crdt.ElementTags[string]       `json:"manifest_adds,omitempty"`
+	ManifestRemoves []crdt.ElementTombstones[string] `json:"manifest_removes,omitempty"`
 }
 
 // Snapshot serializes the whole namespace for an anti-entropy exchange.
@@ -384,6 +461,9 @@ func (n *Namespace) snapshotLocked() ([]byte, error) {
 		wi := wireInode{ID: in.ID, Type: in.Type, ACLValue: in.ACL.Value, ACLTS: in.ACL.TS}
 		if in.children != nil {
 			wi.Adds, wi.Removes = in.children.Export()
+		}
+		if in.manifest != nil {
+			wi.ManifestAdds, wi.ManifestRemoves = in.manifest.Export()
 		}
 		w.Inodes = append(w.Inodes, wi)
 	}
@@ -415,6 +495,9 @@ func fromWire(w wireNamespace) *Namespace {
 		if wi.Type == Dir {
 			in.children = crdt.NewORSet[Entry]()
 			in.children.Import(wi.Adds, wi.Removes)
+		} else {
+			in.manifest = crdt.NewORSet[string]()
+			in.manifest.Import(wi.ManifestAdds, wi.ManifestRemoves)
 		}
 		ns.inodes[wi.ID] = in
 	}
@@ -434,6 +517,9 @@ func (n *Namespace) GC(retention time.Duration) int {
 	for _, in := range n.inodes {
 		if in.children != nil {
 			reclaimed += in.children.GC(cutoff)
+		}
+		if in.manifest != nil {
+			reclaimed += in.manifest.GC(cutoff)
 		}
 	}
 	return reclaimed
