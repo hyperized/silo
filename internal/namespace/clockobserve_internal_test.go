@@ -44,7 +44,9 @@ func TestObservePeerClocks_PicksHighestForeignTimestamp(t *testing.T) {
 		},
 		{
 			ID: "v", Type: Volume, ExtentSize: 4096,
-			Extents: []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c", TS: ts("peer-e", 250)}},
+			Extents:     []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c", TS: ts("peer-e", 250)}},
+			LeaseHolder: "peer-f",
+			LeaseTS:     ptr(ts("peer-f", 300)),
 		},
 	}}
 
@@ -53,12 +55,14 @@ func TestObservePeerClocks_PicksHighestForeignTimestamp(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("observer calls = %d, want 1", calls)
 	}
-	// The highest foreign wall is 250 (peer-e, a volume extent), beating the
-	// self tag at 9999 and the tombstone at 200.
-	if gotNode != "peer-e" || gotWall != 250 {
-		t.Errorf("observed (%s, %d), want (peer-e, 250)", gotNode, gotWall)
+	// The highest foreign wall is 300 (peer-f, the volume lease), beating the
+	// self tag at 9999, the extent at 250, and the tombstone at 200.
+	if gotNode != "peer-f" || gotWall != 300 {
+		t.Errorf("observed (%s, %d), want (peer-f, 300)", gotNode, gotWall)
 	}
 }
+
+func ptr(t hlc.Timestamp) *hlc.Timestamp { return &t }
 
 func TestObservePeerClocks_NoForeignTimestampNoCall(t *testing.T) {
 	const self = "me"

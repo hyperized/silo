@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,9 @@ var (
 	ErrNotDir = errors.New("not a directory")
 	// ErrNotVolume means a path that must be a block volume is something else.
 	ErrNotVolume = errors.New("not a volume")
+	// ErrLeaseHeld means a lease operation was attempted by someone other than
+	// the current holder — the caller has been fenced and must re-acquire.
+	ErrLeaseHeld = errors.New("lease held by another writer")
 )
 
 // DefaultExtentSize is the copy-on-write unit for a block volume when none is
@@ -100,6 +104,11 @@ type Inode struct {
 	// fresh chunk (chunks are immutable), so a volume is copy-on-write.
 	extents    *crdt.LWWMap[uint64, string]
 	ExtentSize int64
+	// lease is a volume's single-writer claim: a last-writer-wins register
+	// whose value is the holder id ("" = vacant) and whose timestamp is the
+	// acquisition HLC. That HLC is the fencing token — totally ordered, so the
+	// newest claim always wins and stale holders are unambiguously fenced.
+	lease crdt.LWWRegister[string]
 }
 
 // ResolvedEntry is one listed directory child after conflict resolution.
@@ -111,6 +120,15 @@ type ResolvedEntry struct {
 	Inode    string
 	Type     InodeType
 	Conflict bool
+}
+
+// Lease is a volume's single-writer claim. Holder is the writer id ("" means
+// vacant); At is the acquisition HLC, which is both the last-writer-wins
+// resolver and the fencing token — a write is honoured only while its At is the
+// newest a data node has seen for the volume.
+type Lease struct {
+	Holder string        `json:"holder"`
+	At     hlc.Timestamp `json:"at"`
 }
 
 // marshalNamespace is the serialization seam. Production uses json.Marshal;
@@ -521,6 +539,81 @@ func (n *Namespace) resolveVolumeLocked(path string) (*Inode, error) {
 	return inode, nil
 }
 
+// AcquireLease claims the volume at path for holder, stealing it from any
+// current holder: the claim is stamped with a fresh HLC and, because the lease
+// is last-writer-wins, the newest claim wins cluster-wide while older holders
+// are fenced. Deciding when a takeover is appropriate (e.g. after a holder
+// stops renewing) is the caller's policy; this is the mechanism.
+func (n *Namespace) AcquireLease(path, holder string) (Lease, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return Lease{}, err
+	}
+	at := n.clock.Now()
+	vol.lease = crdt.Set(holder, at)
+	n.persistLocked()
+	return Lease{Holder: holder, At: at}, nil
+}
+
+// RenewLease refreshes holder's claim with a newer HLC so a peer's
+// takeover-after-timeout does not fire. It fails with ErrLeaseHeld if holder no
+// longer holds the lease, so the caller learns it has been fenced and must
+// stop writing.
+func (n *Namespace) RenewLease(path, holder string) (Lease, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return Lease{}, err
+	}
+	if vol.lease.Value != holder {
+		return Lease{}, fmt.Errorf("namespace: %q is held by %s, not %q; re-acquire before writing: %w", path, leaseHolderName(vol.lease.Value), holder, ErrLeaseHeld)
+	}
+	at := n.clock.Now()
+	vol.lease = crdt.Set(holder, at)
+	n.persistLocked()
+	return Lease{Holder: holder, At: at}, nil
+}
+
+// ReleaseLease relinquishes holder's claim, leaving the volume vacant so a peer
+// can acquire it cleanly. It fails with ErrLeaseHeld if holder does not
+// currently hold the lease.
+func (n *Namespace) ReleaseLease(path, holder string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return err
+	}
+	if vol.lease.Value != holder {
+		return fmt.Errorf("namespace: %q is held by %s, not %q: %w", path, leaseHolderName(vol.lease.Value), holder, ErrLeaseHeld)
+	}
+	vol.lease = crdt.Set("", n.clock.Now())
+	n.persistLocked()
+	return nil
+}
+
+// Lease returns the volume's current single-writer claim; a zero Holder means
+// the volume is vacant.
+func (n *Namespace) Lease(path string) (Lease, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return Lease{}, err
+	}
+	return Lease{Holder: vol.lease.Value, At: vol.lease.TS}, nil
+}
+
+func leaseHolderName(holder string) string {
+	if holder == "" {
+		return "nobody (vacant)"
+	}
+	return strconv.Quote(holder)
+}
+
 // Merge folds another replica's state into this one. It is commutative and
 // idempotent: inode ACLs merge last-writer-wins and directory children
 // merge as OR-Sets, so replicas that have exchanged state converge on an
@@ -543,6 +636,7 @@ func (n *Namespace) mergeInodesLocked(snap map[string]*Inode) {
 			continue
 		}
 		mine.ACL = mine.ACL.Merge(oi.ACL)
+		mine.lease = mine.lease.Merge(oi.lease)
 		if mine.children != nil && oi.children != nil {
 			mine.children.Merge(oi.children)
 		}
@@ -562,7 +656,7 @@ func (n *Namespace) snapshot() map[string]*Inode {
 	defer n.mu.Unlock()
 	out := make(map[string]*Inode, len(n.inodes))
 	for id, in := range n.inodes {
-		cp := &Inode{ID: in.ID, Type: in.Type, ACL: in.ACL, ExtentSize: in.ExtentSize}
+		cp := &Inode{ID: in.ID, Type: in.Type, ACL: in.ACL, ExtentSize: in.ExtentSize, lease: in.lease}
 		if in.children != nil {
 			cp.children = in.children.Clone()
 		}
@@ -598,6 +692,9 @@ type wireInode struct {
 
 	ExtentSize int64                           `json:"extent_size,omitempty"`
 	Extents    []crdt.MapEntry[uint64, string] `json:"extents,omitempty"`
+
+	LeaseHolder string         `json:"lease_holder,omitempty"`
+	LeaseTS     *hlc.Timestamp `json:"lease_ts,omitempty"`
 }
 
 // Snapshot serializes the whole namespace for an anti-entropy exchange.
@@ -620,6 +717,11 @@ func (n *Namespace) snapshotLocked() ([]byte, error) {
 		if in.extents != nil {
 			wi.ExtentSize = in.ExtentSize
 			wi.Extents = in.extents.Entries()
+		}
+		if !in.lease.TS.IsZero() {
+			ts := in.lease.TS
+			wi.LeaseHolder = in.lease.Value
+			wi.LeaseTS = &ts
 		}
 		w.Inodes = append(w.Inodes, wi)
 	}
@@ -685,6 +787,9 @@ func (n *Namespace) observePeerClocks(w wireNamespace) {
 		for _, e := range wi.Extents {
 			consider(e.TS)
 		}
+		if wi.LeaseTS != nil {
+			consider(*wi.LeaseTS)
+		}
 	}
 	if !top.IsZero() {
 		n.peerClock(top.Node, top.Wall)
@@ -709,6 +814,9 @@ func fromWire(w wireNamespace) *Namespace {
 			in.ExtentSize = wi.ExtentSize
 			in.extents = crdt.NewLWWMap[uint64, string]()
 			in.extents.Import(wi.Extents)
+			if wi.LeaseTS != nil {
+				in.lease = crdt.Set(wi.LeaseHolder, *wi.LeaseTS)
+			}
 		default:
 			in.manifest = crdt.NewORSet[string]()
 			in.manifest.Import(wi.ManifestAdds, wi.ManifestRemoves)
