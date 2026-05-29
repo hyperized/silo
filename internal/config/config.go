@@ -70,11 +70,15 @@ type Config struct {
 	GossipAddr         string
 	GossipAdvertise    string
 	HTTPAddr           string
-	Seeds              []string
-	Domain             string
-	DataDir            string
-	ChunkSize          int64
-	Replication        int
+	// NBDAddr is the host:port the NBD block-device server listens on. Empty
+	// (the default) leaves NBD off: it is unauthenticated block I/O, so it is
+	// opt-in. Set SILO_NBD_ADDR (e.g. 0.0.0.0:10809) to serve volumes.
+	NBDAddr     string
+	Seeds       []string
+	Domain      string
+	DataDir     string
+	ChunkSize   int64
+	Replication int
 	// ScrubInterval paces the re-replication scrubber. Zero means "use the
 	// scrubber's built-in default"; set SILO_SCRUB_INTERVAL to a Go
 	// duration (e.g. 5s, 1m) to override.
@@ -160,6 +164,7 @@ func Load(env EnvFunc) (*Config, error) {
 		GossipAddr:          envDefault(env, "SILO_GOSSIP_ADDR", DefaultGossipAddr),
 		GossipAdvertise:     env("SILO_GOSSIP_ADVERTISE"),
 		HTTPAddr:            envDefault(env, "SILO_HTTP_ADDR", DefaultHTTPAddr),
+		NBDAddr:             env("SILO_NBD_ADDR"),
 		Domain:              env("SILO_DOMAIN"),
 		DataDir:             envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
 		KeySource:           KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),

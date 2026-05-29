@@ -26,6 +26,7 @@ import (
 	"github.com/hyperized/silo/internal/membership"
 	"github.com/hyperized/silo/internal/metrics"
 	"github.com/hyperized/silo/internal/namespace"
+	"github.com/hyperized/silo/internal/nbd"
 	"github.com/hyperized/silo/internal/observability"
 	"github.com/hyperized/silo/internal/replication"
 	"github.com/hyperized/silo/internal/transport"
@@ -66,6 +67,12 @@ var (
 	}
 	newScrubberSubsystem = func(cfg *config.Config, place replication.Placement, catalog replication.ChunkCatalog, probe replication.ReplicaProbe, logger *slog.Logger) subsystem {
 		return replication.NewScrubber(place, catalog, probe, cfg.Replication, cfg.ScrubInterval, logger)
+	}
+	// newNBDSubsystem builds the NBD block-device listener. Only constructed
+	// when SILO_NBD_ADDR is set, since NBD is unauthenticated block I/O.
+	newNBDSubsystem = func(cfg *config.Config, ns nsVolumes, coord transport.Coordinator, logger *slog.Logger) subsystem {
+		backend := newVolumeBackend(ns, coord, cfg.NodeID, logger)
+		return newNBDSub(cfg.NBDAddr, nbd.NewServer(backend, logger), logger)
 	}
 	newBootstrapSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokens transport.TokenRedeemer, minter transport.ClientCertMinter, logger *slog.Logger) subsystem {
 		svc := transport.NewBootstrapService(tokens, minter, cfg.GRPCAdvertise, logger)
@@ -418,6 +425,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
 		newScrubberSubsystem(cfg, router, store, peers, logger),
+	}
+	if cfg.NBDAddr != "" {
+		subs = append(subs, newNBDSubsystem(cfg, ns, coord, logger))
 	}
 
 	type subResult struct {

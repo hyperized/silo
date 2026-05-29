@@ -380,6 +380,35 @@ func TestRun_GracefulShutdownOnContextCancel(t *testing.T) {
 	}
 }
 
+func TestRun_NBDEnabledStartsAndStops(t *testing.T) {
+	httpSub := newFakeSubsystem("http", nil, nil, true)
+	grpcSub := newFakeSubsystem("grpc", nil, nil, true)
+	bootSub := newFakeSubsystem("bootstrap", nil, nil, true)
+	gossipSub := newFakeSubsystem("gossip", nil, nil, true)
+	installFakes(t, httpSub, grpcSub, bootSub, gossipSub)
+
+	cfg := testConfig(t)
+	cfg.NBDAddr = "127.0.0.1:0" // enables the real NBD subsystem on an ephemeral port
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, cfg, discardLogger(), io.Discard, "v0") }()
+
+	<-httpSub.startCh
+	<-grpcSub.startCh
+	<-bootSub.startCh
+	<-gossipSub.startCh
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run with NBD enabled returned %v, want nil after cancel", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run did not return within 3s of ctx cancel")
+	}
+}
+
 func TestRun_HTTPSubsystemStartFails(t *testing.T) {
 	httpSub := newFakeSubsystem("http", errors.New("simulated bind failure"), nil, false)
 	grpcSub := newFakeSubsystem("grpc", nil, nil, true)
