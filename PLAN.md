@@ -116,8 +116,8 @@ Each milestone is a usable, demoable, shippable artifact.
 | M2  | done        | mTLS, token-based operator join, SWIM gossip; bootstrap UX paper-cuts fixed |
 | M3  | done        | consistent-hash placement, quorum-replicated writes, replica-preferring reads, re-replication scrubber |
 | M4  | done        | HLC + CRDT namespace (OR-Set dirs, LWW ACLs), gossip-propagated, conflict surfacing, tombstone GC |
-| M5  | next        | writer-owned chunks |
-| M6  | not started | block volume surface |
+| M5  | done        | writer-owned chunks (writer/reader SDKs, inode manifest, clock-skew monitor) |
+| M6  | next        | block volume surface |
 | M7  | not started | CSI driver |
 | M8  | not started | FUSE filesystem integration (gated on F1) |
 | M9  | not started | observability + ops |
@@ -176,14 +176,14 @@ The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI 
 
 **Demo:** `siloctl ns mkdir/touch/ls/rm` across nodes; partition the cluster, mutate both sides, heal — converges with collisions surfaced cleanly.
 
-### M5 — Writer-owned chunks  [next]
+### M5 — Writer-owned chunks  [done]
 
-- Writer SDK (Go library): opens an inode, receives `(writer_id, epoch, chunk-id derivation rule, per-chunk data key)`
-- Local chunk-id counter + HLC per writer
-- Direct gRPC writes to primary data node (placement computed locally)
-- Async manifest checkpoint to namespace
-- Reader SDK: reconstructs byte stream from manifest by HLC order
-- Clock skew monitor: writers compare HLC against peer-issued timestamps; alert if skew > threshold
+- Writer SDK (Go library): opens (or creates) an inode and streams it as chunks through an `io.WriteCloser`; chunk ids derive locally from a writer id (sanitised node id + random suffix) and a monotonic counter, so there is no metadata round-trip per write
+- Reader SDK: reconstructs the byte stream from the inode manifest in HLC (append) order through an `io.ReadCloser`
+- Chunks are written to any node and the existing replication coordinator fans out to the replicas (refined from "direct to primary, placement computed locally": reuses the proven quorum path and keeps the SDK free of cluster-membership state — the local-placement optimisation can land later)
+- Manifest append is synchronous and chunk-first — the chunk is durable before its id is recorded — so a reader never sees an id it cannot fetch (refined from "async checkpoint")
+- Per-chunk data keys stay server-side: the SDK sends plaintext and the chunk store seals each chunk with its wrapped key, so writers hold no key material (refined from the writer receiving a per-chunk data key)
+- Clock skew monitor: each node compares peer-issued HLC timestamps (seen over anti-entropy) against its own clock and warns + counts an alert past `SILO_MAX_CLOCK_SKEW`; observation only, so write ordering is unchanged. Metrics are served by a dedicated `exporter` package (`silo_hlc_peer_clock_skew_seconds`, `silo_hlc_clock_skew_alerts_total`)
 
 **Demo:** 10 pods append concurrently to one logical file; reads see all bytes; no central allocator was touched per write.
 
