@@ -95,6 +95,12 @@ fuzz: ## Fuzz the parse/merge/placement boundaries on demand (override: make fuz
 	@go test -run='^$$' -fuzz='^FuzzClockMonotonic$$' -fuzztime=$(FUZZTIME) ./internal/hlc/
 	@go test -run='^$$' -fuzz='^FuzzORSetConverges$$' -fuzztime=$(FUZZTIME) ./internal/crdt/
 	@go test -run='^$$' -fuzz='^FuzzNamespaceConverges$$' -fuzztime=$(FUZZTIME) ./internal/namespace/
+	@go test -run='^$$' -fuzz='^FuzzNamespaceMergeBytes$$' -fuzztime=$(FUZZTIME) ./internal/namespace/
+	@go test -run='^$$' -fuzz='^FuzzNamespacePaths$$' -fuzztime=$(FUZZTIME) ./internal/namespace/
+	@go test -run='^$$' -fuzz='^FuzzStoreOpen$$' -fuzztime=$(FUZZTIME) ./internal/bootstraptoken/
+	@go test -run='^$$' -fuzz='^FuzzRedeem$$' -fuzztime=$(FUZZTIME) ./internal/bootstraptoken/
+	@go test -run='^$$' -fuzz='^FuzzConfigLoad$$' -fuzztime=$(FUZZTIME) ./internal/config/
+	@go test -run='^$$' -fuzz='^FuzzLoadAuthConfig$$' -fuzztime=$(FUZZTIME) ./cmd/siloctl/
 
 proto: ## Regenerate protobuf and gRPC code. Requires Docker; uses bufbuild/buf.
 	@if ! docker info >/dev/null 2>&1; then \

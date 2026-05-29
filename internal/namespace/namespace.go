@@ -205,9 +205,15 @@ func (n *Namespace) List(path string) ([]ResolvedEntry, error) {
 			return ti.After(tj)
 		})
 		for i, e := range entries {
-			// Every live entry's inode is present: inodes are only ever
-			// added, never deleted, until tombstone GC arrives.
-			re := ResolvedEntry{Name: name, Inode: e.Inode, Type: n.inodes[e.Inode].Type}
+			// A locally-created entry always has its inode, but a corrupt or
+			// hostile peer payload merged via MergeBytes can carry a
+			// directory entry that references an inode it never sent. Treat
+			// such a dangling entry as a file rather than dereferencing nil.
+			typ := File
+			if in := n.inodes[e.Inode]; in != nil {
+				typ = in.Type
+			}
+			re := ResolvedEntry{Name: name, Inode: e.Inode, Type: typ}
 			if i > 0 {
 				tag, _ := dir.children.LiveTag(e)
 				re.Name = name + ".conflict-" + tag.String()

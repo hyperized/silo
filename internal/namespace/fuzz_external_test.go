@@ -3,7 +3,58 @@ package namespace_test
 import (
 	"strings"
 	"testing"
+
+	"github.com/hyperized/silo/internal/hlc"
+	"github.com/hyperized/silo/internal/namespace"
 )
+
+// FuzzNamespaceMergeBytes hardens the decoder for peer state: MergeBytes
+// runs on bytes a node receives over the gossip anti-entropy exchange —
+// untrusted input — so arbitrary or corrupt bytes must error, never panic,
+// and must leave the namespace usable.
+func FuzzNamespaceMergeBytes(f *testing.F) {
+	seed := namespace.New(hlc.New("seed"))
+	_, _ = seed.Mkdir("/d")
+	_, _ = seed.Touch("/d/f")
+	if b, err := seed.Snapshot(); err == nil {
+		f.Add(b)
+	}
+	f.Add([]byte("{}"))
+	f.Add([]byte(""))
+	f.Add([]byte(`{"inodes":[{"id":"x","type":99}]}`))
+	// Regression: a directory entry that references an inode the payload
+	// never includes must not panic List (a dangling reference from corrupt
+	// or hostile peer state).
+	f.Add([]byte(`{"inodes":[{"id":"root","type":0,"adds":[{"elem":{"Name":"ghost","Inode":"missing"},"tags":[{"wall":1,"node":"a"}]}]}]}`))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		ns := namespace.New(hlc.New("self"))
+		_ = ns.MergeBytes(data)
+		if _, err := ns.List("/"); err != nil {
+			t.Fatalf("namespace unusable after MergeBytes: %v", err)
+		}
+	})
+}
+
+// FuzzNamespacePaths throws arbitrary path strings — the form siloctl and
+// the gRPC layer hand in — at every path-accepting operation. None may
+// panic, and the namespace must stay consistent (root still lists) no
+// matter what was thrown at it.
+func FuzzNamespacePaths(f *testing.F) {
+	for _, p := range []string{"/a/b", "../etc/passwd", "", "/", "a//b/./c", "/a\x00b", "/\u202e"} {
+		f.Add(p)
+	}
+	f.Fuzz(func(t *testing.T, path string) {
+		ns := namespace.New(hlc.New("self"))
+		_, _ = ns.Mkdir(path)
+		_, _ = ns.Touch(path)
+		_, _ = ns.List(path)
+		_ = ns.Remove(path)
+		if _, err := ns.List("/"); err != nil {
+			t.Fatalf("root listing broke after path ops on %q: %v", path, err)
+		}
+	})
+}
 
 // FuzzNamespaceConverges drives two replicas through arbitrary create and
 // remove sequences with independently advancing clocks, then merges them in
