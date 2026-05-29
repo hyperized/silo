@@ -71,7 +71,8 @@ build: ## Build all Go binaries into bin/.
 	@mkdir -p $(BIN)
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/silod ./cmd/silod
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/siloctl ./cmd/siloctl
-	@printf "Built %s/silod, %s/siloctl (%s)\n" "$(BIN)" "$(BIN)" "$(VERSION)"
+	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/silo-csi ./cmd/silo-csi
+	@printf "Built %s/silod, %s/siloctl, %s/silo-csi (%s)\n" "$(BIN)" "$(BIN)" "$(BIN)" "$(VERSION)"
 
 test: ## Run unit tests.
 	@go test $(GO_TEST_FLAGS) $(GO_PKGS)
