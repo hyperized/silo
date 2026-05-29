@@ -59,6 +59,42 @@ func TestNamespace_CreateVolumeWriteReadExtents(t *testing.T) {
 	}
 }
 
+func TestNamespace_VolumeSize(t *testing.T) {
+	var clk int64 = 1
+	ns := nsAt("a", &clk)
+
+	// Without WithSize a volume's size is unset (zero).
+	clk++
+	if _, err := ns.CreateVolume("/nosize", 4096); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if got, _ := ns.Size("/nosize"); got != 0 {
+		t.Errorf("unset size = %d, want 0", got)
+	}
+
+	// WithSize records the advertised device size and it survives the wire.
+	clk++
+	if _, err := ns.CreateVolume("/sized", 4096, namespace.WithSize(10<<20)); err != nil {
+		t.Fatalf("CreateVolume sized: %v", err)
+	}
+	if got, _ := ns.Size("/sized"); got != 10<<20 {
+		t.Errorf("size = %d, want %d", got, 10<<20)
+	}
+	if _, err := ns.Size("/missing"); err == nil {
+		t.Error("Size of a missing volume should error")
+	}
+
+	state, _ := ns.Snapshot()
+	clk++
+	other := nsAt("b", &clk)
+	if err := other.MergeBytes(state); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if got, _ := other.Size("/sized"); got != 10<<20 {
+		t.Errorf("size after merge = %d, want %d", got, 10<<20)
+	}
+}
+
 func TestNamespace_CreateVolumeDefaultsExtentSize(t *testing.T) {
 	var clk int64 = 1
 	ns := nsAt("a", &clk)

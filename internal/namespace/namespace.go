@@ -104,6 +104,10 @@ type Inode struct {
 	// fresh chunk (chunks are immutable), so a volume is copy-on-write.
 	extents    *crdt.LWWMap[uint64, string]
 	ExtentSize int64
+	// Size is the volume's advertised block-device size in bytes (what NBD
+	// exports). Zero means unset — a volume created without a size, fine for
+	// programmatic extent access but not for an NBD mount.
+	Size int64
 	// lease is a volume's single-writer claim: a last-writer-wins register
 	// whose value is the holder id ("" = vacant) and whose timestamp is the
 	// acquisition HLC. That HLC is the fencing token — totally ordered, so the
@@ -435,11 +439,20 @@ func (n *Namespace) resolveFileLocked(path string) (*Inode, error) {
 	return inode, nil
 }
 
+// VolumeOption configures a volume at creation.
+type VolumeOption func(*Inode)
+
+// WithSize sets the volume's advertised block-device size in bytes — required
+// before the volume can be served over NBD.
+func WithSize(bytes int64) VolumeOption {
+	return func(in *Inode) { in.Size = bytes }
+}
+
 // CreateVolume creates a block volume at path with the given extent size (the
 // copy-on-write unit, in bytes); a non-positive size falls back to
 // DefaultExtentSize. The parent directory must already exist. Returns the new
 // inode id.
-func (n *Namespace) CreateVolume(path string, extentSize int64) (string, error) {
+func (n *Namespace) CreateVolume(path string, extentSize int64, opts ...VolumeOption) (string, error) {
 	if extentSize <= 0 {
 		extentSize = DefaultExtentSize
 	}
@@ -464,7 +477,11 @@ func (n *Namespace) CreateVolume(path string, extentSize int64) (string, error) 
 
 	ts := n.clock.Now()
 	id := "inode-" + ts.String()
-	n.inodes[id] = &Inode{ID: id, Type: Volume, extents: crdt.NewLWWMap[uint64, string](), ExtentSize: extentSize}
+	inode := &Inode{ID: id, Type: Volume, extents: crdt.NewLWWMap[uint64, string](), ExtentSize: extentSize}
+	for _, opt := range opts {
+		opt(inode)
+	}
+	n.inodes[id] = inode
 	parent.children.Add(Entry{Name: name, Inode: id}, ts)
 	n.persistLocked()
 	return id, nil
@@ -532,6 +549,18 @@ func (n *Namespace) ExtentSize(path string) (int64, error) {
 		return 0, err
 	}
 	return vol.ExtentSize, nil
+}
+
+// Size returns the volume's advertised block-device size in bytes (zero if it
+// was created without one).
+func (n *Namespace) Size(path string) (int64, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return 0, err
+	}
+	return vol.Size, nil
 }
 
 // resolveVolumeLocked resolves path to a volume inode, erroring if it is the
@@ -677,7 +706,7 @@ func (n *Namespace) snapshot() map[string]*Inode {
 	defer n.mu.Unlock()
 	out := make(map[string]*Inode, len(n.inodes))
 	for id, in := range n.inodes {
-		cp := &Inode{ID: in.ID, Type: in.Type, ACL: in.ACL, ExtentSize: in.ExtentSize, lease: in.lease}
+		cp := &Inode{ID: in.ID, Type: in.Type, ACL: in.ACL, ExtentSize: in.ExtentSize, Size: in.Size, lease: in.lease}
 		if in.children != nil {
 			cp.children = in.children.Clone()
 		}
@@ -712,6 +741,7 @@ type wireInode struct {
 	ManifestRemoves []crdt.ElementTombstones[string] `json:"manifest_removes,omitempty"`
 
 	ExtentSize int64                           `json:"extent_size,omitempty"`
+	Size       int64                           `json:"size,omitempty"`
 	Extents    []crdt.MapEntry[uint64, string] `json:"extents,omitempty"`
 
 	LeaseHolder string         `json:"lease_holder,omitempty"`
@@ -737,6 +767,7 @@ func (n *Namespace) snapshotLocked() ([]byte, error) {
 		}
 		if in.extents != nil {
 			wi.ExtentSize = in.ExtentSize
+			wi.Size = in.Size
 			wi.Extents = in.extents.Entries()
 		}
 		if !in.lease.TS.IsZero() {
@@ -833,6 +864,7 @@ func fromWire(w wireNamespace) *Namespace {
 			in.children.Import(wi.Adds, wi.Removes)
 		case Volume:
 			in.ExtentSize = wi.ExtentSize
+			in.Size = wi.Size
 			in.extents = crdt.NewLWWMap[uint64, string]()
 			in.extents.Import(wi.Extents)
 			if wi.LeaseTS != nil {
