@@ -316,9 +316,13 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		announce = io.Discard
 	}
 
-	cipher, err := crypto.NewCipher(cfg.EncryptionKey)
+	key, err := keyProvider(cfg).ClusterKey()
 	if err != nil {
-		return fmt.Errorf("silod.Run: could not initialise the cluster encryption key (%w); regenerate SILO_ENCRYPTION_KEY with: openssl rand -base64 32", err)
+		return fmt.Errorf("silod.Run: could not load the cluster encryption key (%w)", err)
+	}
+	cipher, err := crypto.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("silod.Run: could not initialise the cluster encryption key (%w)", err)
 	}
 
 	store, err := newChunkStore(cfg, cipher)

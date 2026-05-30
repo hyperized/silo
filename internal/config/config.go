@@ -442,7 +442,8 @@ func loadEncryptionKey(env EnvFunc, cfg *Config) error {
 		if cfg.KeyPath == "" {
 			return errors.New("SILO_ENCRYPTION_KEY_PATH is required when SILO_ENCRYPTION_KEY_SOURCE=file; point it at a file containing 32 raw bytes (create one with: openssl rand 32 > /etc/silo/key && chmod 0400 /etc/silo/key)")
 		}
-		// File contents are read by the crypto package at startup, not here.
+		// The file is read at startup by crypto.FileKeyProvider (silod resolves
+		// the provider from KeySource); here we only require the path.
 		return nil
 	default:
 		return fmt.Errorf("SILO_ENCRYPTION_KEY_SOURCE %q is not recognised; set it to static (key in SILO_ENCRYPTION_KEY env var) or file (key at SILO_ENCRYPTION_KEY_PATH)", cfg.KeySource)
