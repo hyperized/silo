@@ -419,6 +419,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		Labels: [][2]string{{"node", cfg.NodeID}, {"version", version}},
 	}))
 	exp.Register(skew)
+	exp.Register(newStorageMetrics(store, cfg.DataDir, cfg.NodeID))
 
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger, exp.Handler()),

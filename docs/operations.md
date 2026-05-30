@@ -165,10 +165,18 @@ for you.
 - **Metrics:** `GET http://<node>:7080/metrics` (Prometheus). The `make up` stack
   scrapes all nodes and ships a Grafana dashboard (`:3030`, anonymous viewer).
 
-Notable series: per-node capacity and used bytes, gossip membership,
-replication activity, `silo_hlc_peer_clock_skew_seconds`, and
-`silo_hlc_clock_skew_alerts_total` (rising values mean a node's clock is drifting
-— investigate NTP before write ordering is affected).
+Notable series:
+
+- `silo_storage_capacity_bytes`, `silo_storage_used_bytes`,
+  `silo_storage_available_bytes` — the filesystem backing the data directory
+  (labelled by `node`). Alert when `used / capacity` crosses your headroom.
+- `silo_storage_chunks` — chunks held on the node.
+- `silo_hlc_peer_clock_skew_seconds` and `silo_hlc_clock_skew_alerts_total` —
+  rising values mean a node's clock is drifting; investigate NTP before write
+  ordering is affected.
+- `silo_build_info` — build/version, one series per node.
+
+The same per-node figures are available on demand via `siloctl status`.
 
 ---
 

@@ -24,6 +24,7 @@ import (
 	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
 	"github.com/hyperized/silo/internal/crypto"
+	"github.com/hyperized/silo/internal/diskusage"
 	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/membership"
 	"github.com/hyperized/silo/internal/namespace"
@@ -91,8 +92,8 @@ func newTestServer(t *testing.T) (addr string, teardown func()) {
 	svc := transport.NewChunkService(store, storeCoord{store: store}, logger)
 	nsSvc := transport.NewNamespaceService(namespace.New(hlc.New("test")), logger)
 	statusSvc := transport.NewStatusService(testMembers{}, store, "/var/lib/silo", "silo-a", "test", logger,
-		transport.WithDiskUsage(func(string) (transport.DiskUsage, error) {
-			return transport.DiskUsage{CapacityBytes: 1 << 30, UsedBytes: 1 << 28, AvailableBytes: 1<<30 - 1<<28}, nil
+		transport.WithDiskUsage(func(string) (diskusage.Usage, error) {
+			return diskusage.Usage{CapacityBytes: 1 << 30, UsedBytes: 1 << 28, AvailableBytes: 1<<30 - 1<<28}, nil
 		}))
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 
 	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
+	"github.com/hyperized/silo/internal/diskusage"
 	"github.com/hyperized/silo/internal/membership"
 )
 
@@ -35,8 +36,8 @@ func TestStatusService_GetStatus(t *testing.T) {
 	}}
 	store := fakeStatusStore{ids: []string{"c0", "c1", "c2"}}
 	svc := NewStatusService(members, store, "/var/lib/silo", "silo-a", "v1.2.3", discardStatusLogger(),
-		WithDiskUsage(func(string) (DiskUsage, error) {
-			return DiskUsage{CapacityBytes: 1000, UsedBytes: 600, AvailableBytes: 400}, nil
+		WithDiskUsage(func(string) (diskusage.Usage, error) {
+			return diskusage.Usage{CapacityBytes: 1000, UsedBytes: 600, AvailableBytes: 400}, nil
 		}))
 
 	resp, err := svc.GetStatus(context.Background(), &statusv1.GetStatusRequest{})
@@ -69,7 +70,7 @@ func TestStatusService_DegradesOnStorageErrors(t *testing.T) {
 		fakeStatusMembers{nodes: []membership.Node{{ID: "n", State: membership.StateAlive}}},
 		fakeStatusStore{err: errors.New("disk gone")},
 		"/data", "n", "v1", discardStatusLogger(),
-		WithDiskUsage(func(string) (DiskUsage, error) { return DiskUsage{}, errors.New("statfs failed") }),
+		WithDiskUsage(func(string) (diskusage.Usage, error) { return diskusage.Usage{}, errors.New("statfs failed") }),
 	)
 	resp, err := svc.GetStatus(context.Background(), &statusv1.GetStatusRequest{})
 	if err != nil {

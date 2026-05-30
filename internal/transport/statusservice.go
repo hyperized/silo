@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
+	"github.com/hyperized/silo/internal/diskusage"
 	"github.com/hyperized/silo/internal/membership"
 )
 
@@ -20,13 +21,6 @@ type StatusStore interface {
 	List(ctx context.Context) ([]string, error)
 }
 
-// DiskUsage is a filesystem's capacity accounting, in bytes.
-type DiskUsage struct {
-	CapacityBytes  int64
-	UsedBytes      int64
-	AvailableBytes int64
-}
-
 // StatusService answers the operator-facing ClusterStatus RPC. It reports the
 // membership the receiving node currently sees (its gossip view) plus that
 // node's local storage — there is no global aggregator, so this is one node's
@@ -37,7 +31,7 @@ type StatusService struct {
 	dataDir   string
 	nodeID    string
 	version   string
-	diskUsage func(path string) (DiskUsage, error)
+	diskUsage func(path string) (diskusage.Usage, error)
 	logger    *slog.Logger
 }
 
@@ -46,7 +40,7 @@ type StatusOption func(*StatusService)
 
 // WithDiskUsage overrides how the service measures the data directory's
 // filesystem (tests inject a fake; production uses statfs).
-func WithDiskUsage(fn func(path string) (DiskUsage, error)) StatusOption {
+func WithDiskUsage(fn func(path string) (diskusage.Usage, error)) StatusOption {
 	return func(s *StatusService) { s.diskUsage = fn }
 }
 
@@ -60,7 +54,7 @@ func NewStatusService(members StatusMembers, store StatusStore, dataDir, nodeID,
 		dataDir:   dataDir,
 		nodeID:    nodeID,
 		version:   version,
-		diskUsage: statfsUsage,
+		diskUsage: diskusage.Measure,
 		logger:    logger,
 	}
 	for _, opt := range opts {
