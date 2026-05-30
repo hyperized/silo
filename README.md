@@ -179,6 +179,7 @@ troubleshooting (the `nbd` module, lease takeover, sidecar RBAC) are in
 
 - **[docs/kubernetes.md](docs/kubernetes.md)** — install and operate silo-csi on Kubernetes (Helm values, StorageClass, snapshots, troubleshooting)
 - **[docs/operations.md](docs/operations.md)** — operator guide: configuration reference, deployment topologies, mTLS/credentials, NBD, troubleshooting
+- **[docs/threat-model.md](docs/threat-model.md)** — what silo defends against, how, and the current security edges
 - **[PLAN.md](PLAN.md)** — full design, decisions, milestones, and scope
 - **[docs/known-gaps.md](docs/known-gaps.md)** — what's not finished yet and why (deferred work, kernel-bound seams)
 - **[deploy/helm/silo-csi/README.md](deploy/helm/silo-csi/README.md)** — chart reference
