@@ -13,8 +13,17 @@ import (
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
 	namespacev1 "github.com/hyperized/silo/api/proto/silo/namespace/v1"
+	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
 )
+
+// GRPCOption registers an extra service on the gRPC server at construction.
+type GRPCOption func(*grpc.Server)
+
+// WithStatusService registers the operator-facing ClusterStatus service.
+func WithStatusService(svc statusv1.ClusterStatusServer) GRPCOption {
+	return func(s *grpc.Server) { statusv1.RegisterClusterStatusServer(s, svc) }
+}
 
 // GRPCServer is silod's gRPC listener. Split from the HTTP listener
 // because gRPC's lifecycle (GracefulStop) and HTTP's (Shutdown) take
@@ -33,11 +42,14 @@ type GRPCServer struct {
 // tlsCfg is required: silod runs every gRPC surface under mTLS so peer
 // identity is part of the wire protocol, not a hope-for-the-best
 // network ACL. Pass clustertls.ServerConfig(ca, nodeCert).
-func NewGRPCServer(addr string, tlsCfg *tls.Config, store chunkstore.Store, coord Coordinator, ns NamespaceOps, logger *slog.Logger) *GRPCServer {
+func NewGRPCServer(addr string, tlsCfg *tls.Config, store chunkstore.Store, coord Coordinator, ns NamespaceOps, logger *slog.Logger, opts ...GRPCOption) *GRPCServer {
 	creds := credentials.NewTLS(tlsCfg)
 	s := grpc.NewServer(grpc.Creds(creds))
 	chunkv1.RegisterChunkStoreServer(s, NewChunkService(store, coord, logger))
 	namespacev1.RegisterNamespaceStoreServer(s, NewNamespaceService(ns, logger))
+	for _, opt := range opts {
+		opt(s)
+	}
 	return &GRPCServer{
 		addr:   addr,
 		logger: logger,

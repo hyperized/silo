@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package silo.status.v1;
+
+option go_package = "github.com/hyperized/silo/api/proto/silo/status/v1;statusv1";
+
+// ClusterStatus is silod's read-only operator view of cluster health. A node
+// answers from its own gossip-derived membership view plus its local storage;
+// `siloctl status` renders it. There is no global coordinator, so two nodes may
+// briefly report different views during a membership change — that is the
+// system working, not a fault.
+service ClusterStatus {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}
+
+message GetStatusRequest {}
+
+// NodeState mirrors the SWIM membership states.
+enum NodeState {
+  NODE_STATE_UNSPECIFIED = 0;
+  NODE_STATE_ALIVE = 1;
+  NODE_STATE_SUSPECT = 2;
+  NODE_STATE_DEAD = 3;
+  NODE_STATE_LEFT = 4;
+}
+
+// NodeStatus is one member as the responding node currently sees it.
+message NodeStatus {
+  string id = 1;
+  string gossip_address = 2;
+  string data_address = 3;
+  NodeState state = 4;
+  uint64 incarnation = 5;
+  // last_change_unix is the epoch-seconds of this node's last state transition;
+  // the CLI renders it as an age ("down for 2m").
+  int64 last_change_unix = 6;
+}
+
+// StorageStatus is the responding node's local backing storage.
+message StorageStatus {
+  string data_dir = 1;
+  int64 capacity_bytes = 2;
+  int64 used_bytes = 3;
+  int64 available_bytes = 4;
+  int64 chunk_count = 5;
+}
+
+message GetStatusResponse {
+  string responding_node_id = 1;
+  string version = 2;
+  repeated NodeStatus nodes = 3;
+  StorageStatus storage = 4;
+}

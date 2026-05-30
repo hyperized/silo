@@ -21,12 +21,26 @@ import (
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
 	namespacev1 "github.com/hyperized/silo/api/proto/silo/namespace/v1"
+	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
 	"github.com/hyperized/silo/internal/crypto"
 	"github.com/hyperized/silo/internal/hlc"
+	"github.com/hyperized/silo/internal/membership"
 	"github.com/hyperized/silo/internal/namespace"
 	"github.com/hyperized/silo/internal/transport"
 )
+
+// testMembers is a fixed two-node membership view for the test server's status
+// service.
+type testMembers struct{}
+
+func (testMembers) Members() []membership.Node {
+	at := time.Unix(1_700_000_000, 0)
+	return []membership.Node{
+		{ID: "silo-a", Address: "silo-a:7100", DataAddress: "silo-a:7000", State: membership.StateAlive, Incarnation: 1, LastChange: at},
+		{ID: "silo-b", Address: "silo-b:7100", DataAddress: "silo-b:7000", State: membership.StateSuspect, Incarnation: 1, LastChange: at},
+	}
+}
 
 // storeCoord is a single-node Coordinator that delegates to the local
 // store, so siloctl's chunk commands (which the daemon routes through the
@@ -76,6 +90,10 @@ func newTestServer(t *testing.T) (addr string, teardown func()) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := transport.NewChunkService(store, storeCoord{store: store}, logger)
 	nsSvc := transport.NewNamespaceService(namespace.New(hlc.New("test")), logger)
+	statusSvc := transport.NewStatusService(testMembers{}, store, "/var/lib/silo", "silo-a", "test", logger,
+		transport.WithDiskUsage(func(string) (transport.DiskUsage, error) {
+			return transport.DiskUsage{CapacityBytes: 1 << 30, UsedBytes: 1 << 28, AvailableBytes: 1<<30 - 1<<28}, nil
+		}))
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -84,6 +102,7 @@ func newTestServer(t *testing.T) (addr string, teardown func()) {
 	s := grpc.NewServer()
 	chunkv1.RegisterChunkStoreServer(s, svc)
 	namespacev1.RegisterNamespaceStoreServer(s, nsSvc)
+	statusv1.RegisterClusterStatusServer(s, statusSvc)
 	go func() { _ = s.Serve(ln) }()
 
 	teardown = func() {
