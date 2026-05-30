@@ -1022,3 +1022,84 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+func TestLoadOrMintNode_RotatesNearExpiry(t *testing.T) {
+	_, _, ca := newCA(t)
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "node.crt")
+	keyPath := filepath.Join(dir, "node.key")
+
+	// Seed a node cert that is well within RenewBefore of expiry.
+	old, err := MintNodeCert(ca, "node-a", nil, []net.IP{net.ParseIP("127.0.0.1")}, time.Hour)
+	if err != nil {
+		t.Fatalf("MintNodeCert: %v", err)
+	}
+	if err := writeAtomic(certPath, old.CertPEM); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(keyPath, old.KeyPEM); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := LoadOrMintNode(dir, ca, "node-a", nil, []net.IP{net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("LoadOrMintNode: %v", err)
+	}
+	na, err := got.NotAfter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The rotated cert has a full-lifetime expiry, far beyond RenewBefore.
+	if time.Until(na) < RenewBefore {
+		t.Errorf("rotated cert expires in %v, want > RenewBefore (%v)", time.Until(na), RenewBefore)
+	}
+}
+
+func TestLoadOrMintNode_KeepsHealthyCert(t *testing.T) {
+	_, _, ca := newCA(t)
+	dir := t.TempDir()
+	healthy, _ := MintNodeCert(ca, "node-a", nil, []net.IP{net.ParseIP("127.0.0.1")}, DefaultNodeCertLifetime)
+	_ = writeAtomic(filepath.Join(dir, "node.crt"), healthy.CertPEM)
+	_ = writeAtomic(filepath.Join(dir, "node.key"), healthy.KeyPEM)
+
+	got, err := LoadOrMintNode(dir, ca, "node-a", nil, nil)
+	if err != nil {
+		t.Fatalf("LoadOrMintNode: %v", err)
+	}
+	// A far-from-expiry cert is returned unchanged (same bytes).
+	if string(got.CertPEM) != string(healthy.CertPEM) {
+		t.Error("a healthy cert should not be rotated")
+	}
+}
+
+func TestLoadOrMintNode_CannotRotateWithoutCAKey(t *testing.T) {
+	_, _, ca := newCA(t)
+	dir := t.TempDir()
+	old, _ := MintNodeCert(ca, "node-a", nil, []net.IP{net.ParseIP("127.0.0.1")}, time.Hour) // near expiry
+	_ = writeAtomic(filepath.Join(dir, "node.crt"), old.CertPEM)
+	_ = writeAtomic(filepath.Join(dir, "node.key"), old.KeyPEM)
+
+	// CA cert but no private key (a non-seed node): cannot mint, so it serves
+	// the existing cert rather than failing.
+	caNoKey := &CA{Cert: ca.Cert}
+	got, err := LoadOrMintNode(dir, caNoKey, "node-a", nil, nil)
+	if err != nil {
+		t.Fatalf("LoadOrMintNode: %v", err)
+	}
+	if string(got.CertPEM) != string(old.CertPEM) {
+		t.Error("without the CA key the existing cert should be kept, not rotated")
+	}
+}
+
+func TestNeedsRenewal_UnparseableCertRenews(t *testing.T) {
+	if !needsRenewal(&NodeCert{CertPEM: []byte("not a cert")}) {
+		t.Error("an unparseable cert should be flagged for renewal")
+	}
+}
+
+func TestNotAfter_GarbageDERErrors(t *testing.T) {
+	bad := pem.EncodeToMemory(&pem.Block{Type: pemTypeCertificate, Bytes: []byte("not valid DER")})
+	if _, err := (&NodeCert{CertPEM: bad}).NotAfter(); err == nil {
+		t.Error("a CERTIFICATE block with garbage DER should fail to parse")
+	}
+}

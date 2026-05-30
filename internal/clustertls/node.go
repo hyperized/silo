@@ -179,6 +179,20 @@ func (n *NodeCert) LeafFingerprint() (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// NotAfter parses the leaf certificate and returns its expiry time, used by the
+// rotation check to decide whether the cert is close enough to expiry to re-mint.
+func (n *NodeCert) NotAfter() (time.Time, error) {
+	block, _ := pem.Decode(n.CertPEM)
+	if block == nil || block.Type != pemTypeCertificate {
+		return time.Time{}, errors.New("silo: node cert PEM has no certificate block; the on-disk node.crt may be corrupted")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("silo: could not parse the node certificate (%w); the on-disk node.crt may be corrupted", err)
+	}
+	return cert.NotAfter, nil
+}
+
 func encodePEM(blockType string, der []byte) []byte {
 	return pemEncode(blockType, der)
 }
