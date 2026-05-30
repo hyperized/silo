@@ -25,7 +25,7 @@ the implementation — when something is not yet enforced it says so and links t
 
 Everything inside the cluster CA is one trust domain: any holder of a
 CA-signed cert is a trusted member. silo does **not** currently do intra-cluster
-authorization beyond "is a cluster member" (see [Authorization](#authorization)).
+authorization beyond "is a cluster member" (see [Authorization](#authorization-current-limits)).
 
 ## Threats and mitigations
 
