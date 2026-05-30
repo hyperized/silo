@@ -50,9 +50,10 @@ authorization beyond "is a cluster member" (see [Authorization](#authorization))
   only — the wrapped data keys live in the inode metadata and are useless without
   the cluster key. GCM is authenticated, so tampering is detected on read.
 - **The cluster key never lands in a chunk file.** Its source is pluggable
-  (`KeyProvider`): `static` (env, dev) or `file` (a 0400 file, single-node prod).
-  Back the key up like a root credential — **losing it is unrecoverable data
-  loss** (see [known-gaps.md](known-gaps.md) for the pending KMS source).
+  (`KeyProvider`): `static` (env, dev), `file` (a 0400 file), or a cloud KMS
+  (`aws-kms`/`gcp-kms`/`azure-kv`) that unwraps an envelope-encrypted key at
+  startup so the plaintext never touches disk. Back the key (or its KMS access)
+  up like a root credential — **losing it is unrecoverable data loss**.
 - The chunk *ids* are visible as filenames on disk (not secret); the *contents*
   are not.
 

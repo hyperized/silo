@@ -329,6 +329,59 @@ func TestLoad_FileKeyAccepted(t *testing.T) {
 	}
 }
 
+func TestLoad_KMSSources(t *testing.T) {
+	// AWS/GCP: accepted with a wrapped-key path + key id.
+	for _, src := range []string{"aws-kms", "gcp-kms"} {
+		cfg, err := Load(envMap(map[string]string{
+			"SILO_NODE_ID":               "n1",
+			"SILO_ENCRYPTION_KEY_SOURCE": src,
+			"SILO_ENCRYPTION_KEY_PATH":   "/etc/silo/wrapped",
+			"SILO_KMS_KEY_ID":            "key-123",
+		}))
+		if err != nil {
+			t.Fatalf("%s Load: %v", src, err)
+		}
+		if string(cfg.KeySource) != src || cfg.KMSKeyID != "key-123" {
+			t.Errorf("%s: got %q / %q", src, cfg.KeySource, cfg.KMSKeyID)
+		}
+		// Missing key id is rejected.
+		if _, err := Load(envMap(map[string]string{
+			"SILO_NODE_ID": "n1", "SILO_ENCRYPTION_KEY_SOURCE": src, "SILO_ENCRYPTION_KEY_PATH": "/w",
+		})); err == nil || !strings.Contains(err.Error(), "SILO_KMS_KEY_ID is required") {
+			t.Errorf("%s without key id: got %v", src, err)
+		}
+		// Missing wrapped-key path is rejected.
+		if _, err := Load(envMap(map[string]string{
+			"SILO_NODE_ID": "n1", "SILO_ENCRYPTION_KEY_SOURCE": src, "SILO_KMS_KEY_ID": "k",
+		})); err == nil || !strings.Contains(err.Error(), "SILO_ENCRYPTION_KEY_PATH is required") {
+			t.Errorf("%s without key path: got %v", src, err)
+		}
+	}
+
+	// Azure: needs the vault URL + key name.
+	cfg, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":               "n1",
+		"SILO_ENCRYPTION_KEY_SOURCE": "azure-kv",
+		"SILO_ENCRYPTION_KEY_PATH":   "/etc/silo/wrapped",
+		"SILO_KMS_VAULT_URL":         "https://v.vault.azure.net/",
+		"SILO_KMS_KEY_NAME":          "wrapkey",
+	}))
+	if err != nil || cfg.KMSVaultURL == "" || cfg.KMSKeyName != "wrapkey" {
+		t.Fatalf("azure-kv: cfg=%+v err=%v", cfg, err)
+	}
+	if _, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID": "n1", "SILO_ENCRYPTION_KEY_SOURCE": "azure-kv", "SILO_ENCRYPTION_KEY_PATH": "/w",
+	})); err == nil || !strings.Contains(err.Error(), "SILO_KMS_VAULT_URL") {
+		t.Errorf("azure-kv without vault: got %v", err)
+	}
+	// Azure without the wrapped-key path is rejected too.
+	if _, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID": "n1", "SILO_ENCRYPTION_KEY_SOURCE": "azure-kv", "SILO_KMS_VAULT_URL": "https://v/", "SILO_KMS_KEY_NAME": "k",
+	})); err == nil || !strings.Contains(err.Error(), "SILO_ENCRYPTION_KEY_PATH is required") {
+		t.Errorf("azure-kv without key path: got %v", err)
+	}
+}
+
 func TestLoad_UnknownKeySource(t *testing.T) {
 	_, err := Load(envMap(map[string]string{
 		"SILO_NODE_ID":               "n1",

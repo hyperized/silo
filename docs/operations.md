@@ -53,13 +53,32 @@ operator-managed cluster encryption key.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SILO_ENCRYPTION_KEY_SOURCE` | `static` | `static` (key in env, dev) or `file` (key in a file, prod) |
+| `SILO_ENCRYPTION_KEY_SOURCE` | `static` | `static`, `file`, `aws-kms`, `gcp-kms`, or `azure-kv` |
 | `SILO_ENCRYPTION_KEY` | — | base64 32-byte key; required when source is `static`. Generate: `openssl rand -base64 32` |
-| `SILO_ENCRYPTION_KEY_PATH` | — | Path to a raw 32-byte key; required when source is `file`. Generate: `openssl rand 32 > /etc/silo/key && chmod 0400 /etc/silo/key` |
+| `SILO_ENCRYPTION_KEY_PATH` | — | `file`: a raw 32-byte key (`openssl rand 32 > /etc/silo/key && chmod 0400`). KMS sources: the **KMS-wrapped** key blob. |
+| `SILO_KMS_KEY_ID` | — | `aws-kms`: key ARN/id. `gcp-kms`: crypto-key resource name (`projects/…/cryptoKeys/…`). |
+| `SILO_KMS_VAULT_URL` / `SILO_KMS_KEY_NAME` | — | `azure-kv`: Key Vault base URL + the RSA wrapping key's name. |
 
 > Losing the encryption key means losing the data — the wrapped per-chunk keys
 > live in the inode metadata and are useless without it. Back it up like a root
-> credential. (KMS-backed sources arrive in M10.)
+> credential.
+
+**KMS (envelope encryption).** Generate a 32-byte cluster key, wrap it with your
+cloud KMS, store the *ciphertext* at `SILO_ENCRYPTION_KEY_PATH`; silod decrypts
+it once at startup, so the plaintext key never touches disk. Credentials come
+from each provider's standard chain (AWS env/role, GCP ADC, Azure managed
+identity). Example (AWS):
+
+```sh
+openssl rand 32 > key.bin
+aws kms encrypt --key-id <arn> --plaintext fileb://key.bin \
+  --query CiphertextBlob --output text | base64 -d > /etc/silo/key.wrapped
+export SILO_ENCRYPTION_KEY_SOURCE=aws-kms SILO_KMS_KEY_ID=<arn> \
+       SILO_ENCRYPTION_KEY_PATH=/etc/silo/key.wrapped
+```
+
+GCP wraps with `gcloud kms encrypt`; Azure wraps the key with an RSA Key Vault
+key. Rotating the cluster key is "re-wrap and restart".
 
 ### TLS (cluster-internal mTLS)
 

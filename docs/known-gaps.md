@@ -38,7 +38,8 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
 - **Data-key cache hit-rate metric.** silod currently unwraps each chunk's data
   key on demand; there is no DEK cache to measure. Closing this is two steps:
   add a wrapped-DEK cache in `internal/crypto`, then expose
-  `silo_crypto_datakey_cache_{hits,misses}_total`.
+  `silo_crypto_datakey_cache_{hits,misses}_total`. (The *cluster*-key source is
+  done — static/file/AWS-KMS/GCP-KMS/Azure-KV; this is the per-chunk DEK cache.)
 - **Replication "queue depth" metric.** The plan lists it; today the equivalent
   health signal is `silo_replication_shortfall_chunks` (under-replicated count).
   A true in-flight re-replication queue gauge would require instrumenting the

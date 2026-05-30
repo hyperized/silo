@@ -30,6 +30,19 @@ const (
 	// The recommended production path because filesystem ACLs (0400 on a
 	// secret-mounted volume) give a tighter access boundary than env vars.
 	KeySourceFile KeySource = "file"
+	// The KMS sources below read a KMS-wrapped key blob from
+	// SILO_ENCRYPTION_KEY_PATH and unwrap it with a cloud KMS at startup
+	// (envelope encryption), so the plaintext cluster key never lands on disk.
+	// Cloud credentials come from each provider's standard chain.
+
+	// KeySourceAWSKMS unwraps with AWS KMS; SILO_KMS_KEY_ID is the key ARN/id.
+	KeySourceAWSKMS KeySource = "aws-kms"
+	// KeySourceGCPKMS unwraps with GCP Cloud KMS; SILO_KMS_KEY_ID is the
+	// crypto-key resource name (projects/…/cryptoKeys/…).
+	KeySourceGCPKMS KeySource = "gcp-kms"
+	// KeySourceAzureKV unwraps with Azure Key Vault; SILO_KMS_VAULT_URL is the
+	// vault base URL and SILO_KMS_KEY_NAME the wrapping key's name.
+	KeySourceAzureKV KeySource = "azure-kv"
 )
 
 // Defaults applied by Load when the matching SILO_* env var is unset.
@@ -94,8 +107,12 @@ type Config struct {
 	KeySource     KeySource
 	EncryptionKey []byte
 	KeyPath       string
-	LogLevel      string
-	LogFormat     string
+	// KMS fields, used when KeySource is one of the *-kms sources.
+	KMSKeyID    string // AWS key ARN/id, or GCP crypto-key resource name
+	KMSVaultURL string // Azure Key Vault base URL
+	KMSKeyName  string // Azure key name
+	LogLevel    string
+	LogFormat   string
 
 	// TLS material for inter-node and client traffic. All four paths
 	// default to siblings under DataDir so a fresh silod boots without
@@ -169,6 +186,9 @@ func Load(env EnvFunc) (*Config, error) {
 		DataDir:             envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
 		KeySource:           KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),
 		KeyPath:             env("SILO_ENCRYPTION_KEY_PATH"),
+		KMSKeyID:            env("SILO_KMS_KEY_ID"),
+		KMSVaultURL:         env("SILO_KMS_VAULT_URL"),
+		KMSKeyName:          env("SILO_KMS_KEY_NAME"),
 		LogLevel:            envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
 		LogFormat:           envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
 		CACertPath:          rawCACert,
@@ -445,7 +465,23 @@ func loadEncryptionKey(env EnvFunc, cfg *Config) error {
 		// The file is read at startup by crypto.FileKeyProvider (silod resolves
 		// the provider from KeySource); here we only require the path.
 		return nil
+	case KeySourceAWSKMS, KeySourceGCPKMS:
+		if cfg.KeyPath == "" {
+			return fmt.Errorf("SILO_ENCRYPTION_KEY_PATH is required when SILO_ENCRYPTION_KEY_SOURCE=%s; point it at the KMS-wrapped key blob", cfg.KeySource)
+		}
+		if cfg.KMSKeyID == "" {
+			return fmt.Errorf("SILO_KMS_KEY_ID is required when SILO_ENCRYPTION_KEY_SOURCE=%s; set it to the KMS key (AWS key ARN/id, or the GCP crypto-key resource name)", cfg.KeySource)
+		}
+		return nil
+	case KeySourceAzureKV:
+		if cfg.KeyPath == "" {
+			return errors.New("SILO_ENCRYPTION_KEY_PATH is required when SILO_ENCRYPTION_KEY_SOURCE=azure-kv; point it at the RSA-wrapped key blob")
+		}
+		if cfg.KMSVaultURL == "" || cfg.KMSKeyName == "" {
+			return errors.New("SILO_KMS_VAULT_URL and SILO_KMS_KEY_NAME are required when SILO_ENCRYPTION_KEY_SOURCE=azure-kv (the vault base URL and the wrapping key's name)")
+		}
+		return nil
 	default:
-		return fmt.Errorf("SILO_ENCRYPTION_KEY_SOURCE %q is not recognised; set it to static (key in SILO_ENCRYPTION_KEY env var) or file (key at SILO_ENCRYPTION_KEY_PATH)", cfg.KeySource)
+		return fmt.Errorf("SILO_ENCRYPTION_KEY_SOURCE %q is not recognised; set it to static, file, aws-kms, gcp-kms, or azure-kv", cfg.KeySource)
 	}
 }

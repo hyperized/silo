@@ -19,4 +19,17 @@ func TestKeyProvider_SelectsSource(t *testing.T) {
 	if p := keyProvider(&config.Config{}); p.SourceName() != "static" {
 		t.Errorf("default source = %q", p.SourceName())
 	}
+
+	// The KMS sources resolve to their cloud decrypters.
+	kmsCases := map[config.KeySource]string{
+		config.KeySourceAWSKMS:  "aws-kms",
+		config.KeySourceGCPKMS:  "gcp-kms",
+		config.KeySourceAzureKV: "azure-kv",
+	}
+	for src, want := range kmsCases {
+		cfg := &config.Config{KeySource: src, KeyPath: "/wrapped", KMSKeyID: "k", KMSVaultURL: "https://v.vault.azure.net/", KMSKeyName: "n"}
+		if p := keyProvider(cfg); p.SourceName() != want {
+			t.Errorf("%s source = %q, want %q", src, p.SourceName(), want)
+		}
+	}
 }

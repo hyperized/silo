@@ -1,6 +1,8 @@
 package crypto_test
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,3 +55,53 @@ func TestFileKeyProvider(t *testing.T) {
 		t.Error("a wrong-length key file should error")
 	}
 }
+
+type fakeDecrypter struct {
+	out []byte
+	err error
+}
+
+func (f fakeDecrypter) Decrypt(_ context.Context, _ []byte) ([]byte, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.out, nil
+}
+func (fakeDecrypter) Name() string { return "fake-kms" }
+
+func TestKMSKeyProvider(t *testing.T) {
+	dir := t.TempDir()
+	wrapped := filepath.Join(dir, "wrapped.key")
+	if err := os.WriteFile(wrapped, []byte("ciphertext-blob"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+
+	key := make([]byte, crypto.ClusterKeyBytes)
+	p := crypto.KMSKeyProvider(fakeDecrypter{out: key}, wrapped)
+	if p.SourceName() != "fake-kms" {
+		t.Errorf("source = %q", p.SourceName())
+	}
+	got, err := p.ClusterKey()
+	if err != nil || len(got) != crypto.ClusterKeyBytes {
+		t.Fatalf("ClusterKey = (%d, %v)", len(got), err)
+	}
+
+	// Missing path.
+	if _, err := crypto.KMSKeyProvider(fakeDecrypter{out: key}, "").ClusterKey(); err == nil {
+		t.Error("empty ciphertext path should error")
+	}
+	// Missing file.
+	if _, err := crypto.KMSKeyProvider(fakeDecrypter{out: key}, filepath.Join(dir, "nope")).ClusterKey(); err == nil {
+		t.Error("missing wrapped-key file should error")
+	}
+	// Decrypt failure.
+	if _, err := crypto.KMSKeyProvider(fakeDecrypter{err: errFake}, wrapped).ClusterKey(); err == nil {
+		t.Error("a KMS decrypt failure should error")
+	}
+	// Wrong plaintext length.
+	if _, err := crypto.KMSKeyProvider(fakeDecrypter{out: []byte("short")}, wrapped).ClusterKey(); err == nil {
+		t.Error("a non-32-byte decrypted key should error")
+	}
+}
+
+var errFake = fmt.Errorf("kms unavailable")
