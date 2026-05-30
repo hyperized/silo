@@ -221,6 +221,18 @@ Notable series:
 - `silo_rebalancer_capacity_skew` — used-fraction spread between the fullest and
   emptiest node (0 = balanced). Heterogeneous disks settle toward balanced as the
   capacity-weighted ring takes effect.
+- `silo_chunk_write_latency_seconds` / `silo_chunk_read_latency_seconds` —
+  histograms of chunk put/get latency through the replication coordinator (use
+  `histogram_quantile` for p50/p99).
+- `silo_gossip_members{state}` — members seen by SWIM state; and
+  `silo_gossip_last_sync_age_seconds` — gossip lag (climbs when a node is
+  isolated).
+- `silo_namespace_antientropy_merges_total` and
+  `silo_namespace_antientropy_last_merge_age_seconds` — namespace convergence
+  activity and lag.
+
+The data-key cache hit-rate metric is pending the cache itself (silod currently
+unwraps per-chunk keys on demand; the cache is a later optimisation).
 - `silo_hlc_peer_clock_skew_seconds` and `silo_hlc_clock_skew_alerts_total` —
   rising values mean a node's clock is drifting; investigate NTP before write
   ordering is affected.

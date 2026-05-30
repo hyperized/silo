@@ -9,7 +9,9 @@ package exporter
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -46,9 +48,34 @@ func (e *Exporter) Render(w io.Writer) {
 			name := prefix + "_" + m.Name
 			fmt.Fprintf(w, "# HELP %s %s\n", name, m.Help)
 			fmt.Fprintf(w, "# TYPE %s %s\n", name, kindString(m.Kind))
+			if m.Kind == metrics.Histogram {
+				renderHistogram(w, name, m)
+				continue
+			}
 			fmt.Fprintf(w, "%s%s %g\n", name, formatLabels(m.Labels), m.Value)
 		}
 	}
+}
+
+// renderHistogram writes the _bucket{le=…}, _sum, and _count series a Prometheus
+// histogram requires.
+func renderHistogram(w io.Writer, name string, m metrics.Metric) {
+	for _, b := range m.Buckets {
+		le := strconv.FormatFloat(b.LE, 'g', -1, 64)
+		if math.IsInf(b.LE, 1) {
+			le = "+Inf"
+		}
+		fmt.Fprintf(w, "%s_bucket%s %d\n", name, formatLabels(withLabel(m.Labels, "le", le)), b.Count)
+	}
+	fmt.Fprintf(w, "%s_sum%s %g\n", name, formatLabels(m.Labels), m.Sum)
+	fmt.Fprintf(w, "%s_count%s %d\n", name, formatLabels(m.Labels), m.Count)
+}
+
+// withLabel returns labels with an extra key=value appended.
+func withLabel(labels [][2]string, key, value string) [][2]string {
+	out := make([][2]string, 0, len(labels)+1)
+	out = append(out, labels...)
+	return append(out, [2]string{key, value})
 }
 
 // Handler serves the metrics as Prometheus text. Mount it at GET /metrics.
@@ -60,10 +87,14 @@ func (e *Exporter) Handler() http.Handler {
 }
 
 func kindString(k metrics.Kind) string {
-	if k == metrics.Counter {
+	switch k {
+	case metrics.Counter:
 		return "counter"
+	case metrics.Histogram:
+		return "histogram"
+	default:
+		return "gauge"
 	}
-	return "gauge"
 }
 
 func formatLabels(labels [][2]string) string {

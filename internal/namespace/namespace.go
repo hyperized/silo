@@ -16,7 +16,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/hyperized/silo/internal/metrics"
 
 	"github.com/hyperized/silo/internal/crdt"
 	"github.com/hyperized/silo/internal/hlc"
@@ -154,7 +157,16 @@ type Namespace struct {
 
 	mu     sync.Mutex
 	inodes map[string]*Inode
+
+	// antiEntropy metrics: merges counts the peer-state merges this node has
+	// folded in, lastMerge is the unix-nano time of the most recent one (the
+	// anti-entropy lag signal). Read by the metrics scrape.
+	merges    atomic.Int64
+	lastMerge atomic.Int64
 }
+
+// nsTimeNow is the clock the namespace metrics read; overridable in tests.
+var nsTimeNow = time.Now
 
 // Option configures a Namespace at construction.
 type Option func(*Namespace)
@@ -840,7 +852,33 @@ func (n *Namespace) MergeBytes(b []byte) error {
 	}
 	n.observePeerClocks(w)
 	n.Merge(fromWire(w))
+	n.merges.Add(1)
+	n.lastMerge.Store(nsTimeNow().UnixNano())
 	return nil
+}
+
+// MetricPrefix namespaces the namespace metrics.
+func (n *Namespace) MetricPrefix() string { return "silo_namespace" }
+
+// CollectMetrics reports how many peer-state merges this node has folded in over
+// anti-entropy and how long ago the last one was — the namespace's convergence
+// lag (a value that keeps climbing means the node is not exchanging state).
+func (n *Namespace) CollectMetrics() []metrics.Metric {
+	out := []metrics.Metric{{
+		Name:  "antientropy_merges_total",
+		Help:  "Peer-state merges this node has folded in over gossip anti-entropy.",
+		Kind:  metrics.Counter,
+		Value: float64(n.merges.Load()),
+	}}
+	if last := n.lastMerge.Load(); last > 0 {
+		out = append(out, metrics.Metric{
+			Name:  "antientropy_last_merge_age_seconds",
+			Help:  "Seconds since this node last merged a peer's namespace state.",
+			Kind:  metrics.Gauge,
+			Value: nsTimeNow().Sub(time.Unix(0, last)).Seconds(),
+		})
+	}
+	return out
 }
 
 // observePeerClocks reports the highest timestamp issued by another node in a

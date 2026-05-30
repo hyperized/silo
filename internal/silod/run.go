@@ -412,7 +412,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	router := replication.NewRouter(members)
 	peers := replication.NewGRPCPeers(credentials.NewTLS(peerTLS), logger)
 	defer func() { _ = peers.Close() }()
-	coord := replication.New(router, store, peers, cfg.Replication, logger)
+	coord := newMeteredCoord(replication.New(router, store, peers, cfg.Replication, logger), cfg.NodeID)
 
 	// The exporter renders silod's Prometheus exposition at /metrics, which the
 	// observability server hosts on its shared listener. Instrumented
@@ -428,13 +428,15 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	}))
 	exp.Register(skew)
 	exp.Register(newStorageMetrics(store, cfg.DataDir, cfg.NodeID))
+	exp.Register(coord)
+	exp.Register(ns)
 
 	scrubberSubsys := newScrubberSubsystem(cfg, router, store, peers, logger)
 	rebalancerSubsys := newRebalancerSubsystem(cfg, members, logger)
 	// The scrubber and rebalancer expose replication/capacity metrics; surface
 	// them to Prometheus when the concrete subsystem implements metrics.Source
 	// (the production ones do; a test fake may not).
-	for _, sub := range []subsystem{scrubberSubsys, rebalancerSubsys} {
+	for _, sub := range []subsystem{scrubberSubsys, rebalancerSubsys, gossipSubsys} {
 		if src, ok := sub.(metrics.Source); ok {
 			exp.Register(src)
 		}
@@ -540,6 +542,11 @@ func (g *gossipSub) Shutdown(ctx context.Context) error { return g.srv.Shutdown(
 // Drain lets the gossip subsystem satisfy transport.Drainer, so the NodeAdmin
 // service can drain this node on operator request.
 func (g *gossipSub) Drain() bool { return g.srv.Drain() }
+
+// MetricPrefix and CollectMetrics let the gossip subsystem satisfy
+// metrics.Source (member counts and anti-entropy lag) through the wrapper.
+func (g *gossipSub) MetricPrefix() string             { return g.srv.MetricPrefix() }
+func (g *gossipSub) CollectMetrics() []metrics.Metric { return g.srv.CollectMetrics() }
 
 // gossipDrainer returns the drainer behind the gossip subsystem, or nil when
 // the subsystem does not expose draining (a test fake may not), in which case

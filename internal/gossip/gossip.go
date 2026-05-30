@@ -9,7 +9,10 @@ import (
 	"math/rand/v2"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/hyperized/silo/internal/metrics"
 
 	"github.com/hyperized/silo/internal/membership"
 )
@@ -131,7 +134,14 @@ type Subsystem struct {
 
 	wg     sync.WaitGroup
 	stopCh chan struct{}
+
+	// lastSync is the unix-nano time of the last successful anti-entropy sync;
+	// 0 until the first. Read by the metrics scrape to report sync lag.
+	lastSync atomic.Int64
 }
+
+// timeNow is the clock the gossip metrics read; overridable in tests.
+var timeNow = time.Now
 
 // dialer abstracts the act of opening a TLS gossip connection. The
 // default implementation calls tls.Dial; tests inject a stub that
@@ -249,6 +259,38 @@ func (s *Subsystem) Drain() bool {
 	s.remember(ev)
 	s.logger.Info("node draining; announced Left over gossip so peers re-replicate its chunks", "node", ev.ID)
 	return true
+}
+
+// MetricPrefix namespaces the gossip metrics.
+func (s *Subsystem) MetricPrefix() string { return "silo_gossip" }
+
+// CollectMetrics reports the membership the node sees, broken down by SWIM
+// state, and how long ago this node last completed an anti-entropy sync (the
+// gossip-lag signal — a value that keeps climbing means the node is isolated).
+func (s *Subsystem) CollectMetrics() []metrics.Metric {
+	counts := map[membership.State]int{}
+	for _, n := range s.members.Members() {
+		counts[n.State]++
+	}
+	out := make([]metrics.Metric, 0, 5)
+	for _, st := range []membership.State{membership.StateAlive, membership.StateSuspect, membership.StateDead, membership.StateLeft} {
+		out = append(out, metrics.Metric{
+			Name:   "members",
+			Help:   "Cluster members this node currently sees, by SWIM state.",
+			Kind:   metrics.Gauge,
+			Value:  float64(counts[st]),
+			Labels: [][2]string{{"state", st.String()}},
+		})
+	}
+	if last := s.lastSync.Load(); last > 0 {
+		out = append(out, metrics.Metric{
+			Name:  "last_sync_age_seconds",
+			Help:  "Seconds since this node last completed an anti-entropy sync with a peer.",
+			Kind:  metrics.Gauge,
+			Value: timeNow().Sub(time.Unix(0, last)).Seconds(),
+		})
+	}
+	return out
 }
 
 // Addr returns the bound listener address, or "" before Start.

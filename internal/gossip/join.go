@@ -118,5 +118,6 @@ func (s *Subsystem) syncWith(addr string) bool {
 	// existing logging path catches every entry.
 	resp.Piggyback = append(resp.Piggyback, resp.MembershipView...)
 	s.applyIncoming(resp)
+	s.lastSync.Store(timeNow().UnixNano())
 	return true
 }

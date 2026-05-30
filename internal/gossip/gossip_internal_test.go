@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperized/silo/internal/metrics"
+
 	"github.com/hyperized/silo/internal/membership"
 )
 
@@ -1688,5 +1690,58 @@ func TestSubsystem_Drain(t *testing.T) {
 	// Draining again is a no-op (already left).
 	if s.Drain() {
 		t.Error("second Drain should report no change")
+	}
+}
+
+func TestSubsystem_Metrics(t *testing.T) {
+	logger := discardLogger()
+	m, _ := membership.New("alpha", "alpha:7100", "alpha:7000")
+	m.Apply(membership.Event{ID: "bravo", State: membership.StateAlive, Incarnation: 1})
+	m.Apply(membership.Event{ID: "charlie", State: membership.StateSuspect, Incarnation: 1})
+	s, err := New(m, Options{Addr: "alpha:7100", ServerTLS: dummyTLS(), ClientTLS: dummyTLS()}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if s.MetricPrefix() != "silo_gossip" {
+		t.Errorf("prefix = %q", s.MetricPrefix())
+	}
+
+	// Before any sync, only the per-state member gauges are reported.
+	byState := func(ms []metrics.Metric) map[string]float64 {
+		out := map[string]float64{}
+		for _, mt := range ms {
+			if mt.Name == "members" {
+				out[mt.Labels[0][1]] = mt.Value
+			}
+		}
+		return out
+	}
+	got := s.CollectMetrics()
+	states := byState(got)
+	if states["alive"] != 2 || states["suspect"] != 1 { // alpha(self)+bravo alive, charlie suspect
+		t.Errorf("member gauges = %v, want alive 2 suspect 1", states)
+	}
+	for _, mt := range got {
+		if mt.Name == "last_sync_age_seconds" {
+			t.Error("no sync yet, so last_sync_age_seconds should be absent")
+		}
+	}
+
+	// After a sync, the lag gauge appears with a pinned clock.
+	prev := timeNow
+	t.Cleanup(func() { timeNow = prev })
+	base := time.Unix(1_000_000, 0)
+	s.lastSync.Store(base.UnixNano())
+	timeNow = func() time.Time { return base.Add(5 * time.Second) }
+	var age float64
+	found := false
+	for _, mt := range s.CollectMetrics() {
+		if mt.Name == "last_sync_age_seconds" {
+			age, found = mt.Value, true
+		}
+	}
+	if !found || age < 4.9 || age > 5.1 {
+		t.Errorf("last_sync_age_seconds = %v (found %v), want ~5", age, found)
 	}
 }
