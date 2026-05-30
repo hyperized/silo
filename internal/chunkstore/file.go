@@ -74,6 +74,22 @@ func (s *FileStore) Put(_ context.Context, id string, data []byte) (Info, error)
 	}, nil
 }
 
+// RawChunk returns the chunk's on-disk encrypted envelope as-is, without
+// decrypting it. Backups use this so the exported copy stays AES-GCM encrypted
+// at rest under the cluster key, exactly like the live chunk.
+func (s *FileStore) RawChunk(_ context.Context, id string) ([]byte, error) {
+	if err := ValidateID(id); err != nil {
+		return nil, err
+	}
+	// id passed ValidateID (ASCII allowlist, no separators), so the joined path
+	// cannot escape s.root.
+	data, err := os.ReadFile(s.path(id)) // #nosec G304
+	if err != nil {
+		return nil, fmt.Errorf("could not read chunk %q for backup (%w)", id, err)
+	}
+	return data, nil
+}
+
 // Get returns the decrypted chunk. A missing chunk maps to ErrNotFound
 // so callers can branch with errors.Is rather than parsing messages.
 func (s *FileStore) Get(_ context.Context, id string) ([]byte, Info, error) {

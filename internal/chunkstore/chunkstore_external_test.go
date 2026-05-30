@@ -117,3 +117,29 @@ func TestValidateID_Accepts(t *testing.T) {
 		}
 	}
 }
+
+func TestFileStore_RawChunk(t *testing.T) {
+	fs, _ := newTestStore(t)
+	ctx := context.Background()
+	plaintext := []byte("the secret chunk bytes")
+	if _, err := fs.Put(ctx, "raw-1", plaintext); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	raw, err := fs.RawChunk(ctx, "raw-1")
+	if err != nil {
+		t.Fatalf("RawChunk: %v", err)
+	}
+	// The raw on-disk bytes are the encrypted envelope, not the plaintext.
+	if len(raw) == 0 || string(raw) == string(plaintext) {
+		t.Errorf("RawChunk returned plaintext or nothing (%d bytes)", len(raw))
+	}
+
+	// Missing chunk and invalid id both error.
+	if _, err := fs.RawChunk(ctx, "does-not-exist"); err == nil {
+		t.Error("RawChunk of a missing chunk should error")
+	}
+	if _, err := fs.RawChunk(ctx, "bad/id"); err == nil {
+		t.Error("RawChunk of an invalid id should error")
+	}
+}

@@ -457,6 +457,14 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	if cfg.NBDAddr != "" {
 		subs = append(subs, newNBDSubsystem(cfg, ns, coord, logger))
 	}
+	if cfg.BackupTarget != "" {
+		backupSub, err := newBackupSubsystem(cfg, store, ns, logger)
+		if err != nil {
+			return err
+		}
+		exp.Register(backupSub)
+		subs = append(subs, backupSub)
+	}
 
 	type subResult struct {
 		name string

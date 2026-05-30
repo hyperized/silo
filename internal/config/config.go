@@ -96,6 +96,11 @@ type Config struct {
 	// scrubber's built-in default"; set SILO_SCRUB_INTERVAL to a Go
 	// duration (e.g. 5s, 1m) to override.
 	ScrubInterval time.Duration
+	// BackupTarget, when set (SILO_BACKUP_TARGET), enables periodic backups of
+	// this node's chunks + namespace to a blobstore URL (file path, s3://,
+	// gs://, az://). BackupInterval (SILO_BACKUP_INTERVAL) paces them.
+	BackupTarget   string
+	BackupInterval time.Duration
 	// TombstoneRetention is how long a deleted namespace entry's tombstone
 	// is kept before GC reclaims it — long enough to propagate to every
 	// replica. Set SILO_TOMBSTONE_RETENTION to override the 24h default.
@@ -186,6 +191,7 @@ func Load(env EnvFunc) (*Config, error) {
 		DataDir:             envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
 		KeySource:           KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),
 		KeyPath:             env("SILO_ENCRYPTION_KEY_PATH"),
+		BackupTarget:        env("SILO_BACKUP_TARGET"),
 		KMSKeyID:            env("SILO_KMS_KEY_ID"),
 		KMSVaultURL:         env("SILO_KMS_VAULT_URL"),
 		KMSKeyName:          env("SILO_KMS_KEY_NAME"),
@@ -219,6 +225,12 @@ func Load(env EnvFunc) (*Config, error) {
 		return nil, err
 	}
 	cfg.ScrubInterval = scrubInterval
+
+	backupInterval, err := envDuration(env, "SILO_BACKUP_INTERVAL")
+	if err != nil {
+		return nil, err
+	}
+	cfg.BackupInterval = backupInterval
 
 	retention, err := envDuration(env, "SILO_TOMBSTONE_RETENTION")
 	if err != nil {

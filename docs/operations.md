@@ -176,6 +176,36 @@ or `silo_storage_used_bytes / silo_storage_capacity_bytes`. A homogeneous cluste
 (equal disks) is never reshuffled — equal weights reproduce the original ring
 exactly.
 
+## Backups
+
+Set `SILO_BACKUP_TARGET` and each node periodically exports its **encrypted
+chunks** (copied as-is, still AES-GCM under the cluster key) and its **namespace
+snapshot** to object storage. `SILO_BACKUP_INTERVAL` (a Go duration) paces it
+(default 6h).
+
+| Target URL | Backend |
+|---|---|
+| `/path` or `file:///path` | local filesystem (single-host) |
+| `s3://bucket/prefix` | AWS S3 |
+| `gs://bucket/prefix` | Google Cloud Storage |
+| `az://account/container/prefix` | Azure Blob |
+
+Cloud credentials come from each provider's standard chain. The namespace is a
+CRDT replicated to every node, so any node's snapshot is the cluster manifest;
+chunks are node-local, so a **full backup is the union of every node's chunk
+export** — point every node at the same bucket (different `namespace/<node>.json`
+keys keep them from colliding).
+
+```sh
+export SILO_BACKUP_TARGET=s3://my-backups/silo \
+       SILO_BACKUP_INTERVAL=1h
+```
+
+Watch `silo_backup_runs_total`, `silo_backup_failures_total`, and
+`silo_backup_last_chunks`. Restore from a backup (recreate the data dir from the
+exported chunks + namespace, then start silod with the same cluster key) is an
+operator-driven procedure today; an automated restore command is roadmapped.
+
 ## Draining a node
 
 To remove a node without risking data, drain it first:
@@ -256,6 +286,9 @@ unwraps per-chunk keys on demand; the cache is a later optimisation).
   rising values mean a node's clock is drifting; investigate NTP before write
   ordering is affected.
 - `silo_build_info` — build/version, one series per node.
+
+- `silo_backup_runs_total` / `silo_backup_failures_total` / `silo_backup_last_chunks`
+  — backup activity (when SILO_BACKUP_TARGET is set).
 
 The same per-node figures are available on demand via `siloctl status`.
 

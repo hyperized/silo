@@ -30,6 +30,10 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
 
 ## M9 — deferred
 
+- **Automated restore.** Backup *export* ships (encrypted chunks + namespace to
+  local/S3/GCS/Azure, `SILO_BACKUP_TARGET`); restoring is a manual procedure
+  today (recreate the data dir from the export, start with the same cluster
+  key). A `siloctl restore` command is future work.
 - **nvme-tcp target.** An alternative block transport to NBD. Deferred to a
   dedicated effort on a host with a kernel nvme-tcp initiator — it is the plan's
   largest kernel-bound piece and is **v1.1-scoped** (`PLAN.md` decision #6). The
