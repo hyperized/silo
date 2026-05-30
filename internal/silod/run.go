@@ -334,7 +334,11 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not load the cluster TLS material (%w)", err)
 	}
-	serverTLS, err := clustertls.ServerConfig(ca, nodeCert)
+	crl, err := loadRevocation(cfg, ca, logger)
+	if err != nil {
+		return fmt.Errorf("silod.Run: %w", err)
+	}
+	serverTLS, err := clustertls.ServerConfig(ca, nodeCert, clustertls.WithRevocation(crl))
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not build the gRPC TLS server config (%w)", err)
 	}
@@ -343,7 +347,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// accepted, so any malformed pair would have surfaced two lines up.
 	// Defensive guard kept against a future refactor that swaps the
 	// shared parse path for two divergent ones.
-	peerTLS, err := clustertls.PeerConfig(ca, nodeCert)
+	peerTLS, err := clustertls.PeerConfig(ca, nodeCert, clustertls.WithRevocation(crl))
 	if err != nil {
 		return fmt.Errorf("silod.Run: unexpected peer TLS config failure after ServerConfig succeeded (%w); please file a bug at https://github.com/hyperized/silo/issues", err)
 	}

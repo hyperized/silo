@@ -49,6 +49,17 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
   A true in-flight re-replication queue gauge would require instrumenting the
   scrubber's work queue.
 
+## M10 — deferred
+
+- **CRL hot reload.** Certificate revocation is enforced (`SILO_TLS_CRL`,
+  `siloctl ca revoke`), but silod reads the CRL once at startup, so a freshly
+  revoked cert takes effect on the next restart rather than instantly. A watcher
+  that re-reads the CRL file (or pulls it over gossip) and swaps the in-memory
+  set live is future work. Until then, revoke + distribute + restart.
+- **Background cert-rotation loop.** Node certs auto-rotate on restart within
+  their final ~4 months, which covers clusters that do rolling upgrades; a
+  never-restarting node still needs a timer-driven re-mint. Roadmapped.
+
 ## Reserved-but-not-yet-enforced
 
 - **StorageClass parameters** `region-affinity` and `snapshot-retention` are

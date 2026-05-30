@@ -66,9 +66,16 @@ authorization beyond "is a cluster member" (see [Authorization](#authorization))
 - **Namespace conflicts are surfaced, not silently resolved** — concurrent
   same-name creates become `*.conflict-<hlc>` siblings, so a misbehaving peer
   cannot make data disappear by racing a create.
-- **A compromised node is still a trusted CA holder** until its cert is revoked.
-  Revocation today is "stop the node and let its cert expire / rotate the CA";
-  CRL-based revocation is pending ([known-gaps.md](known-gaps.md)).
+- **A compromised node or client cert can be revoked immediately.** `siloctl ca
+  revoke` adds the cert's serial to a CA-signed CRL; point every node's
+  `SILO_TLS_CRL` at it and silod rejects that cert on the next mTLS handshake —
+  even though it still chains to the CA and has not expired. The check runs on
+  both the inbound (server rejects a revoked client) and outbound (a peer dial
+  rejects a revoked server) direction, and disables TLS session resumption so a
+  cached session cannot skip it. A CRL that does not verify against the cluster
+  CA is refused at startup, and one signed by a foreign CA can never be
+  substituted. Distribute the regenerated CRL to every node and restart (hot
+  reload is future work — see [known-gaps.md](known-gaps.md)).
 
 ### Credential lifecycle
 
@@ -85,8 +92,9 @@ silo authenticates (mTLS, who are you) but does **coarse authorization**: any
 valid cluster member or operator cert can call any API. There is no per-principal
 RBAC, no per-volume ACL enforcement at the gRPC layer, and no scoped tokens for
 CSI/FUSE clients beyond the mTLS cert they hold. Treat a cluster cert as
-all-or-nothing access. Fine-grained auth (signed scoped tokens, RBAC mapped to
-namespace ACLs) is roadmapped (M10/U5).
+all-or-nothing access — a revoked cert (see above) is the one way to take that
+access away. Fine-grained auth (signed scoped tokens, RBAC mapped to namespace
+ACLs) is roadmapped (M10/U5).
 
 ## Operator responsibilities
 

@@ -132,6 +132,14 @@ type Config struct {
 	NodeCertPath string
 	NodeKeyPath  string
 
+	// CRLPath points at a CA-signed certificate revocation list
+	// (SILO_TLS_CRL). When set, silod loads it, verifies it against the
+	// cluster CA, and rejects any mTLS handshake whose peer cert serial
+	// appears in it — even though that cert still chains to the CA and has
+	// not expired. Empty (the default) means no revocation checking.
+	// Produce and update the file with 'siloctl ca revoke'.
+	CRLPath string
+
 	// CAExternal is true when the operator explicitly pointed
 	// SILO_TLS_CA_CERT/_KEY at paths outside DataDir — typically a
 	// shared volume (docker-compose) or a Kubernetes secret. silod
@@ -201,6 +209,7 @@ func Load(env EnvFunc) (*Config, error) {
 		CAKeyPath:           env("SILO_TLS_CA_KEY"),
 		NodeCertPath:        env("SILO_TLS_NODE_CERT"),
 		NodeKeyPath:         env("SILO_TLS_NODE_KEY"),
+		CRLPath:             env("SILO_TLS_CRL"),
 		CAExternal:          rawCACert != "",
 		CASeed:              envBool(env, "SILO_TLS_CA_SEED"),
 		PrintBootstrapToken: envBool(env, "SILO_PRINT_BOOTSTRAP_TOKEN"),

@@ -47,6 +47,8 @@ func runMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runStatus(rest, stdout, stderr)
 	case "node":
 		return runNode(rest, stdout, stderr)
+	case "ca":
+		return runCA(rest, stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "siloctl %s\n", version)
 		return 0
@@ -73,6 +75,7 @@ Commands:
   volume     Create and manage block volumes
   status     Show cluster health and this node's storage
   node       Node lifecycle operations (drain)
+  ca         Cluster CA operations: revoke certificates (offline)
   version    Print the siloctl version
   help       Show this message
 

@@ -87,6 +87,36 @@ key. Rotating the cluster key is "re-wrap and restart".
 | `SILO_TLS_CA_CERT` / `SILO_TLS_CA_KEY` | Cluster CA material. `silod` self-mints on first boot if absent. |
 | `SILO_TLS_CA_SEED` | Set on the one node that mints the CA into shared storage |
 | `SILO_TLS_NODE_CERT` / `SILO_TLS_NODE_KEY` | This node's server cert (issued from the CA) |
+| `SILO_TLS_CRL` | Path to a CA-signed certificate revocation list. When set, silod rejects any mTLS peer whose cert serial is in it. Unset = no revocation checking. |
+
+Node certs are one-year and auto-rotate: a restart within their final ~4 months
+re-mints them, so rolling upgrades keep identity fresh without manual steps.
+
+### Revoking a compromised certificate
+
+When a node or operator credential is compromised, revoke its cert so the
+cluster stops trusting it — without rotating the whole CA. Run on a host that
+holds the CA key (`SILO_TLS_CA_KEY`):
+
+```sh
+# By cert file (siloctl reads the serial out of it)…
+siloctl ca revoke --crl=/etc/silo/revoked.crl --cert=/path/to/leaked-node.crt
+# …or by raw serial (hex, as openssl prints it):
+siloctl ca revoke --crl=/etc/silo/revoked.crl --serial=1A:2B:3C
+
+siloctl ca list-revoked --crl=/etc/silo/revoked.crl   # inspect the result
+```
+
+`revoke` extends the CRL in place (incrementing its sequence number), so prior
+revocations are preserved. Then:
+
+1. Distribute `revoked.crl` to every node (the same way you distribute the CA).
+2. Set `SILO_TLS_CRL=/etc/silo/revoked.crl` on each node and restart silod.
+
+silod verifies the CRL against the cluster CA at startup (a foreign-signed or
+corrupt CRL is refused) and logs `certificate revocation list loaded` with the
+count. A CRL past its `NextUpdate` still enforces but logs a staleness warning —
+re-run `siloctl ca revoke` (even with no new serials) to refresh it.
 
 ### Logging
 
