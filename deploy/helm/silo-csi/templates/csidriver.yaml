@@ -1,0 +1,15 @@
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: {{ include "silo-csi.driverName" . }}
+  labels:
+    {{- include "silo-csi.labels" . | nindent 4 }}
+spec:
+  # The driver advertises ControllerPublishVolume, so Kubernetes creates
+  # VolumeAttachment objects and the external-attacher runs.
+  attachRequired: true
+  # The node plugin does not need pod metadata to mount.
+  podInfoOnMount: false
+  fsGroupPolicy: File
+  volumeLifecycleModes:
+    - Persistent

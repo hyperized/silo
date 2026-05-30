@@ -1,0 +1,104 @@
+{{- $fullname := include "silo-csi.fullname" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-controller
+  labels:
+    {{- include "silo-csi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "silo-csi.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "silo-csi.labels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: {{ $fullname }}-controller
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controller.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: silo-csi
+          image: {{ include "silo-csi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: []
+          env:
+            - name: SILO_CSI_MODE
+              value: controller
+            - name: SILO_CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: SILO_SERVER
+              value: {{ .Values.silod.address | quote }}
+            {{- if .Values.silod.tls.secretName }}
+            - name: SILO_CA_CERT
+              value: /etc/silo/tls/ca.crt
+            - name: SILO_CLIENT_CERT
+              value: /etc/silo/tls/client.crt
+            - name: SILO_CLIENT_KEY
+              value: /etc/silo/tls/client.key
+            {{- end }}
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            {{- if .Values.silod.tls.secretName }}
+            - name: silo-tls
+              mountPath: /etc/silo/tls
+              readOnly: true
+            {{- end }}
+          {{- with .Values.controller.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: csi-provisioner
+          image: {{ .Values.sidecars.provisioner.image }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --feature-gates=Topology=false
+            - --default-fstype=ext4
+            - --leader-election=false
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-attacher
+          image: {{ .Values.sidecars.attacher.image }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --leader-election=false
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-snapshotter
+          image: {{ .Values.sidecars.snapshotter.image }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --leader-election=false
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        {{- if .Values.silod.tls.secretName }}
+        - name: silo-tls
+          secret:
+            secretName: {{ .Values.silod.tls.secretName }}
+        {{- end }}

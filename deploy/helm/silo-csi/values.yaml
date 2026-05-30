@@ -1,0 +1,74 @@
+# Default values for the silo-csi chart.
+
+# image is the silo-csi container (built from ./cmd/silo-csi).
+image:
+  repository: ghcr.io/hyperized/silo-csi
+  tag: ""            # defaults to the chart appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# silod is how the driver reaches the silo cluster.
+silod:
+  # address the controller dials for namespace operations (a Service in front of
+  # the silod StatefulSet/DaemonSet, host:port).
+  address: "silo:7000"
+  # nbdAddress is the node's local silod NBD endpoint the node plugin attaches
+  # through. With hostNetwork on the node DaemonSet, 127.0.0.1 reaches the
+  # silod running on the same node.
+  nbdAddress: "127.0.0.1:10809"
+  # tls mounts cluster client credentials so the controller talks mTLS to silod.
+  # Leave secretName empty to connect insecurely (dev clusters only).
+  tls:
+    secretName: ""   # a Secret with keys ca.crt, client.crt, client.key
+
+controller:
+  replicas: 1
+  # nodeSelector/tolerations/affinity for the controller Deployment.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources: {}
+
+node:
+  # hostNetwork lets the node plugin reach the node-local silod over 127.0.0.1
+  # and use the host's nbd devices.
+  hostNetwork: true
+  # kubeletDir is the kubelet root; override for k0s/k3s/microk8s.
+  kubeletDir: /var/lib/kubelet
+  tolerations:
+    - operator: Exists       # run on every node, including tainted ones
+  nodeSelector: {}
+  resources: {}
+
+# CSI sidecar images (registry.k8s.io/sig-storage). Pinned by the operator.
+sidecars:
+  provisioner:
+    image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+  attacher:
+    image: registry.k8s.io/sig-storage/csi-attacher:v4.7.0
+  snapshotter:
+    image: registry.k8s.io/sig-storage/csi-snapshotter:v8.1.0
+  registrar:
+    image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+  livenessprobe:
+    image: registry.k8s.io/sig-storage/livenessprobe:v2.14.0
+
+# storageClass installs a default StorageClass for silo volumes.
+storageClass:
+  create: true
+  name: silo
+  isDefault: false
+  reclaimPolicy: Delete
+  # Volumes bind once the consuming pod is scheduled, matching single-writer
+  # (ReadWriteOnce) semantics.
+  volumeBindingMode: WaitForFirstConsumer
+  allowVolumeExpansion: false
+  # parameters silo understands. Only chunk-size is honoured today; the others
+  # are placement hints reserved for a later milestone (see the StorageClass
+  # template for details).
+  parameters:
+    replicas: "3"
+    region-affinity: ""
+    snapshot-retention: "24h"
+    chunk-size: "4Mi"

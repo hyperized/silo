@@ -1,0 +1,95 @@
+{{- $fullname := include "silo-csi.fullname" . -}}
+{{- $pluginDir := include "silo-csi.pluginDir" . -}}
+{{- $kubeletDir := .Values.node.kubeletDir | trimSuffix "/" -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $fullname }}-node
+  labels:
+    {{- include "silo-csi.labels" . | nindent 4 }}
+    app.kubernetes.io/component: node
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "silo-csi.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: node
+  template:
+    metadata:
+      labels:
+        {{- include "silo-csi.labels" . | nindent 8 }}
+        app.kubernetes.io/component: node
+    spec:
+      serviceAccountName: {{ $fullname }}-node
+      hostNetwork: {{ .Values.node.hostNetwork }}
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.node.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: silo-csi
+          image: {{ include "silo-csi.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            privileged: true   # needs nbd-client, mkfs, and mount on the host
+          env:
+            - name: SILO_CSI_MODE
+              value: node
+            - name: SILO_CSI_ENDPOINT
+              value: unix:///csi/csi.sock
+            - name: SILO_CSI_NBD_ADDR
+              value: {{ .Values.silod.nbdAddress | quote }}
+            - name: SILO_CSI_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods-mount-dir
+              mountPath: {{ $kubeletDir }}/pods
+              mountPropagation: Bidirectional
+            - name: dev-dir
+              mountPath: /dev
+          {{- with .Values.node.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: node-driver-registrar
+          image: {{ .Values.sidecars.registrar.image }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path={{ $pluginDir }}/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+      volumes:
+        # The kubelet creates and watches this directory; the node plugin's
+        # socket lives here so the registrar can hand its path to the kubelet.
+        - name: plugin-dir
+          hostPath:
+            path: {{ $pluginDir }}
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: {{ $kubeletDir }}/plugins_registry
+            type: Directory
+        - name: pods-mount-dir
+          hostPath:
+            path: {{ $kubeletDir }}/pods
+            type: Directory
+        - name: dev-dir
+          hostPath:
+            path: /dev
+            type: Directory

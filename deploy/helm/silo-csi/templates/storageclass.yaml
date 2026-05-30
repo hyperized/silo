@@ -1,0 +1,27 @@
+{{- if .Values.storageClass.create }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storageClass.name }}
+  labels:
+    {{- include "silo-csi.labels" . | nindent 4 }}
+  {{- if .Values.storageClass.isDefault }}
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+  {{- end }}
+provisioner: {{ include "silo-csi.driverName" . }}
+reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
+volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
+allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+parameters:
+  # chunk-size is the volume's copy-on-write extent; silo-csi honours it today,
+  # passing it through to the namespace as the volume's extent size.
+  chunk-size: {{ index .Values.storageClass.parameters "chunk-size" | quote }}
+  # The parameters below are accepted and recorded for forward compatibility;
+  # placement by replica count and region, and automatic snapshot retention,
+  # land with the observability/ops milestone. They are kept here so manifests
+  # written now keep working when those features ship.
+  replicas: {{ .Values.storageClass.parameters.replicas | quote }}
+  region-affinity: {{ index .Values.storageClass.parameters "region-affinity" | quote }}
+  snapshot-retention: {{ index .Values.storageClass.parameters "snapshot-retention" | quote }}
+{{- end }}

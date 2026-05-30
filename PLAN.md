@@ -118,8 +118,8 @@ Each milestone is a usable, demoable, shippable artifact.
 | M4  | done        | HLC + CRDT namespace (OR-Set dirs, LWW ACLs), gossip-propagated, conflict surfacing, tombstone GC |
 | M5  | done        | writer-owned chunks (writer/reader SDKs, inode manifest, clock-skew monitor) |
 | M6  | done        | block volume surface (extent-mapped inode, fenced single-writer lease, NBD server, COW snapshot) |
-| M7  | next        | CSI driver |
-| M8  | not started | FUSE filesystem integration (gated on F1) |
+| M7  | done        | CSI driver (silo-csi: vendored CSI proto, Identity/Controller/Node, NBD attach + mount, Helm chart + StorageClass) |
+| M8  | next        | FUSE filesystem integration (gated on F1) |
 | M9  | not started | observability + ops |
 | M10 | not started | production hardening |
 
@@ -199,13 +199,13 @@ The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI 
 
 **Demo:** `mkfs.ext4` + mount a 10GB volume on a Linux host; pull the underlying node's plug, volume reattaches elsewhere via lease takeover. `siloctl volume snapshot /vol /vol-backup` freezes a point-in-time copy that survives writes to the source.
 
-### M7 — CSI driver
+### M7 — CSI driver  [done]
 
-- `silo-csi` plugin wrapping M6: `CreateVolume`, `DeleteVolume`, `ControllerPublishVolume`, `NodePublishVolume`, snapshots
-- Helm chart for cluster install
-- StorageClass with parameters: `replicas`, `region-affinity`, `snapshot-retention`, `chunk-size`
+- `silo-csi` plugin wrapping M6: `CreateVolume`, `DeleteVolume`, `ControllerPublishVolume`, `NodePublishVolume`, snapshots. The CSI spec proto is vendored under `api/proto/csi/v1` and generated in-tree (no module dependency, per the stdlib-first principle). Identity/Controller/Node services live in `internal/csi`; the controller maps each CSI name onto a `/csi/{volumes,snapshots}` namespace path (the path doubles as the opaque CSI id) and provisions/snapshots/clones via the namespace `CreateVolume`/`SnapshotVolume` RPCs; the node attaches over NBD (taking the fenced lease) and formats/mounts via the host's nbd-client/mkfs/mount behind a tested command-runner seam. `cmd/silo-csi` runs controller, node, or both.
+- Helm chart for cluster install (`deploy/helm/silo-csi`): CSIDriver, controller Deployment with the external-provisioner/attacher/snapshotter sidecars, node DaemonSet with the node-driver-registrar, RBAC, and an optional StorageClass. Validated with `helm lint`/`helm template`.
+- StorageClass with parameters: `replicas`, `region-affinity`, `snapshot-retention`, `chunk-size` (chunk-size honoured now; the others are accepted and reserved for the M9 placement/ops work).
 
-**Demo:** `kubectl apply -f pvc.yaml` → bound, mounted, used by a stateful pod.
+**Demo:** `kubectl apply -f deploy/helm/silo-csi/examples/pvc.yaml` → bound, mounted, used by a stateful pod.
 
 ### M8 — FUSE filesystem surface (integration)
 

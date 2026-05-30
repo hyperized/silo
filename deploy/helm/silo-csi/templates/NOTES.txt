@@ -1,0 +1,34 @@
+silo-csi {{ .Chart.AppVersion }} is installed as driver "{{ include "silo-csi.driverName" . }}".
+
+Controller:  Deployment/{{ include "silo-csi.fullname" . }}-controller ({{ .Values.controller.replicas }} replica(s))
+Node plugin: DaemonSet/{{ include "silo-csi.fullname" . }}-node (one pod per node)
+
+It reaches the silo cluster at:
+  controller -> {{ .Values.silod.address }}        (namespace operations)
+  node       -> {{ .Values.silod.nbdAddress }}     (per-node NBD attach)
+
+{{ if .Values.storageClass.create -}}
+A StorageClass "{{ .Values.storageClass.name }}" was created. Provision a volume:
+
+  apiVersion: v1
+  kind: PersistentVolumeClaim
+  metadata:
+    name: data
+  spec:
+    accessModes: ["ReadWriteOnce"]
+    storageClassName: {{ .Values.storageClass.name }}
+    resources:
+      requests:
+        storage: 10Gi
+{{- else -}}
+No StorageClass was created (storageClass.create=false). Create one with
+provisioner "{{ include "silo-csi.driverName" . }}" to provision volumes.
+{{- end }}
+
+Verify the driver registered on every node:
+  kubectl get csidrivers {{ include "silo-csi.driverName" . }}
+  kubectl get csinodes -o wide
+
+Note: the node plugin needs nbd-client and the kernel nbd module on each host
+(it attaches volumes over NBD from the node-local silod). Load it with:
+  modprobe nbd nbds_max=64

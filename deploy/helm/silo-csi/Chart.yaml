@@ -1,0 +1,18 @@
+apiVersion: v2
+name: silo-csi
+description: The silo CSI driver — provisions, snapshots, attaches, and mounts silo block volumes for Kubernetes workloads.
+type: application
+# version is the chart version; appVersion tracks the silo release the chart targets.
+version: 0.1.0
+appVersion: "0.7.0"
+home: https://github.com/hyperized/silo
+sources:
+  - https://github.com/hyperized/silo
+keywords:
+  - storage
+  - csi
+  - block
+  - distributed
+maintainers:
+  - name: silo authors
+    url: https://github.com/hyperized/silo
