@@ -230,8 +230,11 @@ Nodes advertise their backing-store capacity and usage over gossip. Placement is
 and therefore holds roughly twice the chunks, so a cluster of mixed-size disks
 keeps its used-fraction balanced instead of filling the smallest node first. When
 capacity changes (a bigger node joins, or a disk is grown), the ring re-weights
-and the re-replication scrubber moves chunks to match — that movement is the
-rebalance; no chunk is ever stored off its ring position.
+so **new** chunks follow the new weighting. Rebalancing is prospective: the
+scrubber adds replicas to match the ring but never deletes, so existing chunks
+are not retroactively migrated (active migration/GC is roadmapped —
+[known-gaps.md](known-gaps.md)). A grown or fresh node fills via new writes, not
+by pulling old data off its peers.
 
 This is automatic and needs no operator action. Watch `silo_rebalancer_capacity_skew`
 trend toward zero, and per-node fill via `siloctl status` (the CAPACITY column)
@@ -250,17 +253,29 @@ threshold. Both are fractions of the filesystem used, set via env:
 | `SILO_DISK_PRESSURE_HIGH` | `0.85` | Enter the soft DiskPressure condition at/above this. |
 | `SILO_DISK_PRESSURE_CLEAR` | `0.80` | Leave it only back at/below this (hysteresis, so it doesn't flap). |
 | `SILO_DISK_PRESSURE_HARD` | `0.95` | Refuse new writes at/above this, before the filesystem hits ENOSPC. |
+| `SILO_DISK_PRESSURE_STEERING` | `true` | Steer new chunks away from pressured nodes (below). Set `false` for the plain ring. |
 
-- **Soft tier (DiskPressure condition).** A node crossing the high watermark
-  raises a condition it gossips to the cluster and exposes as
+- **Soft tier (DiskPressure condition + placement steering).** A node crossing
+  the high watermark raises a condition it gossips to the cluster and exposes as
   `silo_rebalancer_disk_pressure` (1/0); any node also reports how many peers are
-  pressured via `silo_rebalancer_pressured_nodes`. This is an **early-warning
-  signal** — it does **not** move data. silo locates every chunk by hashing it
-  onto the placement ring (there is no per-chunk location map), so dropping a
-  near-full node from the ring would reassign the ownership of every chunk still
-  on it and cause a re-replication storm plus transient read misses. So the soft
-  tier tells you to act (add capacity or [drain](#draining-a-node)); it doesn't
-  silently reshuffle.
+  pressured via `silo_rebalancer_pressured_nodes`. With steering on (the
+  default), this condition **stops new chunks from landing on the node**: every
+  path that resolves a chunk's replicas — writes, reads, deletes, and the
+  scrubber — prefers non-pressured nodes for that chunk, so a near-full node
+  ceases to be chosen for new data and the scrubber heals around it instead of
+  retrying it forever. Steering is **bounded**: it keeps a quorum (`n/2+1`) of
+  each chunk's natural ring replicas, so the steered set always overlaps the
+  unsteered set by at least one node — which is what keeps reads correct and lets
+  the scrubber heal across pressure changes (no relocation of a chunk's whole
+  replica set, so no read-availability gap). It steers **new** placement; it does
+  not retroactively migrate or delete the chunks already on a pressured node
+  (that needs active migration — see [known-gaps.md](known-gaps.md)), so the node
+  drains as old chunks are deleted and as new data lands elsewhere. The response
+  to sustained pressure is still yours: add capacity or [drain](#draining-a-node).
+  Note steering does add some re-replication when a node first crosses the
+  watermark (chunks it was a replica for gain a copy on a non-pressured node);
+  it is paced by the scrubber. Disable with `SILO_DISK_PRESSURE_STEERING=false`
+  to keep the plain capacity-weighted ring.
 - **Hard tier (write fence).** At the hard watermark the node refuses new chunks
   with `RESOURCE_EXHAUSTED` (`ErrNoSpace`) before the disk is truly full. In the
   replication coordinator a refused replica just fails its ack, so the write

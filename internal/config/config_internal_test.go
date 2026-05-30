@@ -134,6 +134,39 @@ func TestLoad_DiskThresholds(t *testing.T) {
 	}
 }
 
+func TestLoad_DiskSteeringDefaultsOnAndOptsOut(t *testing.T) {
+	base := map[string]string{"SILO_NODE_ID": "n", "SILO_ENCRYPTION_KEY": validBase64Key(t)}
+
+	// Unset -> default true.
+	cfg, err := Load(envMap(base))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.DiskSteering {
+		t.Error("DiskSteering should default to true")
+	}
+
+	// Explicit opt-out.
+	out := map[string]string{"SILO_NODE_ID": "n", "SILO_ENCRYPTION_KEY": validBase64Key(t), "SILO_DISK_PRESSURE_STEERING": "false"}
+	cfg, err = Load(envMap(out))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DiskSteering {
+		t.Error("SILO_DISK_PRESSURE_STEERING=false should disable steering")
+	}
+
+	// Explicit opt-in (truthy spelling).
+	on := map[string]string{"SILO_NODE_ID": "n", "SILO_ENCRYPTION_KEY": validBase64Key(t), "SILO_DISK_PRESSURE_STEERING": "on"}
+	cfg, err = Load(envMap(on))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.DiskSteering {
+		t.Error("SILO_DISK_PRESSURE_STEERING=on should enable steering")
+	}
+}
+
 func TestLoad_DiskThresholdErrors(t *testing.T) {
 	cases := []struct {
 		name string
@@ -251,6 +284,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		NodeKeyPath:         "/etc/silo/node.key",
 		CRLPath:             "/etc/silo/revoked.crl",
 		RequireTokens:       true,
+		DiskSteering:        true,
 		DiskThresholds:      diskpressure.DefaultThresholds(),
 		CAExternal:          true,
 		CASeed:              true,

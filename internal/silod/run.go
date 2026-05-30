@@ -435,7 +435,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// material gossip uses; peers.Close releases those connections on exit.
 	// The scrubber shares the same ring view and peer client to re-form
 	// replicas that a write missed or a node loss dropped.
-	router := replication.NewRouter(members)
+	router := replication.NewRouter(members, replication.WithPressureSteering(cfg.DiskSteering))
 	peers := replication.NewGRPCPeers(credentials.NewTLS(peerTLS), logger)
 	defer func() { _ = peers.Close() }()
 	coord := newMeteredCoord(replication.New(router, store, peers, cfg.Replication, logger), cfg.NodeID)

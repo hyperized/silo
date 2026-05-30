@@ -134,6 +134,13 @@ type Config struct {
 	NodeCertPath string
 	NodeKeyPath  string
 
+	// DiskSteering enables pressure-aware placement: new chunks prefer nodes not
+	// signalling DiskPressure, so a near-full node stops receiving them (bounded
+	// so a quorum of natural replicas is always kept — reads stay correct).
+	// SILO_DISK_PRESSURE_STEERING, default true; set it false to keep the plain
+	// capacity-weighted ring.
+	DiskSteering bool
+
 	// DiskThresholds is the disk high-watermark policy (SILO_DISK_PRESSURE_HIGH
 	// / _CLEAR / _HARD, fractions of the data filesystem used). The soft pair
 	// raises the gossiped DiskPressure condition with hysteresis; the hard floor
@@ -228,6 +235,7 @@ func Load(env EnvFunc) (*Config, error) {
 		NodeKeyPath:         env("SILO_TLS_NODE_KEY"),
 		CRLPath:             env("SILO_TLS_CRL"),
 		RequireTokens:       envBool(env, "SILO_REQUIRE_TOKENS"),
+		DiskSteering:        envBoolDefault(env, "SILO_DISK_PRESSURE_STEERING", true),
 		CAExternal:          rawCACert != "",
 		CASeed:              envBool(env, "SILO_TLS_CA_SEED"),
 		PrintBootstrapToken: envBool(env, "SILO_PRINT_BOOTSTRAP_TOKEN"),
@@ -474,6 +482,19 @@ func envBool(env EnvFunc, key string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// envBoolDefault is envBool with an explicit fallback for the unset case, so a
+// flag can default to true (e.g. an opt-out toggle) rather than always-false.
+func envBoolDefault(env EnvFunc, key string, fallback bool) bool {
+	switch strings.ToLower(env(key)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
 	}
 }
 

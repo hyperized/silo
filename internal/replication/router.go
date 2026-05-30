@@ -21,23 +21,136 @@ const maxCapacityWeight = 16
 // changes, so the common case (a steady cluster) is a cheap lookup. Safe
 // for concurrent use.
 type Router struct {
-	members *membership.Membership
+	members  *membership.Membership
+	steering bool
 
 	mu   sync.Mutex
 	sig  string
 	ring *placement.Ring
 }
 
-// NewRouter builds a Router over a membership table. The first Replicas
-// call materialises the ring.
-func NewRouter(members *membership.Membership) *Router {
-	return &Router{members: members}
+// RouterOption configures a Router.
+type RouterOption func(*Router)
+
+// WithPressureSteering enables pressure-aware placement: a chunk's replica set
+// prefers nodes that are not signalling DiskPressure, so a near-full node stops
+// receiving new chunks (the kubelet "NoSchedule" analog). It is bounded so a
+// quorum of the chunk's natural ring replicas is always retained — see steer —
+// which keeps reads correct and lets the scrubber heal across pressure changes.
+// Disabled returns the plain capacity-weighted ring.
+func WithPressureSteering(on bool) RouterOption {
+	return func(r *Router) { r.steering = on }
 }
 
-// Replicas resolves chunkID to up to n replica node ids over the current
-// ring, rebuilding it first if membership changed since the last call.
+// NewRouter builds a Router over a membership table. The first Replicas
+// call materialises the ring.
+func NewRouter(members *membership.Membership, opts ...RouterOption) *Router {
+	r := &Router{members: members}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+// Replicas resolves chunkID to up to n replica node ids over the current ring,
+// rebuilding it first if membership changed since the last call. With pressure
+// steering on, nodes signalling DiskPressure are demoted out of the set when a
+// quorum of natural replicas can still be retained. The same resolution is used
+// by reads, writes, deletes, and the scrubber, so all paths agree on where a
+// chunk lives — the steered set is symmetric, not a write-only override.
 func (r *Router) Replicas(chunkID string, n int) []string {
-	return r.currentRing().Replicas(chunkID, n)
+	ring := r.currentRing()
+	if !r.steering {
+		return ring.Replicas(chunkID, n)
+	}
+	pressured := r.pressuredSet()
+	if len(pressured) == 0 {
+		return ring.Replicas(chunkID, n) // fast path: a healthy cluster is unchanged
+	}
+	return steer(ring.Replicas(chunkID, ring.Len()), n, pressured)
+}
+
+// pressuredSet is the set of cluster members currently signalling DiskPressure.
+func (r *Router) pressuredSet() map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, n := range r.members.Members() {
+		if n.Pressured {
+			set[n.ID] = struct{}{}
+		}
+	}
+	return set
+}
+
+// steer applies pressure-aware placement to a chunk's ring order. ordered is the
+// full ring priority order for the key; its first n entries are the natural
+// (unsteered) replica set. steer returns n nodes that prefer non-pressured ones
+// but always retain a quorum (n/2+1) of the natural replicas.
+//
+// That quorum is the safety invariant: any two steered sets for the same key —
+// computed under different pressure views or at different times — each share a
+// quorum with the fixed natural set, so they overlap in at least one node. Since
+// a chunk is written to (and healed across) the full steered set, a read whose
+// steered set differs still shares a holder with it and finds the chunk. It also
+// bounds how far a pressured node is shed: at most n-quorum of a chunk's
+// replicas move, so a near-full node is relieved without ever stranding data.
+func steer(ordered []string, n int, pressured map[string]struct{}) []string {
+	if n > len(ordered) {
+		n = len(ordered)
+	}
+	if n <= 0 {
+		return nil
+	}
+	quorum := n/2 + 1
+	natural := ordered[:n]
+
+	result := make([]string, 0, n)
+	seen := make(map[string]struct{}, n)
+	add := func(id string) bool {
+		if _, dup := seen[id]; dup {
+			return false
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+		return true
+	}
+	isPressured := func(id string) bool { _, ok := pressured[id]; return ok }
+
+	// 1. Non-pressured natural replicas: ideal — natural ring position, healthy.
+	naturalKept := 0
+	for _, id := range natural {
+		if !isPressured(id) && add(id) {
+			naturalKept++
+		}
+	}
+	// 2. Backfill pressured naturals until a quorum of naturals is retained, so
+	//    the steered set keeps a quorum overlap with the unsteered set.
+	for _, id := range natural {
+		if naturalKept >= quorum {
+			break
+		}
+		if isPressured(id) && add(id) {
+			naturalKept++
+		}
+	}
+	// 3. Fill remaining slots from spillover (beyond the natural set), preferring
+	//    non-pressured nodes — this is where a shed chunk lands.
+	for _, id := range ordered[n:] {
+		if len(result) >= n {
+			break
+		}
+		if !isPressured(id) {
+			add(id)
+		}
+	}
+	// 4. Last resort (cluster mostly pressured): take whatever remains in ring
+	//    order so the set is never smaller than n when n nodes exist.
+	for _, id := range ordered {
+		if len(result) >= n {
+			break
+		}
+		add(id)
+	}
+	return result
 }
 
 // SelfID returns the local node id.

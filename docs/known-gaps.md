@@ -51,16 +51,17 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
 
 ## M10 — deferred
 
-- **Active rebalancing on disk pressure.** The disk high-watermarks
-  (`SILO_DISK_PRESSURE_*`) raise a soft DiskPressure condition and a hard
-  write-fence, but the soft tier does **not** automatically move data off a
-  near-full node. silo locates chunks by hashing onto the placement ring with no
-  per-chunk location map, so dropping a pressured node from the ring would
-  relocate the ownership of every chunk still on it (re-replication storm +
-  transient read misses). Steering new writes away while leaving existing chunks
-  put would need a per-chunk location index (or deterministic ring spillover
-  that the read path mirrors) — roadmapped. Today: the hard fence + operator
-  drain/add-capacity is the response. See
+- **Retroactive migration / GC off a pressured node.** Disk-pressure steering
+  (`SILO_DISK_PRESSURE_STEERING`, default on) stops *new* chunks from landing on
+  a near-full node and heals around it, bounded so a quorum of natural replicas
+  is always kept (reads stay correct). What it does **not** do is move or delete
+  the chunks already on the node — silo has no chunk-migration/GC primitive at
+  all (the scrubber only adds replicas, never removes), so a pressured node drains
+  only as old chunks are deleted and new data lands elsewhere, not actively. A
+  safe "shed" loop (copy-verify-delete a node's excess chunks) would relieve a
+  hot node faster and would also make capacity rebalancing retroactive rather
+  than new-data-only; it is roadmapped. Today, for faster relief, add capacity or
+  [drain](operations.md#draining-a-node). See
   [operations.md](operations.md#disk-high-watermarks-diskpressure).
 - **DiskPressure in the status RPC.** Peers' DiskPressure conditions are gossiped
   and counted (`silo_rebalancer_pressured_nodes`), but `siloctl status` shows
