@@ -87,9 +87,13 @@ func TestStatusService_DegradesOnStorageErrors(t *testing.T) {
 }
 
 func TestWithStatusService_Registers(t *testing.T) {
-	s := grpc.NewServer()
+	var cfg grpcConfig
 	svc := NewStatusService(fakeStatusMembers{}, fakeStatusStore{}, "/d", "n", "v", discardStatusLogger())
-	WithStatusService(svc)(s)
+	WithStatusService(svc)(&cfg)
+	s := grpc.NewServer()
+	for _, register := range cfg.services {
+		register(s)
+	}
 	if _, ok := s.GetServiceInfo()["silo.status.v1.ClusterStatus"]; !ok {
 		t.Error("WithStatusService did not register the ClusterStatus service")
 	}

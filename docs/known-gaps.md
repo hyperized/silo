@@ -59,6 +59,12 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
 - **Background cert-rotation loop.** Node certs auto-rotate on restart within
   their final ~4 months, which covers clusters that do rolling upgrades; a
   never-restarting node still needs a timer-driven re-mint. Roadmapped.
+- **Per-resource token scopes + token revocation.** Capability tokens
+  (`SILO_REQUIRE_TOKENS`, `siloctl auth mint-token`) scope by *operation class*
+  (`chunk:write`), not by resource — there is no "write only under /tenant-a" or
+  "attach only volume X" yet, and no RBAC mapped to namespace ACLs. Tokens also
+  cannot be revoked individually before expiry (rely on short TTLs, or rotate the
+  CA). Per-resource scoping and a token denylist are roadmapped (M10/U5).
 - **Protocol version in the status RPC.** The rolling-upgrade handshake exposes
   each node's protocol via `silo_gossip_protocol_version` (and fences too-old
   peers), but `siloctl status` reports only the build semver, not the wire

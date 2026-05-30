@@ -132,6 +132,14 @@ type Config struct {
 	NodeCertPath string
 	NodeKeyPath  string
 
+	// RequireTokens turns on capability-token authorization (SILO_REQUIRE_TOKENS).
+	// When true, gRPC callers presenting a client certificate must additionally
+	// carry a scoped token (set SILO_TOKEN, minted with 'siloctl auth
+	// mint-token') that grants the operation; cluster nodes are exempt by their
+	// node identity. Default false: mTLS membership alone authorises every call,
+	// the pre-token behaviour.
+	RequireTokens bool
+
 	// CRLPath points at a CA-signed certificate revocation list
 	// (SILO_TLS_CRL). When set, silod loads it, verifies it against the
 	// cluster CA, and rejects any mTLS handshake whose peer cert serial
@@ -210,6 +218,7 @@ func Load(env EnvFunc) (*Config, error) {
 		NodeCertPath:        env("SILO_TLS_NODE_CERT"),
 		NodeKeyPath:         env("SILO_TLS_NODE_KEY"),
 		CRLPath:             env("SILO_TLS_CRL"),
+		RequireTokens:       envBool(env, "SILO_REQUIRE_TOKENS"),
 		CAExternal:          rawCACert != "",
 		CASeed:              envBool(env, "SILO_TLS_CA_SEED"),
 		PrintBootstrapToken: envBool(env, "SILO_PRINT_BOOTSTRAP_TOKEN"),

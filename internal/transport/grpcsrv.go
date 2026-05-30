@@ -17,12 +17,35 @@ import (
 	"github.com/hyperized/silo/internal/chunkstore"
 )
 
-// GRPCOption registers an extra service on the gRPC server at construction.
-type GRPCOption func(*grpc.Server)
+// grpcConfig accumulates what a GRPCOption contributes: extra service
+// registrations (applied after the server is built) and grpc.ServerOptions
+// (applied at construction, where interceptors must be set).
+type grpcConfig struct {
+	services   []func(*grpc.Server)
+	serverOpts []grpc.ServerOption
+}
+
+// GRPCOption configures the gRPC server at construction — registering an extra
+// service or contributing a server option such as an auth interceptor.
+type GRPCOption func(*grpcConfig)
 
 // WithStatusService registers the operator-facing ClusterStatus service.
 func WithStatusService(svc statusv1.ClusterStatusServer) GRPCOption {
-	return func(s *grpc.Server) { statusv1.RegisterClusterStatusServer(s, svc) }
+	return func(c *grpcConfig) {
+		c.services = append(c.services, func(s *grpc.Server) { statusv1.RegisterClusterStatusServer(s, svc) })
+	}
+}
+
+// WithTokenAuth installs the capability-token interceptors (unary + stream) so
+// client-cert callers must present a token scoped to each operation. Node-cert
+// peers are exempt; see TokenAuthenticator.
+func WithTokenAuth(a *TokenAuthenticator) GRPCOption {
+	return func(c *grpcConfig) {
+		c.serverOpts = append(c.serverOpts,
+			grpc.UnaryInterceptor(a.UnaryInterceptor),
+			grpc.StreamInterceptor(a.StreamInterceptor),
+		)
+	}
 }
 
 // GRPCServer is silod's gRPC listener. Split from the HTTP listener
@@ -43,12 +66,16 @@ type GRPCServer struct {
 // identity is part of the wire protocol, not a hope-for-the-best
 // network ACL. Pass clustertls.ServerConfig(ca, nodeCert).
 func NewGRPCServer(addr string, tlsCfg *tls.Config, store chunkstore.Store, coord Coordinator, ns NamespaceOps, logger *slog.Logger, opts ...GRPCOption) *GRPCServer {
-	creds := credentials.NewTLS(tlsCfg)
-	s := grpc.NewServer(grpc.Creds(creds))
+	cfg := grpcConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	serverOpts := append([]grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsCfg))}, cfg.serverOpts...)
+	s := grpc.NewServer(serverOpts...)
 	chunkv1.RegisterChunkStoreServer(s, NewChunkService(store, coord, logger))
 	namespacev1.RegisterNamespaceStoreServer(s, NewNamespaceService(ns, logger))
-	for _, opt := range opts {
-		opt(s)
+	for _, register := range cfg.services {
+		register(s)
 	}
 	return &GRPCServer{
 		addr:   addr,

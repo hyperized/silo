@@ -43,7 +43,9 @@ func (s *NodeAdminService) Drain(_ context.Context, _ *nodev1.DrainRequest) (*no
 
 // WithNodeAdminService registers the operator-facing NodeAdmin service.
 func WithNodeAdminService(svc nodev1.NodeAdminServer) GRPCOption {
-	return func(s *grpc.Server) { nodev1.RegisterNodeAdminServer(s, svc) }
+	return func(c *grpcConfig) {
+		c.services = append(c.services, func(s *grpc.Server) { nodev1.RegisterNodeAdminServer(s, svc) })
+	}
 }
 
 // Compile-time check that NodeAdminService satisfies the generated server.

@@ -9,6 +9,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/hyperized/silo/internal/clienttoken"
 )
 
 // dialer is swappable so tests can stand in a fake.
@@ -26,7 +28,9 @@ func dialSilod(target string) (*grpc.ClientConn, error) {
 	if tlsCfg == nil {
 		return grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
-	return grpc.NewClient(target, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+	return grpc.NewClient(target,
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
+		clienttoken.FromEnv())
 }
 
 func clientTLSFromEnv() (*tls.Config, error) {

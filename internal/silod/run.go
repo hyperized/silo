@@ -62,12 +62,15 @@ var (
 	newHTTPSubsystem = func(cfg *config.Config, version string, logger *slog.Logger, metrics http.Handler) subsystem {
 		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger, observability.WithMetricsHandler(metrics))}
 	}
-	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
+	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
 		opts := []transport.GRPCOption{
 			transport.WithStatusService(transport.NewStatusService(members, store, cfg.DataDir, cfg.NodeID, version, logger)),
 		}
 		if drainer != nil {
 			opts = append(opts, transport.WithNodeAdminService(transport.NewNodeAdminService(drainer, cfg.NodeID, logger)))
+		}
+		if tokenAuth != nil {
+			opts = append(opts, transport.WithTokenAuth(tokenAuth))
 		}
 		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, coord, ns, logger, opts...)}
 	}
@@ -338,6 +341,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	if err != nil {
 		return fmt.Errorf("silod.Run: %w", err)
 	}
+	tokenAuth, err := newTokenAuthenticator(cfg, ca, logger)
+	if err != nil {
+		return fmt.Errorf("silod.Run: %w", err)
+	}
 	serverTLS, err := clustertls.ServerConfig(ca, nodeCert, clustertls.WithRevocation(crl))
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not build the gRPC TLS server config (%w)", err)
@@ -452,7 +459,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger, exp.Handler()),
-		newGRPCSubsystem(cfg, serverTLS, store, coord, ns, members, gossipDrainer(gossipSubsys), version, logger),
+		newGRPCSubsystem(cfg, serverTLS, tokenAuth, store, coord, ns, members, gossipDrainer(gossipSubsys), version, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
 		scrubberSubsys,

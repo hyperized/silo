@@ -172,6 +172,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_TLS_NODE_CERT":         "/etc/silo/node.crt",
 		"SILO_TLS_NODE_KEY":          "/etc/silo/node.key",
 		"SILO_TLS_CRL":               "/etc/silo/revoked.crl",
+		"SILO_REQUIRE_TOKENS":        "1",
 		"SILO_PRINT_BOOTSTRAP_TOKEN": "yes",
 		"SILO_TLS_CA_SEED":           "true",
 	}))
@@ -205,6 +206,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		NodeCertPath:        "/etc/silo/node.crt",
 		NodeKeyPath:         "/etc/silo/node.key",
 		CRLPath:             "/etc/silo/revoked.crl",
+		RequireTokens:       true,
 		CAExternal:          true,
 		CASeed:              true,
 		PrintBootstrapToken: true,

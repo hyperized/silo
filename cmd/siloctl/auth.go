@@ -22,7 +22,14 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	bootstrapv1 "github.com/hyperized/silo/api/proto/silo/bootstrap/v1"
+	"github.com/hyperized/silo/internal/captoken"
 )
+
+// defaultTokenTTL is how long a minted capability token is valid when --ttl is
+// omitted. A day balances "long enough to be useful" against "short enough that
+// a leaked token expires on its own"; longer-lived automation should mint with
+// an explicit, justified --ttl.
+const defaultTokenTTL = 24 * time.Hour
 
 // authConfig is the small JSON file siloctl drops next to its certs so
 // subsequent commands can find the default server without re-typing it.
@@ -78,6 +85,8 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 		return runAuthInit(rest, stdout, stderr)
 	case "status":
 		return runAuthStatus(rest, stdout, stderr)
+	case "mint-token":
+		return runAuthMintToken(rest, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "siloctl auth: unknown subcommand %q. Run 'siloctl auth help'.\n", sub)
 		return 2
@@ -93,12 +102,21 @@ Usage:
 
   siloctl auth status [--config-dir <path>]
 
+  siloctl auth mint-token --principal <who> --cap <capability> [--cap …]
+                    [--ttl <duration>] [--ca-cert <path>] [--ca-key <path>]
+
 'init' redeems a one-time join token printed by silod on first boot and writes
 the resulting CA cert, client cert, and client key into the config directory
 (default: $XDG_CONFIG_HOME/silo or ~/.config/silo).
 
 Pin the server's fingerprint with --server-fingerprint to refuse mismatched
 servers; omit it for trust-on-first-use (a loud warning is printed).
+
+'mint-token' signs a scoped capability token (offline, with the cluster CA key)
+that a CSI/FUSE/operator client presents via SILO_TOKEN when silod runs with
+SILO_REQUIRE_TOKENS=1. Capabilities: chunk:read, chunk:write, namespace:read,
+namespace:write, status:read, node:admin, or '*' for all. Run it on a host that
+holds the CA key.
 `)
 }
 
@@ -165,6 +183,59 @@ func runAuthInit(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "Wrote cluster credentials to %s\n  ca.crt       %d bytes\n  client.crt   %d bytes\n  client.key   %d bytes\nYou can now run siloctl chunk … against %s.\n",
 		dir, len(resp.CaCertPem), len(resp.ClientCertPem), len(resp.ClientKeyPem), chunkTarget)
+	return 0
+}
+
+func runAuthMintToken(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("siloctl auth mint-token", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	caCert := fs.String("ca-cert", envDefault("SILO_TLS_CA_CERT", ""), "cluster CA certificate (PEM)")
+	caKey := fs.String("ca-key", envDefault("SILO_TLS_CA_KEY", ""), "cluster CA private key (PEM)")
+	principal := fs.String("principal", "", "who the token is for, e.g. csi@cluster (required)")
+	ttl := fs.Duration("ttl", defaultTokenTTL, "how long the token is valid")
+	var caps stringSlice
+	fs.Var(&caps, "cap", "capability to grant (repeatable): chunk:read, chunk:write, namespace:read, namespace:write, status:read, node:admin, *")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *principal == "" {
+		fmt.Fprintln(stderr, "siloctl auth mint-token: --principal is required so the token is attributable")
+		return 2
+	}
+	if len(caps) == 0 {
+		fmt.Fprintln(stderr, "siloctl auth mint-token: pass at least one --cap (e.g. --cap=chunk:read)")
+		return 2
+	}
+
+	ca, err := loadCAMaterial(*caCert, *caKey)
+	if err != nil {
+		fmt.Fprintf(stderr, "siloctl auth mint-token: %v\n", err)
+		return 1
+	}
+	if ca.Key == nil {
+		fmt.Fprintln(stderr, "siloctl auth mint-token: the CA private key is required to sign tokens; pass --ca-key or set SILO_TLS_CA_KEY on a host that holds it")
+		return 1
+	}
+
+	capabilities := make([]captoken.Capability, len(caps))
+	for i, c := range caps {
+		capabilities[i] = captoken.Capability(c)
+	}
+	now := time.Now().UTC()
+	token, err := captoken.Mint(ca.Key, captoken.Token{
+		Principal:    *principal,
+		Capabilities: capabilities,
+		IssuedAt:     now,
+		Expiry:       now.Add(*ttl),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "siloctl auth mint-token: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintln(stdout, token)
+	fmt.Fprintf(stderr, "Token for %q valid until %s. Set it on the client:\n  export SILO_TOKEN=<token>\n",
+		*principal, now.Add(*ttl).Format(time.RFC3339))
 	return 0
 }
 

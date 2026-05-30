@@ -95,13 +95,24 @@ authorization beyond "is a cluster member" (see [Authorization](#authorization))
 
 ## Authorization (current limits)
 
-silo authenticates (mTLS, who are you) but does **coarse authorization**: any
-valid cluster member or operator cert can call any API. There is no per-principal
-RBAC, no per-volume ACL enforcement at the gRPC layer, and no scoped tokens for
-CSI/FUSE clients beyond the mTLS cert they hold. Treat a cluster cert as
-all-or-nothing access — a revoked cert (see above) is the one way to take that
-access away. Fine-grained auth (signed scoped tokens, RBAC mapped to namespace
-ACLs) is roadmapped (M10/U5).
+silo authenticates with mTLS (who are you) and, when `SILO_REQUIRE_TOKENS=1`,
+authorizes client-cert callers with **signed capability tokens** (what may you
+do). A token is an Ed25519-signed assertion — `principal`, a set of capabilities
+(`chunk:read`, `chunk:write`, `namespace:read/write`, `status:read`,
+`node:admin`, or `*`), and an expiry — minted offline with the cluster CA key
+(`siloctl auth mint-token`) and presented by the client via `SILO_TOKEN`. silod
+verifies the signature against the CA public key, checks expiry, and maps each
+RPC to the capability it needs; a token that lacks it is denied. Cluster **nodes**
+(certs with a `spiffe://silo/node/` identity) are exempt — peer-to-peer
+replication is trusted by membership — so only external clients (CSI/FUSE/
+operator, `spiffe://silo/client/`) are token-scoped.
+
+Limits that remain: capabilities are **operation classes, not resources** — a
+token grants `chunk:write` cluster-wide, not "write under /tenant-a". Per-resource
+scoping (path-prefix / per-volume) and RBAC mapped to namespace ACLs are
+roadmapped (M10/U5). When `SILO_REQUIRE_TOKENS` is off (the default), mTLS
+membership alone authorises every call — treat a cluster cert as all-or-nothing,
+and use revocation (above) to take access away.
 
 ## Operator responsibilities
 

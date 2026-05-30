@@ -42,8 +42,12 @@ func TestNodeAdminService_Drain(t *testing.T) {
 }
 
 func TestWithNodeAdminService_Registers(t *testing.T) {
+	var cfg grpcConfig
+	WithNodeAdminService(NewNodeAdminService(&fakeDrainer{}, "n", discardStatusLogger()))(&cfg)
 	s := grpc.NewServer()
-	WithNodeAdminService(NewNodeAdminService(&fakeDrainer{}, "n", discardStatusLogger()))(s)
+	for _, register := range cfg.services {
+		register(s)
+	}
 	if _, ok := s.GetServiceInfo()["silo.node.v1.NodeAdmin"]; !ok {
 		t.Error("WithNodeAdminService did not register the NodeAdmin service")
 	}

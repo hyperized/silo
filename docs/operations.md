@@ -88,9 +88,42 @@ key. Rotating the cluster key is "re-wrap and restart".
 | `SILO_TLS_CA_SEED` | Set on the one node that mints the CA into shared storage |
 | `SILO_TLS_NODE_CERT` / `SILO_TLS_NODE_KEY` | This node's server cert (issued from the CA) |
 | `SILO_TLS_CRL` | Path to a CA-signed certificate revocation list. When set, silod rejects any mTLS peer whose cert serial is in it. Unset = no revocation checking. |
+| `SILO_REQUIRE_TOKENS` | When `1`/`true`, client-cert callers must also present a scoped capability token (`SILO_TOKEN`). Cluster nodes are exempt. Default off (mTLS-only). |
 
 Node certs are one-year and auto-rotate: a restart within their final ~4 months
 re-mints them, so rolling upgrades keep identity fresh without manual steps.
+
+### Scoping client access with capability tokens
+
+mTLS proves a caller is a cluster member; a **capability token** scopes what that
+member may do. Enforcement is opt-in — set `SILO_REQUIRE_TOKENS=1` on silod, and
+every caller presenting a *client* certificate must also carry a token granting
+the operation. Cluster nodes (their certs carry a `spiffe://silo/node/` identity)
+are exempt, so inter-node replication is unaffected.
+
+Mint a token offline on a host that holds the CA key:
+
+```sh
+siloctl auth mint-token \
+  --principal=csi@cluster \
+  --cap=chunk:read --cap=chunk:write --cap=namespace:write \
+  --ttl=24h > token.txt
+```
+
+Capabilities: `chunk:read`, `chunk:write`, `namespace:read`, `namespace:write`,
+`status:read`, `node:admin`, or `*` for all (operator/admin tokens — use
+sparingly). The token prints to stdout; the export hint goes to stderr, so
+`> token.txt` captures just the token. Give it to the client via the environment:
+
+```sh
+export SILO_TOKEN=$(cat token.txt)   # siloctl, silo-csi, silo-fuse all read this
+```
+
+Tokens are signed by the cluster CA and self-expiring, so a leaked token stops
+working at its TTL — keep TTLs short for automation and re-mint. There is no
+revocation list for tokens themselves; to cut one off sooner, rely on the
+expiry (or rotate the CA, the bigger hammer). Capabilities are operation classes,
+not per-path/per-volume scopes (that is roadmapped).
 
 ### Revoking a compromised certificate
 

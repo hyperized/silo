@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
+	"github.com/hyperized/silo/internal/clienttoken"
 )
 
 const (
@@ -48,7 +49,9 @@ func defaultDialer(target string) (*grpc.ClientConn, error) {
 	if tlsCfg == nil {
 		return grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
-	return grpc.NewClient(target, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+	return grpc.NewClient(target,
+		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
+		clienttoken.FromEnv())
 }
 
 // loadClientTLS reads ca.crt + client.crt + client.key from the per-user
