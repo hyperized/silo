@@ -121,7 +121,7 @@ Each milestone is a usable, demoable, shippable artifact.
 | M7  | done        | CSI driver (silo-csi: vendored CSI proto, Identity/Controller/Node, NBD attach + mount, Helm chart + StorageClass) |
 | M8  | done*       | FUSE filesystem (stdlib FUSE protocol library + silo-backed mount); *mount path needs validation on a real /dev/fuse host |
 | M9  | done*       | observability + ops: `siloctl status`, graceful drain, capacity-aware placement + rebalancing, full Prometheus metrics (capacity, replication shortfall, latency histograms, gossip/anti-entropy lag, HLC skew). *nvme-tcp deferred to a real-host effort (kernel-bound, v1.1-scoped); data-key-cache hit-rate metric pending the cache |
-| M10 | in progress | production hardening: pluggable encryption-key provider (file source fixed), node-cert auto-rotation, threat model done; CRL revocation, rolling-upgrade version handshake, KMS source, backup export, runbook remaining |
+| M10 | in progress | production hardening: pluggable key provider (file fixed) + cloud KMS (AWS/GCP/Azure), node-cert auto-rotation, threat model, backup export to S3/GCS/Azure Blob done; CRL revocation, rolling-upgrade version handshake, signed CSI/FUSE tokens, runbook remaining |
 
 The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI track (§6) is eligible since M0; U1 cluster-view work needs the M2 gossip data, which is now available.
 
