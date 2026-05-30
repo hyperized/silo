@@ -82,6 +82,13 @@ authorization beyond "is a cluster member" (see [Authorization](#authorization))
 - **Node certs auto-rotate**: silod re-mints a node cert that is within ~4 months
   of its 1-year expiry on restart, so a rolling upgrade refreshes identity before
   it lapses. (A background rotation loop for never-restarting nodes is pending.)
+- **Rolling upgrades negotiate a protocol version.** Each node advertises its
+  cluster wire-protocol version on every gossip message and classifies its peers;
+  a peer below the supported minimum is **fenced** (its messages are dropped, not
+  merged), so a too-old node cannot inject state a newer node would misread. This
+  is a safety/observability control, not an authentication one — the peer is
+  still mTLS-authenticated; the handshake governs whether their *protocol* is
+  understood. See [operations.md](operations.md#rolling-upgrades).
 - **The CA key gates minting.** A node without the CA key cannot mint or rotate;
   it serves its existing cert. Protect `SILO_TLS_CA_KEY` — it is the cluster's
   root of trust.

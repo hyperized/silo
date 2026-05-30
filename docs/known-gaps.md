@@ -59,6 +59,11 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
 - **Background cert-rotation loop.** Node certs auto-rotate on restart within
   their final ~4 months, which covers clusters that do rolling upgrades; a
   never-restarting node still needs a timer-driven re-mint. Roadmapped.
+- **Protocol version in the status RPC.** The rolling-upgrade handshake exposes
+  each node's protocol via `silo_gossip_protocol_version` (and fences too-old
+  peers), but `siloctl status` reports only the build semver, not the wire
+  protocol. Surfacing protocol + per-peer compatibility through the status RPC
+  would let an operator watch an upgrade converge without scraping `/metrics`.
 
 ## Reserved-but-not-yet-enforced
 

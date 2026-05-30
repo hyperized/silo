@@ -261,6 +261,41 @@ When `silo_replication_shortfall_chunks` is zero across the cluster, stop and
 remove the node. A drained node that is killed early is still safe as long as the
 remaining replicas met quorum; drain just makes the transition graceful.
 
+## Rolling upgrades
+
+silod advertises a **cluster wire-protocol version** on every gossip message —
+separate from the build's semver. Two builds with the same protocol interoperate
+freely, which is what makes a rolling upgrade (replace nodes one at a time)
+safe: the new build keeps speaking the old protocol until *every* node is
+upgraded, and only a later release bumps the protocol.
+
+Each node continuously classifies its peers:
+
+- **Compatible** — same protocol window. Normal operation.
+- **Newer peer** — a peer is ahead of this node. Its messages are still
+  processed (the wire format tolerates unknown fields), but
+  `silo_gossip_newer_protocol_messages_total` climbs and silod logs a warning.
+  During an upgrade this is expected on the not-yet-upgraded nodes and should
+  fall to a flat line once every node is on the new build.
+- **Unsupported (too old)** — a peer below this build's minimum supported
+  protocol. silod **fences** it: the message is dropped (neither the sender nor
+  its gossip is merged) and `silo_gossip_incompatible_messages_total` climbs.
+  This only happens when a release raises the minimum — the signal that a
+  straggler is too far behind and must be upgraded or removed.
+
+Each node's current protocol is exported as `silo_gossip_protocol_version`. To
+verify an upgrade converged, scrape it across the fleet and confirm every node
+reports the same value with `silo_gossip_incompatible_messages_total` flat at
+zero:
+
+```sh
+curl -s http://<node>:7080/metrics | grep -E 'silo_gossip_(protocol_version|incompatible_messages_total|newer_protocol_messages_total)'
+```
+
+Upgrade order: drain is **not** required for an in-place binary swap (a restart
+re-reads the data dir and rejoins), but for a node you are also moving or
+reprovisioning, drain it first as above.
+
 ## Block volumes over NBD
 
 A silo volume is an extent map over immutable chunks. To serve it as a block
@@ -306,6 +341,9 @@ Notable series:
 - `silo_gossip_members{state}` — members seen by SWIM state; and
   `silo_gossip_last_sync_age_seconds` — gossip lag (climbs when a node is
   isolated).
+- `silo_gossip_protocol_version`, `silo_gossip_incompatible_messages_total`,
+  `silo_gossip_newer_protocol_messages_total` — rolling-upgrade signals (see
+  [Rolling upgrades](#rolling-upgrades)).
 - `silo_namespace_antientropy_merges_total` and
   `silo_namespace_antientropy_last_merge_age_seconds` — namespace convergence
   activity and lag.

@@ -51,15 +51,21 @@ const MaxMessageBytes = 256 * 1024
 // recent membership changes so the table converges without a dedicated
 // broadcast channel.
 type Message struct {
-	Kind              MessageKind        `json:"kind"`
-	SenderID          string             `json:"sender_id"`
-	SenderAddress     string             `json:"sender_address,omitempty"`
-	SenderDataAddress string             `json:"sender_data_address,omitempty"`
-	SenderIncarn      uint64             `json:"sender_incarnation"`
-	Target            string             `json:"target,omitempty"`
-	TargetAddress     string             `json:"target_address,omitempty"`
-	Piggyback         []membership.Event `json:"piggyback,omitempty"`
-	MembershipView    []membership.Event `json:"membership_view,omitempty"`
+	Kind              MessageKind `json:"kind"`
+	SenderID          string      `json:"sender_id"`
+	SenderAddress     string      `json:"sender_address,omitempty"`
+	SenderDataAddress string      `json:"sender_data_address,omitempty"`
+	SenderIncarn      uint64      `json:"sender_incarnation"`
+	// SenderProto is the sender's cluster wire-protocol version
+	// (clusterproto.Protocol). A peer running a build that predates this field
+	// sends 0, which the receiver treats as protocol v1. It is the rolling-
+	// upgrade handshake: every message re-advertises the version, so a node
+	// classifies each peer continuously rather than once at connect time.
+	SenderProto    uint32             `json:"sender_proto,omitempty"`
+	Target         string             `json:"target,omitempty"`
+	TargetAddress  string             `json:"target_address,omitempty"`
+	Piggyback      []membership.Event `json:"piggyback,omitempty"`
+	MembershipView []membership.Event `json:"membership_view,omitempty"`
 	// Extension carries opaque reconcilable state for a subsystem riding
 	// the anti-entropy exchange (the namespace). gossip ferries the bytes
 	// during a sync without interpreting them.

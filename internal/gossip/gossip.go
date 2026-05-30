@@ -14,6 +14,7 @@ import (
 
 	"github.com/hyperized/silo/internal/metrics"
 
+	"github.com/hyperized/silo/internal/clusterproto"
 	"github.com/hyperized/silo/internal/membership"
 )
 
@@ -138,10 +139,24 @@ type Subsystem struct {
 	// lastSync is the unix-nano time of the last successful anti-entropy sync;
 	// 0 until the first. Read by the metrics scrape to report sync lag.
 	lastSync atomic.Int64
+
+	// incompatibleMsgs counts messages dropped because the sender's protocol is
+	// below clusterproto.MinCompatible (fenced). newerProtoMsgs counts messages
+	// from a peer ahead of us (processed best-effort). Both feed the metrics
+	// scrape so an operator can watch a rolling upgrade converge.
+	incompatibleMsgs atomic.Int64
+	newerProtoMsgs   atomic.Int64
 }
 
 // timeNow is the clock the gossip metrics read; overridable in tests.
 var timeNow = time.Now
+
+// classifyProto is the protocol-compatibility check applied to every inbound
+// message. It is a seam so tests can force the fenced (PeerTooOld) path, which
+// the launch support window (MinCompatible == Protocol == 1) cannot yet produce
+// from real input — the first MinCompatible bump makes it reachable in
+// production.
+var classifyProto = clusterproto.Classify
 
 // dialer abstracts the act of opening a TLS gossip connection. The
 // default implementation calls tls.Dial; tests inject a stub that
@@ -290,6 +305,26 @@ func (s *Subsystem) CollectMetrics() []metrics.Metric {
 			Value: timeNow().Sub(time.Unix(0, last)).Seconds(),
 		})
 	}
+	out = append(out,
+		metrics.Metric{
+			Name:  "protocol_version",
+			Help:  "Cluster wire-protocol version this node speaks (clusterproto.Protocol).",
+			Kind:  metrics.Gauge,
+			Value: float64(clusterproto.Protocol),
+		},
+		metrics.Metric{
+			Name:  "incompatible_messages_total",
+			Help:  "Gossip messages dropped because the sender's protocol is below the minimum this node supports.",
+			Kind:  metrics.Counter,
+			Value: float64(s.incompatibleMsgs.Load()),
+		},
+		metrics.Metric{
+			Name:  "newer_protocol_messages_total",
+			Help:  "Gossip messages received from a peer on a newer protocol than this node (processed best-effort).",
+			Kind:  metrics.Counter,
+			Value: float64(s.newerProtoMsgs.Load()),
+		},
+	)
 	return out
 }
 
@@ -451,6 +486,7 @@ func (s *Subsystem) selfEnvelope(kind MessageKind, target string) *Message {
 		SenderAddress:     self.Address,
 		SenderDataAddress: self.DataAddress,
 		SenderIncarn:      self.Incarnation,
+		SenderProto:       clusterproto.Protocol,
 		Target:            target,
 		Piggyback:         s.piggybackSnapshot(),
 	}
@@ -496,6 +532,24 @@ func (s *Subsystem) applyIncoming(msg *Message) []membership.Node {
 			"remote_address", msg.SenderAddress,
 		)
 		return nil
+	}
+	// Protocol handshake: classify the sender's wire-protocol version. A peer
+	// below MinCompatible is fenced — we drop the whole message rather than
+	// risk merging a view we cannot safely interpret. A peer ahead of us is
+	// processed best-effort but flagged so the operator upgrades this node.
+	switch classifyProto(msg.SenderProto) {
+	case clusterproto.PeerTooOld:
+		s.incompatibleMsgs.Add(1)
+		s.logger.Error("gossip dropped a message from a peer on an unsupported protocol; upgrade or remove the node",
+			"peer", msg.SenderID, "peer_protocol", msg.SenderProto,
+			"min_compatible", clusterproto.MinCompatible, "our_protocol", clusterproto.Protocol)
+		return nil
+	case clusterproto.PeerNewer:
+		s.newerProtoMsgs.Add(1)
+		s.logger.Warn("gossip peer is on a newer protocol than this node; upgrade silod here to stay compatible",
+			"peer", msg.SenderID, "peer_protocol", msg.SenderProto, "our_protocol", clusterproto.Protocol)
+	case clusterproto.Compatible:
+		// Same wire protocol — proceed.
 	}
 	changed := s.members.ApplyMany(msg.Piggyback)
 	if msg.SenderID != "" {
