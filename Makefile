@@ -19,7 +19,7 @@ GO_PKGS := ./...
 # `make fuzz FUZZTIME=60s` per target.
 FUZZTIME ?= 1000000x
 
-.PHONY: help up up-local down restart build test test-cover test-integration fuzz lint fmt vet clean logs status check proto
+.PHONY: help up up-local down restart build images test test-cover test-integration fuzz lint fmt vet clean logs status check proto
 .DEFAULT_GOAL := up
 
 help: ## Show this help and exit.
@@ -73,6 +73,14 @@ build: ## Build all Go binaries into bin/.
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/siloctl ./cmd/siloctl
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/silo-csi ./cmd/silo-csi
 	@printf "Built %s/silod, %s/siloctl, %s/silo-csi (%s)\n" "$(BIN)" "$(BIN)" "$(BIN)" "$(VERSION)"
+
+IMAGE_REGISTRY ?= silo
+IMAGE_TAG ?= $(VERSION)
+
+images: ## Build the silod and silo-csi container images (override IMAGE_REGISTRY/IMAGE_TAG).
+	@docker build --build-arg VERSION=$(VERSION) -t $(IMAGE_REGISTRY)/silod:$(IMAGE_TAG) -f Dockerfile .
+	@docker build --build-arg VERSION=$(VERSION) -t $(IMAGE_REGISTRY)/silo-csi:$(IMAGE_TAG) -f Dockerfile.csi .
+	@printf "Built %s/silod:%s and %s/silo-csi:%s\n" "$(IMAGE_REGISTRY)" "$(IMAGE_TAG)" "$(IMAGE_REGISTRY)" "$(IMAGE_TAG)"
 
 test: ## Run unit tests.
 	@go test $(GO_TEST_FLAGS) $(GO_PKGS)
