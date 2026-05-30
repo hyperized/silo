@@ -169,9 +169,11 @@ troubleshooting (the `nbd` module, lease takeover, sidecar RBAC) are in
 | Writer/reader SDKs, writer-owned chunks (no metadata round-trip on writes) | ✅ |
 | Block volumes: extent map, fenced single-writer lease, NBD server, COW snapshots | ✅ |
 | **Kubernetes CSI driver** — provision, attach, mount, snapshot, clone; Helm chart | ✅ |
-| FUSE (RWX) filesystem surface | ⏳ M8 |
-| Observability/ops (`siloctl status`, drain, rebalance, nvme-tcp) | ⏳ M9 |
-| Production hardening (cert rotation, KMS, rolling upgrades, backup) | ⏳ M10 |
+| FUSE (RWX) filesystem surface — from-scratch protocol library, close-to-open | ✅ |
+| Observability/ops — Prometheus metrics, `siloctl status`, drain, capacity rebalance | ✅ |
+| Security hardening — cloud KMS keys (AWS/GCP/Azure), cert auto-rotation, CRL revocation, scoped capability tokens | ✅ |
+| Durability/upgrades — encrypted backup to S3/GCS/Azure, rolling-upgrade protocol handshake | ✅ |
+| nvme-tcp block transport | ⏳ v1.1 (kernel-bound) |
 
 ---
 
@@ -179,6 +181,7 @@ troubleshooting (the `nbd` module, lease takeover, sidecar RBAC) are in
 
 - **[docs/kubernetes.md](docs/kubernetes.md)** — install and operate silo-csi on Kubernetes (Helm values, StorageClass, snapshots, troubleshooting)
 - **[docs/operations.md](docs/operations.md)** — operator guide: configuration reference, deployment topologies, mTLS/credentials, NBD, troubleshooting
+- **[docs/runbook.md](docs/runbook.md)** — production readiness checklist, golden-signal alerts, and failure-recovery playbooks
 - **[docs/threat-model.md](docs/threat-model.md)** — what silo defends against, how, and the current security edges
 - **[PLAN.md](PLAN.md)** — full design, decisions, milestones, and scope
 - **[docs/known-gaps.md](docs/known-gaps.md)** — what's not finished yet and why (deferred work, kernel-bound seams)

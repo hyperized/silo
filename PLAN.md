@@ -121,7 +121,7 @@ Each milestone is a usable, demoable, shippable artifact.
 | M7  | done        | CSI driver (silo-csi: vendored CSI proto, Identity/Controller/Node, NBD attach + mount, Helm chart + StorageClass) |
 | M8  | done*       | FUSE filesystem (stdlib FUSE protocol library + silo-backed mount); *mount path needs validation on a real /dev/fuse host |
 | M9  | done*       | observability + ops: `siloctl status`, graceful drain, capacity-aware placement + rebalancing, full Prometheus metrics (capacity, replication shortfall, latency histograms, gossip/anti-entropy lag, HLC skew). *nvme-tcp deferred to a real-host effort (kernel-bound, v1.1-scoped); data-key-cache hit-rate metric pending the cache |
-| M10 | in progress | production hardening: pluggable key provider (file fixed) + cloud KMS (AWS/GCP/Azure), node-cert auto-rotation, threat model, backup export to S3/GCS/Azure Blob, CRL-based revocation (`siloctl ca revoke` + `SILO_TLS_CRL`), rolling-upgrade protocol-version handshake (gossip fences too-old peers), signed scoped capability tokens (`siloctl auth mint-token` + `SILO_REQUIRE_TOKENS`, node certs exempt) done; consolidated runbook + per-resource token scopes remaining |
+| M10 | done | production hardening: pluggable key provider (file fixed) + cloud KMS (AWS/GCP/Azure), node-cert auto-rotation, threat model, backup export to S3/GCS/Azure Blob, CRL-based revocation (`siloctl ca revoke` + `SILO_TLS_CRL`), rolling-upgrade protocol-version handshake (gossip fences too-old peers), signed scoped capability tokens (`siloctl auth mint-token` + `SILO_REQUIRE_TOKENS`, node certs exempt), production runbook (checklist + alerts + recovery playbooks). Deferred to U-track: per-resource token scopes, token revocation, CRL hot-reload, automated restore — see [docs/known-gaps.md](docs/known-gaps.md) |
 
 The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI track (§6) is eligible since M0; U1 cluster-view work needs the M2 gossip data, which is now available.
 
@@ -230,14 +230,22 @@ This milestone integrates the FUSE protocol implementation from the parallel FUS
 
 **Demo:** Grafana dashboard; chaos test (random node kills + network partitions for 1h) shows convergence and no data loss.
 
-### M10 — Production hardening
+### M10 — Production hardening  [done]
 
-- Cert lifecycle: automatic rotation, revocation, CA roll
-- Auth: signed tokens for the CSI driver and FUSE clients
-- KMS-backed encryption-key provider (AWS KMS, Vault, generic OIDC)
-- Rolling upgrade protocol (version handshake, backward-compat one minor version)
-- Backup: chunk-export + manifest-export to S3-compatible target
-- README, ops runbook, troubleshooting guide, threat model
+- Cert lifecycle: automatic rotation [done], CRL-based revocation (`siloctl ca
+  revoke` + `SILO_TLS_CRL`) [done], CA roll [documented in runbook]
+- Auth: signed scoped capability tokens for client-cert callers (`siloctl auth
+  mint-token` + `SILO_REQUIRE_TOKENS`); cluster nodes exempt by SPIFFE identity
+  [done]. Per-resource scopes + token revocation deferred to U-track.
+- KMS-backed encryption-key provider — AWS KMS, GCP Cloud KMS, Azure Key Vault,
+  plus a `file` source [done]. (Vault/OIDC can slot into the same `Decrypter`
+  seam later.)
+- Rolling upgrade protocol: cluster wire-protocol version advertised on every
+  gossip message; too-old peers fenced, newer peers flagged [done]
+- Backup: encrypted chunk-export + namespace snapshot to local/S3/GCS/Azure
+  (`SILO_BACKUP_TARGET`) [done]. Automated restore deferred to U-track.
+- README, ops runbook ([docs/runbook.md](docs/runbook.md)), troubleshooting,
+  threat model ([docs/threat-model.md](docs/threat-model.md)) [done]
 
 ## 5. FUSE protocol track — parallel
 
