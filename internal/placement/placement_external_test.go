@@ -3,6 +3,7 @@ package placement_test
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/hyperized/silo/internal/placement"
@@ -130,4 +131,42 @@ func allDistinct(ids []string) bool {
 		seen[id] = struct{}{}
 	}
 	return true
+}
+
+func TestNewWeighted_EqualWeightsMatchNew(t *testing.T) {
+	ids := []string{"alpha", "bravo", "charlie", "delta"}
+
+	// Weight-1 everywhere (nil and explicit) must reproduce New exactly: same
+	// replica decision for every key, so a homogeneous cluster never reshuffles.
+	plain := placement.New(ids, 64)
+	wNil := placement.NewWeighted(ids, nil, 64)
+	wOnes := placement.NewWeighted(ids, map[string]int{"alpha": 1, "bravo": 1, "charlie": 1, "delta": 1}, 64)
+
+	for i := 0; i < 2000; i++ {
+		key := "chunk-" + strconv.Itoa(i)
+		want := plain.Replicas(key, 3)
+		if got := wNil.Replicas(key, 3); !reflect.DeepEqual(got, want) {
+			t.Fatalf("nil-weight ring diverged at %s: got %v want %v", key, got, want)
+		}
+		if got := wOnes.Replicas(key, 3); !reflect.DeepEqual(got, want) {
+			t.Fatalf("all-ones ring diverged at %s: got %v want %v", key, got, want)
+		}
+	}
+}
+
+func TestNewWeighted_HeavierNodeGetsMoreKeys(t *testing.T) {
+	ids := []string{"small", "big"}
+	// big gets 4x the weight of small, so it should own roughly 4x the keys.
+	ring := placement.NewWeighted(ids, map[string]int{"small": 1, "big": 4}, 128)
+
+	counts := map[string]int{}
+	const n = 20000
+	for i := 0; i < n; i++ {
+		primary := ring.Replicas("k-"+strconv.Itoa(i), 1)[0]
+		counts[primary]++
+	}
+	ratio := float64(counts["big"]) / float64(counts["small"])
+	if ratio < 3.0 || ratio > 5.0 {
+		t.Errorf("big/small primary ratio = %.2f (big=%d small=%d), want ~4", ratio, counts["big"], counts["small"])
+	}
 }

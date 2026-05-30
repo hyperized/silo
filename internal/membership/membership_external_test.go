@@ -159,3 +159,35 @@ func TestMembership_SnapshotIsADeepCopy(t *testing.T) {
 		t.Error("Snapshot returned a reference to the canonical entry")
 	}
 }
+
+func TestSetSelfCapacityAndPropagation(t *testing.T) {
+	m, err := membership.New("a", "a:7100", "a:7000")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// First advertisement changes; an identical one does not.
+	if !m.SetSelfCapacity(1000, 250) {
+		t.Fatal("first SetSelfCapacity should report a change")
+	}
+	if m.SetSelfCapacity(1000, 250) {
+		t.Error("an unchanged SetSelfCapacity should report no change")
+	}
+	if self := m.Self(); self.CapacityBytes != 1000 || self.UsedBytes != 250 {
+		t.Errorf("self capacity = %+v, want 1000/250", self)
+	}
+
+	// A peer's advertisement (higher incarnation, carrying capacity) is adopted.
+	m.Apply(membership.Event{ID: "b", Address: "b:7100", State: membership.StateAlive, Incarnation: 5, CapacityBytes: 2000, UsedBytes: 500})
+	b, _ := m.Lookup("b")
+	if b.CapacityBytes != 2000 || b.UsedBytes != 500 {
+		t.Errorf("peer b capacity = %+v, want 2000/500", b)
+	}
+
+	// A later plain state-change event (no capacity) must not wipe b's figures.
+	m.Apply(membership.Event{ID: "b", State: membership.StateSuspect, Incarnation: 5})
+	b, _ = m.Lookup("b")
+	if b.CapacityBytes != 2000 || b.UsedBytes != 500 {
+		t.Errorf("capacity-less event wiped b's figures: %+v", b)
+	}
+}

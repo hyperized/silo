@@ -74,6 +74,9 @@ var (
 	newScrubberSubsystem = func(cfg *config.Config, place replication.Placement, catalog replication.ChunkCatalog, probe replication.ReplicaProbe, logger *slog.Logger) subsystem {
 		return replication.NewScrubber(place, catalog, probe, cfg.Replication, cfg.ScrubInterval, logger)
 	}
+	newRebalancerSubsystem = func(cfg *config.Config, members *membership.Membership, logger *slog.Logger) subsystem {
+		return replication.NewRebalancer(members, cfg.DataDir, cfg.ScrubInterval, logger)
+	}
 	// newNBDSubsystem builds the NBD block-device listener. Only constructed
 	// when SILO_NBD_ADDR is set, since NBD is unauthenticated block I/O.
 	newNBDSubsystem = func(cfg *config.Config, ns nsVolumes, coord transport.Coordinator, logger *slog.Logger) subsystem {
@@ -427,11 +430,14 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	exp.Register(newStorageMetrics(store, cfg.DataDir, cfg.NodeID))
 
 	scrubberSubsys := newScrubberSubsystem(cfg, router, store, peers, logger)
-	// The scrubber knows the cluster's re-replication shortfall; surface it to
-	// Prometheus when the concrete subsystem exposes metrics (the production
-	// scrubber does; a test fake may not).
-	if src, ok := scrubberSubsys.(metrics.Source); ok {
-		exp.Register(src)
+	rebalancerSubsys := newRebalancerSubsystem(cfg, members, logger)
+	// The scrubber and rebalancer expose replication/capacity metrics; surface
+	// them to Prometheus when the concrete subsystem implements metrics.Source
+	// (the production ones do; a test fake may not).
+	for _, sub := range []subsystem{scrubberSubsys, rebalancerSubsys} {
+		if src, ok := sub.(metrics.Source); ok {
+			exp.Register(src)
+		}
 	}
 
 	subs := []subsystem{
@@ -440,6 +446,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
 		scrubberSubsys,
+		rebalancerSubsys,
 	}
 	if cfg.NBDAddr != "" {
 		subs = append(subs, newNBDSubsystem(cfg, ns, coord, logger))

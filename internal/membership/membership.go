@@ -92,6 +92,12 @@ type Node struct {
 	// the pruner to clean up Dead entries after a retention window and
 	// by ops tooling to surface "this node has been down for X".
 	LastChange time.Time
+	// CapacityBytes and UsedBytes are the node's advertised backing-store
+	// size and usage, refreshed periodically by the owner and propagated
+	// over anti-entropy. They feed capacity-aware placement and operator
+	// tooling; zero means "not advertised yet".
+	CapacityBytes int64
+	UsedBytes     int64
 }
 
 // Event is one gossiped claim about another node. Apply merges Event
@@ -99,12 +105,14 @@ type Node struct {
 // wins on a tie" rule. Events flow over the wire as JSON, so all fields
 // are exported — see internal/gossip/wire.go for the on-wire shape.
 type Event struct {
-	ID          string    `json:"id"`
-	Address     string    `json:"address,omitempty"`
-	DataAddress string    `json:"data_address,omitempty"`
-	State       State     `json:"state"`
-	Incarnation uint64    `json:"incarnation"`
-	At          time.Time `json:"at,omitempty"`
+	ID            string    `json:"id"`
+	Address       string    `json:"address,omitempty"`
+	DataAddress   string    `json:"data_address,omitempty"`
+	State         State     `json:"state"`
+	Incarnation   uint64    `json:"incarnation"`
+	At            time.Time `json:"at,omitempty"`
+	CapacityBytes int64     `json:"capacity_bytes,omitempty"`
+	UsedBytes     int64     `json:"used_bytes,omitempty"`
 }
 
 // Now is the clock the table reads to stamp LastChange. Production
@@ -179,6 +187,26 @@ func (m *Membership) SetSelfAddress(addr string) {
 	cur.State = StateAlive
 	cur.LastChange = Now()
 	m.members[m.self] = cur
+}
+
+// SetSelfCapacity updates the local node's advertised backing-store capacity
+// and usage and bumps incarnation so peers accept the new figures. It reports
+// whether anything changed, so the caller can avoid re-advertising (and the
+// incarnation churn that brings) when usage has not moved meaningfully.
+func (m *Membership) SetSelfCapacity(capacityBytes, usedBytes int64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur := m.members[m.self]
+	if cur.CapacityBytes == capacityBytes && cur.UsedBytes == usedBytes {
+		return false
+	}
+	cur.CapacityBytes = capacityBytes
+	cur.UsedBytes = usedBytes
+	cur.Incarnation++
+	cur.State = StateAlive
+	cur.LastChange = Now()
+	m.members[m.self] = cur
+	return true
 }
 
 // Members returns a deep copy of every entry in the table. The slice
@@ -273,12 +301,14 @@ func (m *Membership) applyLocked(ev Event) (Node, bool) {
 	cur, exists := m.members[ev.ID]
 	if !exists {
 		n := Node{
-			ID:          ev.ID,
-			Address:     ev.Address,
-			DataAddress: ev.DataAddress,
-			State:       ev.State,
-			Incarnation: ev.Incarnation,
-			LastChange:  now,
+			ID:            ev.ID,
+			Address:       ev.Address,
+			DataAddress:   ev.DataAddress,
+			State:         ev.State,
+			Incarnation:   ev.Incarnation,
+			LastChange:    now,
+			CapacityBytes: ev.CapacityBytes,
+			UsedBytes:     ev.UsedBytes,
 		}
 		m.members[ev.ID] = n
 		return n, true
@@ -290,6 +320,7 @@ func (m *Membership) applyLocked(ev Event) (Node, bool) {
 		cur.State = ev.State
 		cur.Incarnation = ev.Incarnation
 		cur.LastChange = now
+		applyCapacity(&cur, ev)
 		m.members[ev.ID] = cur
 		return cur, true
 	}
@@ -302,10 +333,22 @@ func (m *Membership) applyLocked(ev Event) (Node, bool) {
 		cur.DataAddress = preferNonEmpty(ev.DataAddress, cur.DataAddress)
 		cur.State = ev.State
 		cur.LastChange = now
+		applyCapacity(&cur, ev)
 		m.members[ev.ID] = cur
 		return cur, true
 	}
 	return cur, false
+}
+
+// applyCapacity copies the event's advertised capacity onto a node when the
+// event actually carries one. A zero CapacityBytes means the event is a plain
+// state change (a Suspect/Dead relay) that knows nothing about capacity, so the
+// node's last-known figures are preserved rather than wiped to zero.
+func applyCapacity(n *Node, ev Event) {
+	if ev.CapacityBytes > 0 {
+		n.CapacityBytes = ev.CapacityBytes
+		n.UsedBytes = ev.UsedBytes
+	}
 }
 
 // MarkSuspect transitions id to Suspect at its current incarnation and

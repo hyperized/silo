@@ -78,6 +78,8 @@ func (s *StatusService) GetStatus(ctx context.Context, _ *statusv1.GetStatusRequ
 			State:          protoNodeState(n.State),
 			Incarnation:    n.Incarnation,
 			LastChangeUnix: n.LastChange.Unix(),
+			CapacityBytes:  n.CapacityBytes,
+			UsedBytes:      n.UsedBytes,
 		})
 	}
 

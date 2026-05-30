@@ -39,7 +39,7 @@ type testMembers struct{}
 func (testMembers) Members() []membership.Node {
 	at := time.Unix(1_700_000_000, 0)
 	return []membership.Node{
-		{ID: "silo-a", Address: "silo-a:7100", DataAddress: "silo-a:7000", State: membership.StateAlive, Incarnation: 1, LastChange: at},
+		{ID: "silo-a", Address: "silo-a:7100", DataAddress: "silo-a:7000", State: membership.StateAlive, Incarnation: 1, LastChange: at, CapacityBytes: 1 << 30, UsedBytes: 1 << 28},
 		{ID: "silo-b", Address: "silo-b:7100", DataAddress: "silo-b:7000", State: membership.StateSuspect, Incarnation: 1, LastChange: at},
 	}
 }

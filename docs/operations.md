@@ -141,6 +141,22 @@ in Kubernetes.
 
 ---
 
+## Capacity rebalancing
+
+Nodes advertise their backing-store capacity and usage over gossip. Placement is
+**capacity-weighted**: a node with twice the disk is given twice the ring space
+and therefore holds roughly twice the chunks, so a cluster of mixed-size disks
+keeps its used-fraction balanced instead of filling the smallest node first. When
+capacity changes (a bigger node joins, or a disk is grown), the ring re-weights
+and the re-replication scrubber moves chunks to match — that movement is the
+rebalance; no chunk is ever stored off its ring position.
+
+This is automatic and needs no operator action. Watch `silo_rebalancer_capacity_skew`
+trend toward zero, and per-node fill via `siloctl status` (the CAPACITY column)
+or `silo_storage_used_bytes / silo_storage_capacity_bytes`. A homogeneous cluster
+(equal disks) is never reshuffled — equal weights reproduce the original ring
+exactly.
+
 ## Draining a node
 
 To remove a node without risking data, drain it first:
@@ -202,6 +218,9 @@ Notable series:
   after a node loss and should fall back to zero as the scrubber heals.
 - `silo_replication_repairs_total` — cumulative replicas re-pushed (healing
   activity).
+- `silo_rebalancer_capacity_skew` — used-fraction spread between the fullest and
+  emptiest node (0 = balanced). Heterogeneous disks settle toward balanced as the
+  capacity-weighted ring takes effect.
 - `silo_hlc_peer_clock_skew_seconds` and `silo_hlc_clock_skew_alerts_total` —
   rising values mean a node's clock is drifting; investigate NTP before write
   ordering is affected.

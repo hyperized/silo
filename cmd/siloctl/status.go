@@ -59,11 +59,12 @@ func printStatus(w io.Writer, resp *statusv1.GetStatusResponse) {
 	fmt.Fprintf(w, "Queried %s (silo %s)\n\n", resp.GetRespondingNodeId(), resp.GetVersion())
 
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NODE\tSTATE\tGOSSIP\tDATA\tLAST CHANGE")
+	fmt.Fprintln(tw, "NODE\tSTATE\tGOSSIP\tDATA\tCAPACITY\tLAST CHANGE")
 	for _, n := range nodes {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			n.GetId(), nodeStateString(n.GetState()),
 			orDash(n.GetGossipAddress()), orDash(n.GetDataAddress()),
+			capacitySummary(n.GetUsedBytes(), n.GetCapacityBytes()),
 			humanizeAge(n.GetLastChangeUnix()))
 	}
 	_ = tw.Flush()
@@ -151,6 +152,16 @@ func humanizeBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// capacitySummary renders a node's "used/capacity (pct)", or a dash when the
+// node has not advertised its capacity yet.
+func capacitySummary(used, capacity int64) string {
+	if capacity <= 0 {
+		return "—"
+	}
+	pct := float64(used) / float64(capacity) * 100
+	return fmt.Sprintf("%s/%s (%.0f%%)", humanizeBytes(used), humanizeBytes(capacity), pct)
 }
 
 func orDash(s string) string {

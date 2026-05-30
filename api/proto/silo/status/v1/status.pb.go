@@ -124,8 +124,12 @@ type NodeStatus struct {
 	// last_change_unix is the epoch-seconds of this node's last state transition;
 	// the CLI renders it as an age ("down for 2m").
 	LastChangeUnix int64 `protobuf:"varint,6,opt,name=last_change_unix,json=lastChangeUnix,proto3" json:"last_change_unix,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// capacity_bytes and used_bytes are the node's advertised backing-store size
+	// and usage (zero until the node has advertised them over gossip).
+	CapacityBytes int64 `protobuf:"varint,7,opt,name=capacity_bytes,json=capacityBytes,proto3" json:"capacity_bytes,omitempty"`
+	UsedBytes     int64 `protobuf:"varint,8,opt,name=used_bytes,json=usedBytes,proto3" json:"used_bytes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NodeStatus) Reset() {
@@ -196,6 +200,20 @@ func (x *NodeStatus) GetIncarnation() uint64 {
 func (x *NodeStatus) GetLastChangeUnix() int64 {
 	if x != nil {
 		return x.LastChangeUnix
+	}
+	return 0
+}
+
+func (x *NodeStatus) GetCapacityBytes() int64 {
+	if x != nil {
+		return x.CapacityBytes
+	}
+	return 0
+}
+
+func (x *NodeStatus) GetUsedBytes() int64 {
+	if x != nil {
+		return x.UsedBytes
 	}
 	return 0
 }
@@ -350,7 +368,7 @@ var File_silo_status_v1_status_proto protoreflect.FileDescriptor
 const file_silo_status_v1_status_proto_rawDesc = "" +
 	"\n" +
 	"\x1bsilo/status/v1/status.proto\x12\x0esilo.status.v1\"\x12\n" +
-	"\x10GetStatusRequest\"\xe3\x01\n" +
+	"\x10GetStatusRequest\"\xa9\x02\n" +
 	"\n" +
 	"NodeStatus\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12%\n" +
@@ -358,7 +376,10 @@ const file_silo_status_v1_status_proto_rawDesc = "" +
 	"\fdata_address\x18\x03 \x01(\tR\vdataAddress\x12/\n" +
 	"\x05state\x18\x04 \x01(\x0e2\x19.silo.status.v1.NodeStateR\x05state\x12 \n" +
 	"\vincarnation\x18\x05 \x01(\x04R\vincarnation\x12(\n" +
-	"\x10last_change_unix\x18\x06 \x01(\x03R\x0elastChangeUnix\"\xba\x01\n" +
+	"\x10last_change_unix\x18\x06 \x01(\x03R\x0elastChangeUnix\x12%\n" +
+	"\x0ecapacity_bytes\x18\a \x01(\x03R\rcapacityBytes\x12\x1d\n" +
+	"\n" +
+	"used_bytes\x18\b \x01(\x03R\tusedBytes\"\xba\x01\n" +
 	"\rStorageStatus\x12\x19\n" +
 	"\bdata_dir\x18\x01 \x01(\tR\adataDir\x12%\n" +
 	"\x0ecapacity_bytes\x18\x02 \x01(\x03R\rcapacityBytes\x12\x1d\n" +

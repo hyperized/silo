@@ -42,6 +42,7 @@ func TestStatus_Succeeds(t *testing.T) {
 		"Queried silo-a (silo test)",
 		"silo-a", "alive", "silo-a:7100",
 		"silo-b", "suspect",
+		"256.0 MiB/1.0 GiB (25%)", // silo-a's advertised capacity
 		"1m ago",
 		"Storage on silo-a (/var/lib/silo):",
 		"chunk",
@@ -163,6 +164,15 @@ func TestPrintStatus_AllStatesAndEmpty(t *testing.T) {
 	printStatus(&buf, &statusv1.GetStatusResponse{RespondingNodeId: "n", Version: "v"})
 	if !strings.Contains(buf.String(), "Cluster: 0 nodes\n") {
 		t.Errorf("zero-node header = %q", buf.String())
+	}
+}
+
+func TestCapacitySummary(t *testing.T) {
+	if got := capacitySummary(0, 0); got != "—" {
+		t.Errorf("no capacity = %q, want dash", got)
+	}
+	if got := capacitySummary(256<<20, 1<<30); got != "256.0 MiB/1.0 GiB (25%)" {
+		t.Errorf("summary = %q", got)
 	}
 }
 

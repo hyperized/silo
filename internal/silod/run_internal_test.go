@@ -134,6 +134,9 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 	newScrubberSubsystem = func(_ *config.Config, _ replication.Placement, _ replication.ChunkCatalog, _ replication.ReplicaProbe, _ *slog.Logger) subsystem {
 		return newFakeSubsystem("scrubber", nil, nil, true)
 	}
+	newRebalancerSubsystem = func(_ *config.Config, _ *membership.Membership, _ *slog.Logger) subsystem {
+		return newFakeSubsystem("rebalancer", nil, nil, true)
+	}
 	loadClusterTLS = stubLoadClusterTLS
 	openTokenStore = stubOpenTokenStore
 }

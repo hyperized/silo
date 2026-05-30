@@ -109,12 +109,14 @@ func (s *Subsystem) viewSnapshot() []membership.Event {
 	out := make([]membership.Event, 0, len(members))
 	for _, n := range members {
 		out = append(out, membership.Event{
-			ID:          n.ID,
-			Address:     n.Address,
-			DataAddress: n.DataAddress,
-			State:       n.State,
-			Incarnation: n.Incarnation,
-			At:          n.LastChange,
+			ID:            n.ID,
+			Address:       n.Address,
+			DataAddress:   n.DataAddress,
+			State:         n.State,
+			Incarnation:   n.Incarnation,
+			At:            n.LastChange,
+			CapacityBytes: n.CapacityBytes,
+			UsedBytes:     n.UsedBytes,
 		})
 	}
 	return out

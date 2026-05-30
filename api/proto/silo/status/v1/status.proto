@@ -34,6 +34,10 @@ message NodeStatus {
   // last_change_unix is the epoch-seconds of this node's last state transition;
   // the CLI renders it as an age ("down for 2m").
   int64 last_change_unix = 6;
+  // capacity_bytes and used_bytes are the node's advertised backing-store size
+  // and usage (zero until the node has advertised them over gossip).
+  int64 capacity_bytes = 7;
+  int64 used_bytes = 8;
 }
 
 // StorageStatus is the responding node's local backing storage.

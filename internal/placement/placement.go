@@ -35,6 +35,21 @@ type point struct {
 // always well-defined. A vnodes value <= 0 means DefaultVNodes, so callers
 // can pass 0 to accept the default.
 func New(nodeIDs []string, vnodes int) *Ring {
+	return NewWeighted(nodeIDs, nil, vnodes)
+}
+
+// NewWeighted builds a ring where each node gets weight*vnodes virtual points,
+// so a node with double the weight owns roughly double the key space. weights
+// maps node id to a positive weight; a node missing from the map (or with a
+// weight < 1) gets weight 1. With weights nil or all-ones the ring is byte-for-
+// byte identical to New(nodeIDs, vnodes) — capacity-aware placement is a strict
+// generalisation that does not disturb a homogeneous cluster.
+//
+// This is how silo rebalances for capacity: heavier-capacity nodes are given
+// more weight, so the deterministic ring assigns them more chunks, and the
+// re-replication scrubber moves data to match the new ring. No chunk is ever
+// stored off-ring, so reads still resolve placement from the ring alone.
+func NewWeighted(nodeIDs []string, weights map[string]int, vnodes int) *Ring {
 	if vnodes <= 0 {
 		vnodes = DefaultVNodes
 	}
@@ -55,7 +70,11 @@ func New(nodeIDs []string, vnodes int) *Ring {
 
 	points := make([]point, 0, len(nodes)*vnodes)
 	for _, id := range nodes {
-		for i := 0; i < vnodes; i++ {
+		w := weights[id]
+		if w < 1 {
+			w = 1
+		}
+		for i := 0; i < w*vnodes; i++ {
 			points = append(points, point{hash: hashVNode(id, i), node: id})
 		}
 	}
