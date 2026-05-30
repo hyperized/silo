@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/hyperized/silo/internal/chunkstore"
+	"github.com/hyperized/silo/internal/metrics"
 )
 
 func nopLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -299,5 +300,55 @@ func TestScrubber_ShutdownDeadlineExpires(t *testing.T) {
 	defer cancel()
 	if err := s.Shutdown(ctx); err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v, want a deadline-exceeded error", err)
+	}
+}
+
+func scrubberMetric(t *testing.T, s *Scrubber, name string) metrics.Metric {
+	t.Helper()
+	for _, m := range s.CollectMetrics() {
+		if m.Name == name {
+			return m
+		}
+	}
+	t.Fatalf("scrubber did not report metric %q", name)
+	return metrics.Metric{}
+}
+
+func TestScrubber_ReplicationMetrics(t *testing.T) {
+	place := stubPlace{
+		self:     "a",
+		replicas: []string{"a", "b", "c"},
+		addrs:    map[string]string{"a": "a:7000", "b": "b:7000", "c": "c:7000"},
+	}
+	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("payload")}}
+	probe := &fakeProbe{present: map[string]bool{key("c:7000", "c1"): true}} // b is missing c1
+	s := NewScrubber(place, cat, probe, 3, time.Hour, nopLogger())
+
+	if s.MetricPrefix() != "silo_replication" {
+		t.Errorf("prefix = %q", s.MetricPrefix())
+	}
+
+	s.runOnce(context.Background())
+
+	short := scrubberMetric(t, s, "shortfall_chunks")
+	if short.Value != 1 || short.Kind != metrics.Gauge {
+		t.Errorf("shortfall = %v (kind %v), want 1 gauge", short.Value, short.Kind)
+	}
+	if len(short.Labels) != 1 || short.Labels[0] != [2]string{"node", "a"} {
+		t.Errorf("shortfall labels = %v, want node=a", short.Labels)
+	}
+	repairs := scrubberMetric(t, s, "repairs_total")
+	if repairs.Value != 1 || repairs.Kind != metrics.Counter {
+		t.Errorf("repairs = %v (kind %v), want 1 counter", repairs.Value, repairs.Kind)
+	}
+
+	// A second cycle now finds c1 fully replicated: shortfall clears to 0, while
+	// repairs is cumulative and stays at 1.
+	s.runOnce(context.Background())
+	if got := scrubberMetric(t, s, "shortfall_chunks").Value; got != 0 {
+		t.Errorf("shortfall after healing = %v, want 0", got)
+	}
+	if got := scrubberMetric(t, s, "repairs_total").Value; got != 1 {
+		t.Errorf("repairs after healing = %v, want a cumulative 1", got)
 	}
 }

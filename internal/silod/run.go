@@ -421,12 +421,20 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	exp.Register(skew)
 	exp.Register(newStorageMetrics(store, cfg.DataDir, cfg.NodeID))
 
+	scrubberSubsys := newScrubberSubsystem(cfg, router, store, peers, logger)
+	// The scrubber knows the cluster's re-replication shortfall; surface it to
+	// Prometheus when the concrete subsystem exposes metrics (the production
+	// scrubber does; a test fake may not).
+	if src, ok := scrubberSubsys.(metrics.Source); ok {
+		exp.Register(src)
+	}
+
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger, exp.Handler()),
 		newGRPCSubsystem(cfg, serverTLS, store, coord, ns, members, version, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
-		newScrubberSubsystem(cfg, router, store, peers, logger),
+		scrubberSubsys,
 	}
 	if cfg.NBDAddr != "" {
 		subs = append(subs, newNBDSubsystem(cfg, ns, coord, logger))

@@ -171,6 +171,12 @@ Notable series:
   `silo_storage_available_bytes` — the filesystem backing the data directory
   (labelled by `node`). Alert when `used / capacity` crosses your headroom.
 - `silo_storage_chunks` — chunks held on the node.
+- `silo_replication_shortfall_chunks` — chunks this node is responsible for that
+  were under-replicated at the last scrub. **Summed across nodes, this is the
+  cluster's under-replication count — alert when it stays above zero.** It spikes
+  after a node loss and should fall back to zero as the scrubber heals.
+- `silo_replication_repairs_total` — cumulative replicas re-pushed (healing
+  activity).
 - `silo_hlc_peer_clock_skew_seconds` and `silo_hlc_clock_skew_alerts_total` —
   rising values mean a node's clock is drifting; investigate NTP before write
   ordering is affected.
