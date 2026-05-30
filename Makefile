@@ -72,7 +72,8 @@ build: ## Build all Go binaries into bin/.
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/silod ./cmd/silod
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/siloctl ./cmd/siloctl
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/silo-csi ./cmd/silo-csi
-	@printf "Built %s/silod, %s/siloctl, %s/silo-csi (%s)\n" "$(BIN)" "$(BIN)" "$(BIN)" "$(VERSION)"
+	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/silo-fuse ./cmd/silo-fuse
+	@printf "Built %s/{silod,siloctl,silo-csi,silo-fuse} (%s)\n" "$(BIN)" "$(VERSION)"
 
 IMAGE_REGISTRY ?= silo
 IMAGE_TAG ?= $(VERSION)

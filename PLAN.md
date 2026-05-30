@@ -119,8 +119,8 @@ Each milestone is a usable, demoable, shippable artifact.
 | M5  | done        | writer-owned chunks (writer/reader SDKs, inode manifest, clock-skew monitor) |
 | M6  | done        | block volume surface (extent-mapped inode, fenced single-writer lease, NBD server, COW snapshot) |
 | M7  | done        | CSI driver (silo-csi: vendored CSI proto, Identity/Controller/Node, NBD attach + mount, Helm chart + StorageClass) |
-| M8  | next        | FUSE filesystem integration (gated on F1) |
-| M9  | not started | observability + ops |
+| M8  | done*       | FUSE filesystem (stdlib FUSE protocol library + silo-backed mount); *mount path needs validation on a real /dev/fuse host |
+| M9  | in progress | observability + ops (status, capacity/replication metrics, drain, capacity rebalancing done; nvme-tcp pending) |
 | M10 | not started | production hardening |
 
 The FUSE protocol track (§5) starts after M2 — eligible to begin now. The UI track (§6) is eligible since M0; U1 cluster-view work needs the M2 gossip data, which is now available.
