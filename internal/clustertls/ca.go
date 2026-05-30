@@ -16,7 +16,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"time"
 )
@@ -33,11 +32,11 @@ const (
 // tests swap them to exercise the error paths that real entropy
 // pools never trip on a healthy host.
 var (
-	randReader                 io.Reader                              = rand.Reader
-	ed25519GenerateKey                                                = ed25519.GenerateKey
-	x509CreateCertificate                                             = x509.CreateCertificate
-	x509MarshalPKCS8PrivateKey                                        = x509.MarshalPKCS8PrivateKey
-	randInt                    func(upper *big.Int) (*big.Int, error) = defaultRandInt
+	randReader                 = rand.Reader
+	ed25519GenerateKey         = ed25519.GenerateKey
+	x509CreateCertificate      = x509.CreateCertificate
+	x509MarshalPKCS8PrivateKey = x509.MarshalPKCS8PrivateKey
+	randInt                    = defaultRandInt
 )
 
 func defaultRandInt(upper *big.Int) (*big.Int, error) {
