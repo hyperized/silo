@@ -431,6 +431,87 @@ func (negSizeBackend) Open(context.Context, string) (nbd.Device, func(), error) 
 	return negSizeDevice{}, nil, nil
 }
 
+// shortReadDevice returns fewer bytes than requested with a nil error, the
+// case that would otherwise let the server ship fabricated zeros as success.
+type shortReadDevice struct{ size int64 }
+
+func (d shortReadDevice) Size() int64 { return d.size }
+func (shortReadDevice) ReadAt(p []byte, _ int64) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil // short read, no error
+}
+func (shortReadDevice) WriteAt(p []byte, _ int64) (int, error) { return len(p), nil }
+
+type shortReadBackend struct{}
+
+func (shortReadBackend) Open(context.Context, string) (nbd.Device, func(), error) {
+	return shortReadDevice{size: 4096}, nil, nil
+}
+
+func TestServer_ShortReadIsIOError(t *testing.T) {
+	conn, done := serveConn(t, shortReadBackend{})
+	c := &testClient{t: t, conn: conn}
+	c.greet(cFlagNoZeroes)
+	c.exportName("vol", true)
+	if errc, _ := c.request(0, 0, 8, nil); errc != 5 { // short read -> EIO, not zeros
+		t.Errorf("short read err = %d, want 5 (EIO)", errc)
+	}
+	c.disconnect()
+	<-done
+}
+
+func TestServer_ServeShutdownClosesInflightAndRejectsNew(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := nbd.NewServer(&backend{dev: &memDevice{data: make([]byte, 512)}}, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ctx, ln) }()
+
+	// conn1: complete the handshake so it is accepted, tracked, and parked in
+	// the transmit loop reading the next request.
+	conn1, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial conn1: %v", err)
+	}
+	c1 := &testClient{t: t, conn: conn1}
+	c1.greet(cFlagNoZeroes)
+	c1.exportName("vol", true)
+
+	// Cancelling must force the in-flight connection closed, not leave it
+	// dangling until the client happens to disconnect.
+	cancel()
+	_ = conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn1.Read(make([]byte, 1)); err == nil {
+		t.Error("expected the server to close the in-flight connection on shutdown")
+	}
+	_ = conn1.Close()
+
+	// conn1's read returning establishes the close-all sweep has run (closing
+	// is set), so a connection accepted now is rejected immediately.
+	if conn2, err := net.Dial("tcp", ln.Addr().String()); err == nil {
+		_ = conn2.SetReadDeadline(time.Now().Add(2 * time.Second))
+		if _, err := conn2.Read(make([]byte, 1)); err == nil {
+			t.Error("expected a connection accepted during shutdown to be closed")
+		}
+		_ = conn2.Close()
+	}
+
+	_ = ln.Close()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("Serve returned %v, want nil after shutdown", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after shutdown drain")
+	}
+}
+
 func TestServer_OutOfBoundsRejected(t *testing.T) {
 	conn, done := serveConn(t, &backend{dev: &memDevice{data: make([]byte, 512)}})
 	c := &testClient{t: t, conn: conn}

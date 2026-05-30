@@ -17,6 +17,10 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
+	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
+	namespacev1 "github.com/hyperized/silo/api/proto/silo/namespace/v1"
+	nodev1 "github.com/hyperized/silo/api/proto/silo/node/v1"
+	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
 	"github.com/hyperized/silo/internal/captoken"
 )
 
@@ -90,6 +94,33 @@ const (
 	mGet      = "/silo.chunk.v1.ChunkStore/Get"
 	mPut      = "/silo.chunk.v1.ChunkStore/Put"
 )
+
+// TestMethodCapabilities_AllRegistered guards against the capability map drifting
+// from the wire contract: every key must be a real registered RPC. A typo (e.g.
+// "/ClusterStatus/Status" vs the generated "/ClusterStatus/GetStatus") would
+// otherwise fall through to the deny-unknown path and silently make that
+// capability unreachable for token-scoped clients.
+func TestMethodCapabilities_AllRegistered(t *testing.T) {
+	registered := map[string]struct{}{}
+	for _, sd := range []grpc.ServiceDesc{
+		chunkv1.ChunkStore_ServiceDesc,
+		namespacev1.NamespaceStore_ServiceDesc,
+		statusv1.ClusterStatus_ServiceDesc,
+		nodev1.NodeAdmin_ServiceDesc,
+	} {
+		for _, m := range sd.Methods {
+			registered["/"+sd.ServiceName+"/"+m.MethodName] = struct{}{}
+		}
+		for _, s := range sd.Streams {
+			registered["/"+sd.ServiceName+"/"+s.StreamName] = struct{}{}
+		}
+	}
+	for method := range methodCapabilities {
+		if _, ok := registered[method]; !ok {
+			t.Errorf("methodCapabilities has %q, which is not a registered gRPC method", method)
+		}
+	}
+}
 
 func TestAuthorize_NodeCallerExempt(t *testing.T) {
 	a, _, _ := authFixture(t)

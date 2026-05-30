@@ -361,11 +361,17 @@ func (n *Namespace) List(path string) ([]ResolvedEntry, error) {
 
 	var out []ResolvedEntry
 	for name, entries := range byName {
-		// Highest claim HLC first; that one keeps the bare name.
+		// Highest claim HLC first; that one keeps the bare name. HLCs are
+		// globally unique (the Node field disambiguates), so ties are
+		// unreachable in practice — the Inode tie-break makes the order total
+		// and replica-agnostic anyway, so convergence never relies on it.
 		sort.Slice(entries, func(i, j int) bool {
 			ti, _ := dir.children.LiveTag(entries[i])
 			tj, _ := dir.children.LiveTag(entries[j])
-			return ti.After(tj)
+			if c := ti.Compare(tj); c != 0 {
+				return c > 0
+			}
+			return entries[i].Inode > entries[j].Inode
 		})
 		for i, e := range entries {
 			// A locally-created entry always has its inode, but a corrupt or
@@ -419,7 +425,10 @@ func (n *Namespace) Manifest(path string) ([]string, error) {
 	sort.Slice(ids, func(i, j int) bool {
 		ti, _ := file.manifest.LiveTag(ids[i])
 		tj, _ := file.manifest.LiveTag(ids[j])
-		return ti.Before(tj)
+		if c := ti.Compare(tj); c != 0 {
+			return c < 0
+		}
+		return ids[i] < ids[j] // total order even on an (unreachable) tag tie
 	})
 	return ids, nil
 }
@@ -1041,7 +1050,9 @@ func (n *Namespace) primaryChildLocked(dir *Inode, name string) (string, bool) {
 		}
 		// Elements only returns present entries, so the tag is always live.
 		tag, _ := dir.children.LiveTag(e)
-		if !found || tag.After(bestTag) {
+		// Greatest (tag, inode) wins — the same total order List uses to pick
+		// which claim keeps the bare name, so a lookup follows that same inode.
+		if !found || tag.After(bestTag) || (tag.Compare(bestTag) == 0 && e.Inode > bestInode) {
 			bestInode, bestTag, found = e.Inode, tag, true
 		}
 	}

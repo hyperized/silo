@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 )
 
 // Protocol magics and flags (see the NBD protocol spec).
@@ -88,17 +89,75 @@ func NewServer(backend Backend, logger *slog.Logger) *Server {
 }
 
 // Serve accepts connections until ctx is cancelled or the listener errors,
-// handling each in its own goroutine.
+// handling each in its own goroutine. On cancellation it closes every
+// in-flight connection so a transmit loop blocked reading the next request
+// unblocks and its goroutine exits, then waits for them to drain — a graceful
+// shutdown rather than leaving established sessions running until the client
+// happens to disconnect.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	var (
+		mu      sync.Mutex
+		conns   = map[net.Conn]struct{}{}
+		closing bool
+		wg      sync.WaitGroup
+	)
+	// track registers a live connection, reporting false if shutdown has
+	// already begun (so the caller closes it immediately rather than racing
+	// the close-all sweep and lingering).
+	track := func(c net.Conn) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if closing {
+			return false
+		}
+		conns[c] = struct{}{}
+		return true
+	}
+	untrack := func(c net.Conn) {
+		mu.Lock()
+		delete(conns, c)
+		mu.Unlock()
+	}
+	closeAll := func() {
+		mu.Lock()
+		closing = true
+		live := make([]net.Conn, 0, len(conns))
+		for c := range conns {
+			live = append(live, c)
+		}
+		mu.Unlock()
+		for _, c := range live {
+			_ = c.Close()
+		}
+	}
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeAll()
+		case <-stop:
+		}
+	}()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
+				wg.Wait() // let the closed in-flight connections drain
 				return nil
 			}
 			return fmt.Errorf("nbd: accept failed (%w)", err)
 		}
+		if !track(conn) {
+			_ = conn.Close()
+			continue
+		}
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			defer untrack(conn)
 			if err := s.ServeConn(ctx, conn); err != nil {
 				s.logger.Warn("nbd connection ended", "error", err)
 			}
@@ -268,8 +327,11 @@ func (s *Server) dispatch(conn net.Conn, dev Device, cmd uint16, handle, offset 
 			return false, writeReply(conn, errInval, handle, nil)
 		}
 		buf := make([]byte, length)
-		if _, err := dev.ReadAt(buf, int64(offset)); err != nil { // #nosec G115 -- offset bounds-checked
-			s.logger.Warn("nbd read failed", "offset", offset, "length", length, "error", err)
+		// A short read (n < length) with a nil error would otherwise ship the
+		// untouched tail of buf as a successful reply. Treat it as an I/O error
+		// so the client never sees fabricated zeros where bytes were expected.
+		if n, err := dev.ReadAt(buf, int64(offset)); err != nil || uint32(n) != length { // #nosec G115 -- offset bounds-checked; n is in [0,length]
+			s.logger.Warn("nbd read failed", "offset", offset, "length", length, "read", n, "error", err)
 			return false, writeReply(conn, errIO, handle, nil)
 		}
 		return false, writeReply(conn, 0, handle, buf)

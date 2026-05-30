@@ -61,6 +61,12 @@ func Open(ctx context.Context, meta Metadata, chunks Chunks, path, holder string
 	if err != nil {
 		return nil, err
 	}
+	if size <= 0 {
+		// locate divides the byte offset by extentSize; a zero or negative
+		// extent size would panic (divide by zero) on the first read or write,
+		// crashing the goroutine serving the NBD connection. Refuse to open.
+		return nil, fmt.Errorf("volume: extent size for %q must be positive, got %d", path, size)
+	}
 	id, err := newWriterID(holder)
 	if err != nil {
 		return nil, err

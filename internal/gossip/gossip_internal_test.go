@@ -1585,10 +1585,22 @@ func TestSyncWith_ReadFailure(t *testing.T) {
 
 func TestShutdown_IdempotentEarlyReturn(t *testing.T) {
 	s := newTestSubsystem(t, "self", "127.0.0.1:0", nil, discardLogger())
-	close(s.stopCh) // simulate already-shut-down state
+	// Shutdown must be idempotent: a second (or concurrent) call must not
+	// double-close stopCh and panic. Call it twice, including concurrently.
 	if err := s.Shutdown(context.Background()); err != nil {
-		t.Errorf("Shutdown after pre-closed stopCh: got %v, want nil", err)
+		t.Fatalf("first Shutdown: got %v, want nil", err)
 	}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.Shutdown(context.Background()); err != nil {
+				t.Errorf("repeat Shutdown: got %v, want nil", err)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // blockingHandlerListener accepts the first connection and immediately

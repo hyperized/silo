@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -225,6 +226,18 @@ func TestVolume_OpenExtentSizeError(t *testing.T) {
 	meta := &fakeMeta{sizeErr: errBoom}
 	if _, err := volume.Open(context.Background(), meta, &fakeChunks{}, "/v", "h"); !errors.Is(err, errBoom) {
 		t.Errorf("Open err = %v, want errBoom", err)
+	}
+}
+
+func TestVolume_OpenNonPositiveExtentSize(t *testing.T) {
+	// A zero (or negative) extent size would make locate divide by zero and
+	// panic on the first I/O; Open must refuse it up front.
+	for _, size := range []int64{0, -4096} {
+		meta := &fakeMeta{size: size}
+		_, err := volume.Open(context.Background(), meta, &fakeChunks{}, "/v", "h")
+		if err == nil || !strings.Contains(err.Error(), "extent size") {
+			t.Errorf("Open with extent size %d: err = %v, want an 'extent size' error", size, err)
+		}
 	}
 }
 

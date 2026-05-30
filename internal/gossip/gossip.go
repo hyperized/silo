@@ -133,8 +133,9 @@ type Subsystem struct {
 	// dialer is a seam so tests can substitute a fake TCP path.
 	dialer dialer
 
-	wg     sync.WaitGroup
-	stopCh chan struct{}
+	wg       sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once
 
 	// lastSync is the unix-nano time of the last successful anti-entropy sync;
 	// 0 until the first. Read by the metrics scrape to report sync lag.
@@ -384,18 +385,18 @@ func (s *Subsystem) Start() error {
 // observe stopCh on the next tick and exit, but Shutdown itself
 // returns the deadline error).
 func (s *Subsystem) Shutdown(ctx context.Context) error {
-	select {
-	case <-s.stopCh:
-		return nil
-	default:
-	}
-	close(s.stopCh)
-	s.mu.Lock()
-	ln := s.ln
-	s.mu.Unlock()
-	if ln != nil {
-		_ = ln.Close()
-	}
+	// stopOnce makes the signal idempotent: concurrent or repeated Shutdown
+	// calls can't double-close stopCh (which would panic). Later callers fall
+	// through to wait on the WaitGroup, which is already drained.
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		s.mu.Lock()
+		ln := s.ln
+		s.mu.Unlock()
+		if ln != nil {
+			_ = ln.Close()
+		}
+	})
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()

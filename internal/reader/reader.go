@@ -71,6 +71,7 @@ func (s *Stream) Read(p []byte) (int, error) {
 			}
 			stream, err := s.chunks.Get(s.ctx, &chunkv1.GetRequest{ChunkId: s.ids[s.idx]})
 			if err != nil {
+				s.cancel() // release the read session; io.Copy callers never Close on error
 				return 0, fmt.Errorf("reader: could not fetch chunk %s (%w); the chunk may be missing or silod is unreachable", s.ids[s.idx], err)
 			}
 			s.cur = stream
@@ -82,6 +83,7 @@ func (s *Stream) Read(p []byte) (int, error) {
 			continue
 		}
 		if err != nil {
+			s.cancel() // terminal stream error: cancel the in-flight Get so it can't leak
 			return 0, fmt.Errorf("reader: could not read chunk %s (%w)", s.ids[s.idx-1], err)
 		}
 		s.buf = msg.GetData()
