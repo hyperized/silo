@@ -45,6 +45,8 @@ func runMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runVolume(rest, stdout, stderr)
 	case "status":
 		return runStatus(rest, stdout, stderr)
+	case "node":
+		return runNode(rest, stdout, stderr)
 	case "version":
 		fmt.Fprintf(stdout, "siloctl %s\n", version)
 		return 0
@@ -70,6 +72,7 @@ Commands:
   ns         Inspect and mutate the cluster namespace
   volume     Create and manage block volumes
   status     Show cluster health and this node's storage
+  node       Node lifecycle operations (drain)
   version    Print the siloctl version
   help       Show this message
 

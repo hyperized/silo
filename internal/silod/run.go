@@ -62,9 +62,14 @@ var (
 	newHTTPSubsystem = func(cfg *config.Config, version string, logger *slog.Logger, metrics http.Handler) subsystem {
 		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger, observability.WithMetricsHandler(metrics))}
 	}
-	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, members transport.StatusMembers, version string, logger *slog.Logger) subsystem {
-		status := transport.NewStatusService(members, store, cfg.DataDir, cfg.NodeID, version, logger)
-		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, coord, ns, logger, transport.WithStatusService(status))}
+	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
+		opts := []transport.GRPCOption{
+			transport.WithStatusService(transport.NewStatusService(members, store, cfg.DataDir, cfg.NodeID, version, logger)),
+		}
+		if drainer != nil {
+			opts = append(opts, transport.WithNodeAdminService(transport.NewNodeAdminService(drainer, cfg.NodeID, logger)))
+		}
+		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, coord, ns, logger, opts...)}
 	}
 	newScrubberSubsystem = func(cfg *config.Config, place replication.Placement, catalog replication.ChunkCatalog, probe replication.ReplicaProbe, logger *slog.Logger) subsystem {
 		return replication.NewScrubber(place, catalog, probe, cfg.Replication, cfg.ScrubInterval, logger)
@@ -431,7 +436,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger, exp.Handler()),
-		newGRPCSubsystem(cfg, serverTLS, store, coord, ns, members, version, logger),
+		newGRPCSubsystem(cfg, serverTLS, store, coord, ns, members, gossipDrainer(gossipSubsys), version, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
 		scrubberSubsys,
@@ -524,6 +529,20 @@ type gossipSub struct {
 func (g *gossipSub) Name() string                       { return "gossip" }
 func (g *gossipSub) Start() error                       { return g.srv.Start() }
 func (g *gossipSub) Shutdown(ctx context.Context) error { return g.srv.Shutdown(ctx) }
+
+// Drain lets the gossip subsystem satisfy transport.Drainer, so the NodeAdmin
+// service can drain this node on operator request.
+func (g *gossipSub) Drain() bool { return g.srv.Drain() }
+
+// gossipDrainer returns the drainer behind the gossip subsystem, or nil when
+// the subsystem does not expose draining (a test fake may not), in which case
+// the NodeAdmin service is simply not registered.
+func gossipDrainer(s subsystem) transport.Drainer {
+	if d, ok := s.(transport.Drainer); ok {
+		return d
+	}
+	return nil
+}
 
 // announceBootstrap mints a fresh single-use join token and writes the
 // operator-facing handshake string to w. The token is generated, hashed,

@@ -141,6 +141,31 @@ in Kubernetes.
 
 ---
 
+## Draining a node
+
+To remove a node without risking data, drain it first:
+
+```sh
+siloctl node drain --server <node-grpc-addr>
+```
+
+This marks the node as having left the cluster and announces it over gossip.
+Peers route new placement around it and the scrubber re-replicates the chunks it
+held onto survivors — so every volume's replication factor is restored *before*
+the node goes away. Drain is **not** shutdown: the node keeps running and serving
+its chunks so survivors can rebuild from a quorum.
+
+Watch the re-replication finish, then remove the node:
+
+```sh
+# shortfall falls back to zero once every chunk is back to full replication
+curl -s http://<node>:7080/metrics | grep silo_replication_shortfall_chunks
+```
+
+When `silo_replication_shortfall_chunks` is zero across the cluster, stop and
+remove the node. A drained node that is killed early is still safe as long as the
+remaining replicas met quorum; drain just makes the transition graceful.
+
 ## Block volumes over NBD
 
 A silo volume is an extent map over immutable chunks. To serve it as a block

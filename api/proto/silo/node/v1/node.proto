@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package silo.node.v1;
+
+option go_package = "github.com/hyperized/silo/api/proto/silo/node/v1;nodev1";
+
+// NodeAdmin is silod's operator-facing node-lifecycle surface. Unlike the
+// read-only ClusterStatus service, these RPCs mutate the node, so they are kept
+// separate.
+service NodeAdmin {
+  // Drain marks the receiving node as having left the cluster and announces it
+  // over gossip, so peers route placement around it and re-replicate the chunks
+  // it held onto survivors. The node keeps running and serving its chunks until
+  // it is removed — drain is not shutdown. Watch silo_replication_shortfall_chunks
+  // fall to zero before removing the node.
+  rpc Drain(DrainRequest) returns (DrainResponse);
+}
+
+message DrainRequest {}
+
+message DrainResponse {
+  // node_id is the drained node's id.
+  string node_id = 1;
+  // announced is true when this call transitioned the node to Left; false when
+  // it was already draining (the call is idempotent).
+  bool announced = 2;
+}

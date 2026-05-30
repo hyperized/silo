@@ -232,6 +232,25 @@ func (s *Subsystem) Name() string { return "gossip" }
 // snapshot without poking at private fields.
 func (s *Subsystem) Members() *membership.Membership { return s.members }
 
+// Drain marks this node as having voluntarily left the cluster and broadcasts
+// that over gossip. Peers route placement around a Left node, and the scrubber
+// on the survivors re-replicates the chunks this node held onto other nodes —
+// so the volume's replication factor is restored without it.
+//
+// Drain is not shutdown: the node keeps running and keeps serving its chunks so
+// survivors can rebuild from a quorum. Watch silo_replication_shortfall_chunks
+// fall back to zero, then the node is safe to stop and remove. Returns whether a
+// Left event was announced (false if the node had already left).
+func (s *Subsystem) Drain() bool {
+	ev, changed := s.members.MarkLeft(s.members.SelfID())
+	if !changed {
+		return false
+	}
+	s.remember(ev)
+	s.logger.Info("node draining; announced Left over gossip so peers re-replicate its chunks", "node", ev.ID)
+	return true
+}
+
 // Addr returns the bound listener address, or "" before Start.
 func (s *Subsystem) Addr() string {
 	s.mu.Lock()

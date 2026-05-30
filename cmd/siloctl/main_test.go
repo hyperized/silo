@@ -21,6 +21,7 @@ import (
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
 	namespacev1 "github.com/hyperized/silo/api/proto/silo/namespace/v1"
+	nodev1 "github.com/hyperized/silo/api/proto/silo/node/v1"
 	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
 	"github.com/hyperized/silo/internal/crypto"
@@ -42,6 +43,11 @@ func (testMembers) Members() []membership.Node {
 		{ID: "silo-b", Address: "silo-b:7100", DataAddress: "silo-b:7000", State: membership.StateSuspect, Incarnation: 1, LastChange: at},
 	}
 }
+
+// testDrainer is a no-op Drainer for the test server's node-admin service.
+type testDrainer struct{}
+
+func (testDrainer) Drain() bool { return true }
 
 // storeCoord is a single-node Coordinator that delegates to the local
 // store, so siloctl's chunk commands (which the daemon routes through the
@@ -100,10 +106,13 @@ func newTestServer(t *testing.T) (addr string, teardown func()) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	adminSvc := transport.NewNodeAdminService(testDrainer{}, "silo-a", logger)
+
 	s := grpc.NewServer()
 	chunkv1.RegisterChunkStoreServer(s, svc)
 	namespacev1.RegisterNamespaceStoreServer(s, nsSvc)
 	statusv1.RegisterClusterStatusServer(s, statusSvc)
+	nodev1.RegisterNodeAdminServer(s, adminSvc)
 	go func() { _ = s.Serve(ln) }()
 
 	teardown = func() {

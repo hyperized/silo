@@ -1664,3 +1664,29 @@ func TestAcceptLoop_ExitsWhenStopChObservedAfterError(t *testing.T) {
 		t.Fatal("acceptLoop did not exit after stopCh + error")
 	}
 }
+
+func TestSubsystem_Drain(t *testing.T) {
+	logger := discardLogger()
+	m, _ := membership.New("alpha", "alpha:7100", "alpha:7000")
+	s, err := New(m, Options{Addr: "alpha:7100", ServerTLS: dummyTLS(), ClientTLS: dummyTLS()}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if !s.Drain() {
+		t.Fatal("first Drain should announce a Left event")
+	}
+	if got := m.Self().State; got != membership.StateLeft {
+		t.Errorf("self state after drain = %v, want left", got)
+	}
+	// The Left event is queued for broadcast on the next gossip round.
+	pb := s.piggybackSnapshot()
+	if len(pb) != 1 || pb[0].ID != "alpha" || pb[0].State != membership.StateLeft {
+		t.Errorf("piggyback = %+v, want one alpha=left event", pb)
+	}
+
+	// Draining again is a no-op (already left).
+	if s.Drain() {
+		t.Error("second Drain should report no change")
+	}
+}
