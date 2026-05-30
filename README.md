@@ -106,6 +106,29 @@ stays available and re-replicates in the background. `make down` tears it all do
 
 ---
 
+## Deploy
+
+Same binary everywhere — pick a path by how much you need to survive a node loss:
+
+| Path | Nodes | Survives node loss? | For |
+|---|---|---|---|
+| **Standalone** | 1 | No — one copy, [back it up](docs/operations.md#backups) | edge, a single host, dev, a small store |
+| **Cluster** | 3+ | Yes — replication factor N | self-managed hosts / VMs / Compose with HA |
+| **Kubernetes** | 3+ | Yes | pods consuming silo as a CSI StorageClass |
+
+Adding nodes (same CA, same encryption key) turns Standalone into Cluster with no
+data migration. Standalone in one line:
+
+```sh
+SILO_ENCRYPTION_KEY_SOURCE=file SILO_ENCRYPTION_KEY_PATH=/etc/silo/key \
+SILO_DATA_DIR=/var/lib/silo SILO_NBD_ADDR=0.0.0.0:10809 ./bin/silod
+```
+
+Full recipes (CA seeding, advertise addresses, KMS, backups) for all three:
+**[docs/operations.md → Deployment paths](docs/operations.md#deployment-paths)**.
+
+---
+
 ## Use it on Kubernetes
 
 The [`silo-csi` Helm chart](deploy/helm/silo-csi) installs the driver: a
@@ -116,8 +139,9 @@ snapshotter sidecars) and a node `DaemonSet`. Full guide:
 **Prerequisites:** a running silo cluster reachable from Kubernetes, and the
 `nbd` kernel module on each node (`modprobe nbd nbds_max=64`). Today you bring
 your own silod deployment (the [`silod` container image](Dockerfile) plus the
-[env reference](docs/operations.md); a silod Helm chart is on the M9 roadmap).
-For evaluation, the `make up` stack above is a perfectly good backing cluster.
+[Kubernetes deployment path](docs/operations.md#3-kubernetes); a packaged silod
+Helm chart is [roadmapped](docs/known-gaps.md)). For evaluation, the `make up`
+stack above is a perfectly good backing cluster.
 
 ```sh
 # 1. Build the images and push them where your cluster can pull from.

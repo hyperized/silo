@@ -160,38 +160,93 @@ re-run `siloctl ca revoke` (even with no new serials) to refresh it.
 
 ---
 
-## Deployment topologies
+## Deployment paths
 
-### Single node (development)
+silo runs the same single binary everywhere; what changes is how many you run
+and how they find each other. There are three supported paths — pick by your
+durability and orchestration needs:
+
+| Path | Nodes | Survives a node loss? | Use it for |
+|---|---|---|---|
+| **[Standalone](#1-standalone-single-node)** | 1 | **No** (single copy — back it up) | edge, a single host, dev, a small block-volume or object store |
+| **[Cluster](#2-cluster-multi-node)** | 3+ | **Yes** (replication factor N) | self-managed hosts / VMs / Compose that need HA |
+| **[Kubernetes](#3-kubernetes)** | 3+ | **Yes** | pods consuming silo as a CSI StorageClass |
+
+All three are production-capable. The difference between Standalone and Cluster
+is replication: a standalone node keeps **one** copy of each chunk (replication
+clamps to the node count), so its durability comes from the disk and from
+[backups](#backups), not from peers. Add nodes — same CA, same encryption key —
+and it becomes a Cluster with no data migration.
+
+### 1. Standalone (single node)
+
+One `silod`, one disk. No gossip, no seeds; it self-mints its cluster CA on first
+boot. Good for a single block volume, an edge box, a CI artifact store, or SDK
+work — anywhere you want silo's encryption + volume/namespace surface without
+running a fleet.
+
+Fastest start (containerised, durable volume):
 
 ```sh
-SILO_ENCRYPTION_KEY=$(openssl rand -base64 32) \
+make up-local          # one silod in Docker; generates a dev key into deploy/.env
+```
+
+Production single node — run the binary (or container) with a **file-sourced**
+key, a durable data dir, and, because there is no replication, a **backup
+target**:
+
+```sh
+# One-time: a 32-byte key on a 0400 file (NOT the static env source).
+openssl rand 32 > /etc/silo/key && chmod 0400 /etc/silo/key
+
+SILO_ENCRYPTION_KEY_SOURCE=file \
+SILO_ENCRYPTION_KEY_PATH=/etc/silo/key \
+SILO_DATA_DIR=/var/lib/silo \
 SILO_NBD_ADDR=0.0.0.0:10809 \
+SILO_BACKUP_TARGET=s3://my-bucket/silo \
   ./bin/silod
 ```
 
-One node, no seeds. Good for SDK work and a single NBD volume.
+Then claim operator credentials against this node's bootstrap port the same way
+the cluster path does ([below](#claiming-operator-credentials)). Caveats: a
+single node is a single point of failure with no automatic failover — keep
+backups, and if you need HA, run a Cluster instead.
 
-### Three nodes (the `make up` stack)
+### 2. Cluster (multi-node)
 
-`deploy/docker-compose.yml` boots three `silod`s plus Prometheus and Grafana. It
-demonstrates the production-relevant wiring:
+Three or more `silod`s gossiping over mTLS, replicating every chunk to
+`SILO_REPLICATION` nodes (default 3). The cluster stays available and re-forms
+replicas when a node is lost. `deploy/docker-compose.yml` (`make up`) is the
+reference wiring on one host; the same environment runs on separate hosts/VMs
+under systemd or any container runtime.
 
-- Each node **advertises** routable addresses (`SILO_GOSSIP_ADVERTISE`,
-  `SILO_GRPC_PEER_ADVERTISE`) so peers learn real dial targets rather than
-  `0.0.0.0`.
-- One node is the **CA seed** (`SILO_TLS_CA_SEED=1`) and mints the shared cluster
-  CA; the others wait for it to be healthy.
-- `SILO_SEEDS` points at peers' **gossip** ports (7100), not the data port.
+The wiring that makes a multi-node cluster work:
 
-### Kubernetes
+- **One CA seed.** Exactly one node sets `SILO_TLS_CA_SEED=1` and mints the
+  shared cluster CA into storage the others can read (a shared volume in Compose,
+  or a pre-distributed CA in production — see [TLS](#tls-cluster-internal-mtls)).
+  The rest wait for it. Every node trusts the same CA.
+- **Routable advertise addresses.** Each node sets `SILO_GOSSIP_ADVERTISE` and
+  `SILO_GRPC_PEER_ADVERTISE` to addresses peers can actually dial (a hostname or
+  IP, not `0.0.0.0`).
+- **Seeds point at gossip ports.** `SILO_SEEDS` lists peers' **gossip**
+  addresses (7100 by default), not the data port. One reachable seed is enough
+  to join; gossip discovers the rest.
+- **Shared encryption key.** Every node uses the same cluster encryption key
+  (file or KMS source) — it is the cluster's, not the node's.
+
+Each node serves its own gRPC/NBD locally; any node can coordinate a write.
+
+### 3. Kubernetes
 
 Run `silod` as a `hostNetwork` DaemonSet (one per node) so the CSI node plugin
 reaches it at `127.0.0.1:10809`, fronted by a `Service` for the controller's
 gRPC. Set `SILO_GOSSIP_ADVERTISE` to the Pod IP (downward API), `SILO_NBD_ADDR`
 to enable block serving, and mount `SILO_DATA_DIR` on durable node-local storage.
-A packaged `silod` chart is on the [M9 roadmap](../PLAN.md#m9--observability--ops);
-until then this is operator-assembled — see [kubernetes.md](kubernetes.md).
+The cluster wiring is the same as path 2; the [`silo-csi` Helm chart](../deploy/helm/silo-csi)
+then installs the driver that turns volumes into a StorageClass. silod itself is
+operator-deployed today (a packaged `silod` chart is roadmapped —
+[known-gaps.md](known-gaps.md)). Full guide: **[kubernetes.md](kubernetes.md)**.
 
 ---
 

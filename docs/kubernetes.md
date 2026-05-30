@@ -36,10 +36,10 @@ It does **not** deploy `silod`. The driver connects to a silo cluster you run
      with `hostNetwork`, one per node, co-located with the silo-csi node plugin.
    - The controller reaches silod's gRPC API at `silod.address` (a `Service`,
      `host:port`).
-   - A `silod` Helm chart is on the [M9 roadmap](../PLAN.md#m9--observability--ops).
-     Until then, deploy `silod` from its [container image](../Dockerfile) using
-     the [configuration reference](operations.md), or use the `make up`
-     docker-compose cluster for evaluation.
+   - A packaged `silod` Helm chart is [roadmapped](known-gaps.md). Until then,
+     deploy `silod` from its [container image](../Dockerfile) using the
+     [configuration reference](operations.md#deployment-paths) (the Kubernetes
+     path), or use the `make up` docker-compose cluster for evaluation.
 
 2. **The `nbd` kernel module on every node** that will mount volumes:
 
