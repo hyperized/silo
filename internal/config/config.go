@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hyperized/silo/internal/diskpressure"
 )
 
 // KeySource selects where silod reads the cluster encryption key from.
@@ -132,6 +134,13 @@ type Config struct {
 	NodeCertPath string
 	NodeKeyPath  string
 
+	// DiskThresholds is the disk high-watermark policy (SILO_DISK_PRESSURE_HIGH
+	// / _CLEAR / _HARD, fractions of the data filesystem used). The soft pair
+	// raises the gossiped DiskPressure condition with hysteresis; the hard floor
+	// makes the chunk store refuse new writes before ENOSPC. Defaults to
+	// diskpressure.DefaultThresholds() (0.85 / 0.80 / 0.95).
+	DiskThresholds diskpressure.Thresholds
+
 	// RequireTokens turns on capability-token authorization (SILO_REQUIRE_TOKENS).
 	// When true, gRPC callers presenting a client certificate must additionally
 	// carry a scoped token (set SILO_TOKEN, minted with 'siloctl auth
@@ -225,6 +234,12 @@ func Load(env EnvFunc) (*Config, error) {
 	}
 
 	cfg.Seeds = parseSeeds(env("SILO_SEEDS"))
+
+	disk, err := diskThresholds(env)
+	if err != nil {
+		return nil, err
+	}
+	cfg.DiskThresholds = disk
 
 	chunkSize, err := envInt64(env, "SILO_CHUNK_SIZE", DefaultChunkSize)
 	if err != nil {
@@ -397,6 +412,43 @@ func envDefault(env EnvFunc, key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// diskThresholds reads the disk high-watermark policy, applying the package
+// defaults for any var left unset, then validates the assembled policy so a
+// nonsensical combination (e.g. clear above high) fails at startup.
+func diskThresholds(env EnvFunc) (diskpressure.Thresholds, error) {
+	def := diskpressure.DefaultThresholds()
+	high, err := envFloat(env, "SILO_DISK_PRESSURE_HIGH", def.High)
+	if err != nil {
+		return diskpressure.Thresholds{}, err
+	}
+	clearWM, err := envFloat(env, "SILO_DISK_PRESSURE_CLEAR", def.Clear)
+	if err != nil {
+		return diskpressure.Thresholds{}, err
+	}
+	hard, err := envFloat(env, "SILO_DISK_PRESSURE_HARD", def.Hard)
+	if err != nil {
+		return diskpressure.Thresholds{}, err
+	}
+	t := diskpressure.Thresholds{High: high, Clear: clearWM, Hard: hard}
+	if err := t.Validate(); err != nil {
+		return diskpressure.Thresholds{}, err
+	}
+	return t, nil
+}
+
+// envFloat reads a float env var, falling back when unset.
+func envFloat(env EnvFunc, key string, fallback float64) (float64, error) {
+	v := env(key)
+	if v == "" {
+		return fallback, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a fraction like 0.85, got %q; see .env.example", key, v)
+	}
+	return f, nil
 }
 
 func envInt(env EnvFunc, key string, fallback int) (int, error) {

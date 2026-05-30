@@ -117,6 +117,7 @@ func (s *Subsystem) viewSnapshot() []membership.Event {
 			At:            n.LastChange,
 			CapacityBytes: n.CapacityBytes,
 			UsedBytes:     n.UsedBytes,
+			Pressured:     n.Pressured,
 		})
 	}
 	return out

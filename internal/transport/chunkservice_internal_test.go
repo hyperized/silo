@@ -536,6 +536,7 @@ func TestMapStoreError(t *testing.T) {
 	}{
 		{chunkstore.ErrNotFound, codes.NotFound},
 		{chunkstore.ErrInvalidID, codes.InvalidArgument},
+		{chunkstore.ErrNoSpace, codes.ResourceExhausted},
 		{errors.New("disk on fire"), codes.Internal},
 	}
 	for _, tc := range cases {

@@ -20,6 +20,7 @@ import (
 	"github.com/hyperized/silo/internal/clustertls"
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
+	"github.com/hyperized/silo/internal/diskusage"
 	"github.com/hyperized/silo/internal/exporter"
 	"github.com/hyperized/silo/internal/gossip"
 	"github.com/hyperized/silo/internal/hlc"
@@ -78,7 +79,8 @@ var (
 		return replication.NewScrubber(place, catalog, probe, cfg.Replication, cfg.ScrubInterval, logger)
 	}
 	newRebalancerSubsystem = func(cfg *config.Config, members *membership.Membership, logger *slog.Logger) subsystem {
-		return replication.NewRebalancer(members, cfg.DataDir, cfg.ScrubInterval, logger)
+		return replication.NewRebalancer(members, cfg.DataDir, cfg.ScrubInterval, logger,
+			replication.WithDiskThresholds(cfg.DiskThresholds))
 	}
 	// newNBDSubsystem builds the NBD block-device listener. Only constructed
 	// when SILO_NBD_ADDR is set, since NBD is unauthenticated block I/O.
@@ -109,7 +111,16 @@ var (
 		return &gossipSub{srv: s}, nil
 	}
 	newChunkStore = func(cfg *config.Config, cipher *crypto.Cipher) (chunkstore.Store, error) {
-		return chunkstore.NewFileStore(cfg.DataDir, cipher)
+		// The hard disk watermark refuses writes before the filesystem hits
+		// ENOSPC. usage measures the data filesystem fresh per write; a measure
+		// error fails open inside the guard.
+		dataDir := cfg.DataDir
+		usage := func() (avail, capacity int64, err error) {
+			u, err := diskusage.Measure(dataDir)
+			return u.AvailableBytes, u.CapacityBytes, err
+		}
+		return chunkstore.NewFileStore(dataDir, cipher,
+			chunkstore.WithDiskGuard(cfg.DiskThresholds.Hard, usage))
 	}
 	// newMembership is the seam Run goes through to construct the
 	// shared membership table. Defaults to membership.New; tests

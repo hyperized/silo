@@ -66,7 +66,7 @@ Wire these first; they catch the failures that matter.
 | Alert | Series | Why it matters |
 |---|---|---|
 | **Under-replication** | `sum(silo_replication_shortfall_chunks) > 0` for >N min | Data is below its replication factor. Spikes on node loss, should heal to 0. |
-| **Disk pressure** | `silo_storage_used_bytes / silo_storage_capacity_bytes > 0.85` | A full data dir stops writes on that node. |
+| **Disk pressure** | `silo_rebalancer_disk_pressure == 1` (or `used/capacity > 0.85`) | Node crossed the soft high-watermark; add capacity or drain before it hits the hard fence. |
 | **Node isolation** | `silo_gossip_last_sync_age_seconds` climbing | A node has lost gossip contact with the cluster. |
 | **Clock skew** | `increase(silo_hlc_clock_skew_alerts_total[10m]) > 0` | A node's clock is drifting; fix NTP before write ordering suffers. |
 | **Backup failure** | `increase(silo_backup_failures_total[1h]) > 0` | The cold copy is not being written. |
@@ -94,12 +94,18 @@ reachable) or just remove it — the survivors already re-replicated. Provision 
 replacement with a **new** `SILO_NODE_ID`, the same CA material, and let it join.
 Capacity rebalancing folds it back into the ring.
 
-### Disk full on a node
+### Disk pressure / a node filling up
 
-Writes to that node fail until space is freed. Either add capacity (bigger volume)
-or [drain](operations.md#draining-a-node) the node to push its chunks elsewhere.
-The capacity-weighted ring steers new placement toward emptier nodes; watch
-`silo_rebalancer_capacity_skew` settle.
+silo warns before a node is full. At the soft high-watermark (default 85%) the
+node raises a **DiskPressure** condition (`silo_rebalancer_disk_pressure`) — your
+cue to add capacity or [drain](operations.md#draining-a-node) it. At the hard
+watermark (default 95%) it **refuses new writes** (`RESOURCE_EXHAUSTED`) before
+the disk truly fills; the replication coordinator routes those writes to the
+chunk's other replicas (quorum) and the scrubber heals onto the node once it has
+room — existing chunks keep serving throughout. The fix is the same at either
+tier: **add capacity or drain.** If writes start failing cluster-wide, enough
+nodes are hard-full that quorum can't be met — add nodes. See
+[Disk high-watermarks](operations.md#disk-high-watermarks-diskpressure).
 
 ### A certificate is compromised
 

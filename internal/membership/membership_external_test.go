@@ -167,27 +167,34 @@ func TestSetSelfCapacityAndPropagation(t *testing.T) {
 	}
 
 	// First advertisement changes; an identical one does not.
-	if !m.SetSelfCapacity(1000, 250) {
+	if !m.SetSelfCapacity(1000, 250, false) {
 		t.Fatal("first SetSelfCapacity should report a change")
 	}
-	if m.SetSelfCapacity(1000, 250) {
+	if m.SetSelfCapacity(1000, 250, false) {
 		t.Error("an unchanged SetSelfCapacity should report no change")
 	}
-	if self := m.Self(); self.CapacityBytes != 1000 || self.UsedBytes != 250 {
-		t.Errorf("self capacity = %+v, want 1000/250", self)
+	if self := m.Self(); self.CapacityBytes != 1000 || self.UsedBytes != 250 || self.Pressured {
+		t.Errorf("self capacity = %+v, want 1000/250 unpressured", self)
+	}
+	// Flipping only the DiskPressure condition is itself a change.
+	if !m.SetSelfCapacity(1000, 250, true) {
+		t.Error("flipping the pressure flag should report a change")
+	}
+	if self := m.Self(); !self.Pressured {
+		t.Errorf("self should now be pressured: %+v", self)
 	}
 
-	// A peer's advertisement (higher incarnation, carrying capacity) is adopted.
-	m.Apply(membership.Event{ID: "b", Address: "b:7100", State: membership.StateAlive, Incarnation: 5, CapacityBytes: 2000, UsedBytes: 500})
+	// A peer's advertisement (higher incarnation, carrying capacity + pressure) is adopted.
+	m.Apply(membership.Event{ID: "b", Address: "b:7100", State: membership.StateAlive, Incarnation: 5, CapacityBytes: 2000, UsedBytes: 1900, Pressured: true})
 	b, _ := m.Lookup("b")
-	if b.CapacityBytes != 2000 || b.UsedBytes != 500 {
-		t.Errorf("peer b capacity = %+v, want 2000/500", b)
+	if b.CapacityBytes != 2000 || b.UsedBytes != 1900 || !b.Pressured {
+		t.Errorf("peer b = %+v, want 2000/1900 pressured", b)
 	}
 
-	// A later plain state-change event (no capacity) must not wipe b's figures.
+	// A later plain state-change event (no capacity) must not wipe b's figures or condition.
 	m.Apply(membership.Event{ID: "b", State: membership.StateSuspect, Incarnation: 5})
 	b, _ = m.Lookup("b")
-	if b.CapacityBytes != 2000 || b.UsedBytes != 500 {
+	if b.CapacityBytes != 2000 || b.UsedBytes != 1900 || !b.Pressured {
 		t.Errorf("capacity-less event wiped b's figures: %+v", b)
 	}
 }

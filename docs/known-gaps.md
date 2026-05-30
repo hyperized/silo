@@ -51,6 +51,21 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
 
 ## M10 — deferred
 
+- **Active rebalancing on disk pressure.** The disk high-watermarks
+  (`SILO_DISK_PRESSURE_*`) raise a soft DiskPressure condition and a hard
+  write-fence, but the soft tier does **not** automatically move data off a
+  near-full node. silo locates chunks by hashing onto the placement ring with no
+  per-chunk location map, so dropping a pressured node from the ring would
+  relocate the ownership of every chunk still on it (re-replication storm +
+  transient read misses). Steering new writes away while leaving existing chunks
+  put would need a per-chunk location index (or deterministic ring spillover
+  that the read path mirrors) — roadmapped. Today: the hard fence + operator
+  drain/add-capacity is the response. See
+  [operations.md](operations.md#disk-high-watermarks-diskpressure).
+- **DiskPressure in the status RPC.** Peers' DiskPressure conditions are gossiped
+  and counted (`silo_rebalancer_pressured_nodes`), but `siloctl status` shows
+  per-node capacity without the condition flag — surfacing it needs a status
+  proto field (same follow-up as the protocol-version-in-status gap).
 - **CRL hot reload.** Certificate revocation is enforced (`SILO_TLS_CRL`,
   `siloctl ca revoke`), but silod reads the CRL once at startup, so a freshly
   revoked cert takes effect on the next restart rather than instantly. A watcher

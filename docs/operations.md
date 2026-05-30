@@ -239,6 +239,40 @@ or `silo_storage_used_bytes / silo_storage_capacity_bytes`. A homogeneous cluste
 (equal disks) is never reshuffled — equal weights reproduce the original ring
 exactly.
 
+### Disk high-watermarks (DiskPressure)
+
+silo guards against a node filling to 100% with two watermarks on the data
+filesystem, analogous to a kubelet node's DiskPressure condition and eviction
+threshold. Both are fractions of the filesystem used, set via env:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SILO_DISK_PRESSURE_HIGH` | `0.85` | Enter the soft DiskPressure condition at/above this. |
+| `SILO_DISK_PRESSURE_CLEAR` | `0.80` | Leave it only back at/below this (hysteresis, so it doesn't flap). |
+| `SILO_DISK_PRESSURE_HARD` | `0.95` | Refuse new writes at/above this, before the filesystem hits ENOSPC. |
+
+- **Soft tier (DiskPressure condition).** A node crossing the high watermark
+  raises a condition it gossips to the cluster and exposes as
+  `silo_rebalancer_disk_pressure` (1/0); any node also reports how many peers are
+  pressured via `silo_rebalancer_pressured_nodes`. This is an **early-warning
+  signal** — it does **not** move data. silo locates every chunk by hashing it
+  onto the placement ring (there is no per-chunk location map), so dropping a
+  near-full node from the ring would reassign the ownership of every chunk still
+  on it and cause a re-replication storm plus transient read misses. So the soft
+  tier tells you to act (add capacity or [drain](#draining-a-node)); it doesn't
+  silently reshuffle.
+- **Hard tier (write fence).** At the hard watermark the node refuses new chunks
+  with `RESOURCE_EXHAUSTED` (`ErrNoSpace`) before the disk is truly full. In the
+  replication coordinator a refused replica just fails its ack, so the write
+  still completes on the other replicas (quorum) and the scrubber heals the chunk
+  onto the node once it has room. Existing chunks are always still served. If
+  *enough* nodes are hard-full that quorum can't be met, writes fail cluster-wide
+  with an actionable error — the signal that the cluster is genuinely out of
+  space and needs nodes added.
+
+When you see DiskPressure, the response is the same as a full node below:
+add capacity or drain.
+
 ## Backups
 
 Set `SILO_BACKUP_TARGET` and each node periodically exports its **encrypted
@@ -368,6 +402,9 @@ Notable series:
 - `silo_rebalancer_capacity_skew` — used-fraction spread between the fullest and
   emptiest node (0 = balanced). Heterogeneous disks settle toward balanced as the
   capacity-weighted ring takes effect.
+- `silo_rebalancer_disk_pressure` (this node, 1/0) and
+  `silo_rebalancer_pressured_nodes` (peers seen pressured) — the DiskPressure
+  high-watermark condition (see [Disk high-watermarks](#disk-high-watermarks-diskpressure)).
 - `silo_chunk_write_latency_seconds` / `silo_chunk_read_latency_seconds` —
   histograms of chunk put/get latency through the replication coordinator (use
   `histogram_quantile` for p50/p99).

@@ -19,6 +19,12 @@ import (
 var (
 	ErrNotFound  = errors.New("silo: chunk not found at this node — the chunk may live on a different replica or have been deleted; try another node, or restore from a healthy replica")
 	ErrInvalidID = errors.New("silo: chunk id is invalid — chunk ids must be 1-128 characters consisting of ASCII letters, digits, dashes, and underscores")
+	// ErrNoSpace is returned by Put when the data directory is at or above the
+	// hard disk watermark. The coordinator treats a refused replica as a failed
+	// ack (the write still completes on other replicas if quorum is met, and the
+	// scrubber heals this node once it has room); the gRPC layer maps it to
+	// codes.ResourceExhausted so clients can back off rather than retry-storm.
+	ErrNoSpace = errors.New("silo: node is at its disk high-watermark and is refusing new chunks — add capacity or drain this node; existing chunks are still served")
 )
 
 // Info carries both the plaintext and on-disk sizes so callers (the

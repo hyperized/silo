@@ -8,21 +8,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperized/silo/internal/diskpressure"
 	"github.com/hyperized/silo/internal/diskusage"
 	"github.com/hyperized/silo/internal/membership"
 )
 
 type fakeAdvertiser struct {
-	setCalls   int
-	lastCap    int64
-	lastUsed   int64
-	setChanged bool
-	nodes      []membership.Node
+	setCalls      int
+	lastCap       int64
+	lastUsed      int64
+	lastPressured bool
+	setChanged    bool
+	nodes         []membership.Node
 }
 
-func (f *fakeAdvertiser) SetSelfCapacity(capacityBytes, usedBytes int64) bool {
+func (f *fakeAdvertiser) SetSelfCapacity(capacityBytes, usedBytes int64, pressured bool) bool {
 	f.setCalls++
-	f.lastCap, f.lastUsed = capacityBytes, usedBytes
+	f.lastCap, f.lastUsed, f.lastPressured = capacityBytes, usedBytes, pressured
 	return f.setChanged
 }
 
@@ -70,6 +72,61 @@ func TestRebalancer_AdvertisesAndComputesSkew(t *testing.T) {
 	// skew = 0.90 - 0.10 = 0.80 (c is ignored).
 	if got := rebalMetric(t, r, "capacity_skew"); got < 0.79 || got > 0.81 {
 		t.Errorf("capacity_skew = %v, want ~0.80", got)
+	}
+}
+
+func TestRebalancer_DiskPressureEntersAndClears(t *testing.T) {
+	adv := &fakeAdvertiser{setChanged: true}
+	used := int64(0)
+	r := NewRebalancer(adv, "/data", time.Hour, rebalLogger(),
+		WithDiskThresholds(diskpressure.Thresholds{High: 0.85, Clear: 0.80, Hard: 0.95}),
+		WithRebalanceMeasure(func(string) (diskusage.Usage, error) {
+			return diskusage.Usage{CapacityBytes: 1000, UsedBytes: used}, nil
+		}))
+
+	// 50% full: no pressure.
+	used = 500
+	r.runOnce()
+	if adv.lastPressured || rebalMetric(t, r, "disk_pressure") != 0 {
+		t.Errorf("at 50%% there should be no pressure (flag=%v metric=%v)", adv.lastPressured, rebalMetric(t, r, "disk_pressure"))
+	}
+
+	// 90% full: enters pressure (>= high), advertised and gauged.
+	used = 900
+	r.runOnce()
+	if !adv.lastPressured || rebalMetric(t, r, "disk_pressure") != 1 {
+		t.Errorf("at 90%% the node should be pressured (flag=%v metric=%v)", adv.lastPressured, rebalMetric(t, r, "disk_pressure"))
+	}
+	// Two peers in the gossiped view are pressured; pressured_nodes counts them.
+	adv.nodes = []membership.Node{{ID: "a", Pressured: true}, {ID: "b"}, {ID: "c", Pressured: true}}
+	if got := rebalMetric(t, r, "pressured_nodes"); got != 2 {
+		t.Errorf("pressured_nodes = %v, want 2", got)
+	}
+
+	// 82% full: in the hysteresis band, pressure persists.
+	used = 820
+	r.runOnce()
+	if !adv.lastPressured {
+		t.Error("82%% is in the band; pressure should persist")
+	}
+
+	// 78% full: clears (<= clear).
+	used = 780
+	r.runOnce()
+	if adv.lastPressured || rebalMetric(t, r, "disk_pressure") != 0 {
+		t.Errorf("at 78%% pressure should clear (flag=%v metric=%v)", adv.lastPressured, rebalMetric(t, r, "disk_pressure"))
+	}
+}
+
+func TestRebalancer_PressureUnknownWithoutCapacity(t *testing.T) {
+	adv := &fakeAdvertiser{setChanged: true}
+	r := NewRebalancer(adv, "/data", time.Hour, rebalLogger(),
+		WithRebalanceMeasure(func(string) (diskusage.Usage, error) {
+			return diskusage.Usage{CapacityBytes: 0, UsedBytes: 0}, nil // not yet measured
+		}))
+	r.runOnce()
+	if adv.lastPressured {
+		t.Error("a node with no advertised capacity must not be flagged pressured")
 	}
 }
 

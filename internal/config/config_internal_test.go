@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hyperized/silo/internal/diskpressure"
 )
 
 // envMap turns a map into an EnvFunc for the tests below.
@@ -115,6 +117,48 @@ func TestLoad_BadTombstoneRetention(t *testing.T) {
 	}
 }
 
+func TestLoad_DiskThresholds(t *testing.T) {
+	// Custom valid thresholds are parsed and applied.
+	cfg, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":             "n",
+		"SILO_ENCRYPTION_KEY":      validBase64Key(t),
+		"SILO_DISK_PRESSURE_HIGH":  "0.90",
+		"SILO_DISK_PRESSURE_CLEAR": "0.85",
+		"SILO_DISK_PRESSURE_HARD":  "0.97",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DiskThresholds.High != 0.90 || cfg.DiskThresholds.Clear != 0.85 || cfg.DiskThresholds.Hard != 0.97 {
+		t.Errorf("DiskThresholds = %+v, want 0.90/0.85/0.97", cfg.DiskThresholds)
+	}
+}
+
+func TestLoad_DiskThresholdErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"high unparseable", map[string]string{"SILO_DISK_PRESSURE_HIGH": "lots"}, "SILO_DISK_PRESSURE_HIGH"},
+		{"clear unparseable", map[string]string{"SILO_DISK_PRESSURE_CLEAR": "lots"}, "SILO_DISK_PRESSURE_CLEAR"},
+		{"hard unparseable", map[string]string{"SILO_DISK_PRESSURE_HARD": "lots"}, "SILO_DISK_PRESSURE_HARD"},
+		{"invalid policy", map[string]string{"SILO_DISK_PRESSURE_CLEAR": "0.90"}, "must be below high"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"SILO_NODE_ID": "n", "SILO_ENCRYPTION_KEY": validBase64Key(t)}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+			_, err := Load(envMap(env))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoad_BadMaxClockSkew(t *testing.T) {
 	_, err := Load(envMap(map[string]string{
 		"SILO_NODE_ID":        "n",
@@ -207,6 +251,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		NodeKeyPath:         "/etc/silo/node.key",
 		CRLPath:             "/etc/silo/revoked.crl",
 		RequireTokens:       true,
+		DiskThresholds:      diskpressure.DefaultThresholds(),
 		CAExternal:          true,
 		CASeed:              true,
 		PrintBootstrapToken: true,

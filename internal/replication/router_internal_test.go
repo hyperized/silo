@@ -59,7 +59,7 @@ func TestRingSignatureChangesWithWeights(t *testing.T) {
 
 func TestRouter_WeightsRingByCapacity(t *testing.T) {
 	m, _ := membership.New("big", "big:7100", "big:7000")
-	m.SetSelfCapacity(4000, 0)
+	m.SetSelfCapacity(4000, 0, false)
 	m.Apply(membership.Event{ID: "small", Address: "small:7100", DataAddress: "small:7000", State: membership.StateAlive, Incarnation: 1, CapacityBytes: 1000})
 	r := NewRouter(m)
 

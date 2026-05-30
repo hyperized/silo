@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hyperized/silo/internal/diskpressure"
 	"github.com/hyperized/silo/internal/diskusage"
 	"github.com/hyperized/silo/internal/membership"
 	"github.com/hyperized/silo/internal/metrics"
@@ -20,7 +21,7 @@ const DefaultRebalanceInterval = 60 * time.Second
 // capacityAdvertiser is the slice of the membership table the rebalancer drives.
 // *membership.Membership satisfies it.
 type capacityAdvertiser interface {
-	SetSelfCapacity(capacityBytes, usedBytes int64) bool
+	SetSelfCapacity(capacityBytes, usedBytes int64, pressured bool) bool
 	Members() []membership.Node
 }
 
@@ -35,10 +36,12 @@ type Rebalancer struct {
 	dataDir  string
 	interval time.Duration
 	measure  func(path string) (diskusage.Usage, error)
+	pressure *diskpressure.Evaluator
 	logger   *slog.Logger
 
-	skew    atomic.Uint64 // float64 bits of the last computed used-fraction skew
-	adverts atomic.Int64
+	skew      atomic.Uint64 // float64 bits of the last computed used-fraction skew
+	adverts   atomic.Int64
+	pressured atomic.Bool // last evaluated soft DiskPressure condition, for the gauge
 
 	stop chan struct{}
 	done chan struct{}
@@ -53,6 +56,13 @@ func WithRebalanceMeasure(fn func(path string) (diskusage.Usage, error)) Rebalan
 	return func(r *Rebalancer) { r.measure = fn }
 }
 
+// WithDiskThresholds sets the disk high-watermark policy the rebalancer uses to
+// evaluate this node's soft DiskPressure condition. Defaults to
+// diskpressure.DefaultThresholds().
+func WithDiskThresholds(t diskpressure.Thresholds) RebalancerOption {
+	return func(r *Rebalancer) { r.pressure = diskpressure.NewEvaluator(t) }
+}
+
 // NewRebalancer builds the rebalancer for nodeID's data dir. A non-positive
 // interval falls back to DefaultRebalanceInterval.
 func NewRebalancer(members capacityAdvertiser, dataDir string, interval time.Duration, logger *slog.Logger, opts ...RebalancerOption) *Rebalancer {
@@ -64,6 +74,7 @@ func NewRebalancer(members capacityAdvertiser, dataDir string, interval time.Dur
 		dataDir:  dataDir,
 		interval: interval,
 		measure:  diskusage.Measure,
+		pressure: diskpressure.NewEvaluator(diskpressure.DefaultThresholds()),
 		logger:   logger,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
@@ -110,10 +121,34 @@ func (r *Rebalancer) Shutdown(ctx context.Context) error {
 func (r *Rebalancer) runOnce() {
 	if u, err := r.measure(r.dataDir); err != nil {
 		r.logger.Warn("rebalancer could not measure the data directory; will retry", "dir", r.dataDir, "error", err)
-	} else if r.members.SetSelfCapacity(u.CapacityBytes, u.UsedBytes) {
-		r.adverts.Add(1)
+	} else {
+		pressured := r.evaluatePressure(u)
+		if r.members.SetSelfCapacity(u.CapacityBytes, u.UsedBytes, pressured) {
+			r.adverts.Add(1)
+		}
 	}
 	r.skew.Store(math.Float64bits(clusterSkew(r.members.Members())))
+}
+
+// evaluatePressure folds the latest usage into the hysteretic DiskPressure
+// evaluator, logs on a transition so the condition is greppable, and records the
+// state for the gauge. A node that has not reported a positive capacity yet is
+// treated as un-pressured (no fraction to judge).
+func (r *Rebalancer) evaluatePressure(u diskusage.Usage) bool {
+	if u.CapacityBytes <= 0 {
+		return false
+	}
+	frac := float64(u.UsedBytes) / float64(u.CapacityBytes)
+	was := r.pressure.Pressured()
+	now := r.pressure.Update(frac)
+	if now && !was {
+		r.logger.Warn("node entered disk pressure; it stays in the placement ring and serves reads, but is near its high-watermark — add capacity or drain it",
+			"used_fraction", frac, "dir", r.dataDir)
+	} else if !now && was {
+		r.logger.Info("node cleared disk pressure", "used_fraction", frac, "dir", r.dataDir)
+	}
+	r.pressured.Store(now)
+	return now
 }
 
 // MetricPrefix namespaces the rebalancer's readings.
@@ -126,7 +161,28 @@ func (r *Rebalancer) CollectMetrics() []metrics.Metric {
 	return []metrics.Metric{
 		{Name: "capacity_skew", Help: "Used-fraction spread between the fullest and emptiest node (0 = balanced).", Kind: metrics.Gauge, Value: math.Float64frombits(r.skew.Load())},
 		{Name: "advertisements_total", Help: "Times this node has re-advertised its capacity over gossip.", Kind: metrics.Counter, Value: float64(r.adverts.Load())},
+		{Name: "disk_pressure", Help: "1 when this node is above the soft disk high-watermark (DiskPressure condition), else 0.", Kind: metrics.Gauge, Value: boolToFloat(r.pressured.Load())},
+		{Name: "pressured_nodes", Help: "Cluster members (this node's view, via gossip) currently signalling DiskPressure.", Kind: metrics.Gauge, Value: float64(pressuredNodes(r.members.Members()))},
 	}
+}
+
+// pressuredNodes counts members carrying the gossiped DiskPressure condition, so
+// any node's /metrics surfaces how many peers are near their high-watermark.
+func pressuredNodes(nodes []membership.Node) int {
+	n := 0
+	for _, m := range nodes {
+		if m.Pressured {
+			n++
+		}
+	}
+	return n
+}
+
+func boolToFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // clusterSkew is the difference between the highest and lowest used fraction

@@ -208,6 +208,8 @@ func mapStoreError(err error, chunkID string) error {
 		return status.Errorf(codes.NotFound, "chunk %q: %v", chunkID, err)
 	case errors.Is(err, chunkstore.ErrInvalidID):
 		return status.Errorf(codes.InvalidArgument, "%v", err)
+	case errors.Is(err, chunkstore.ErrNoSpace):
+		return status.Errorf(codes.ResourceExhausted, "chunk %q: %v", chunkID, err)
 	default:
 		return status.Errorf(codes.Internal, "chunk %q: %v", chunkID, err)
 	}

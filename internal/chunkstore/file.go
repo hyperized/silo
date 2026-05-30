@@ -26,13 +26,41 @@ const (
 type FileStore struct {
 	root   string
 	cipher *crypto.Cipher
+	guard  *diskGuard
+}
+
+// diskGuard is the hard-watermark write fence. usage reports the backing
+// filesystem's available and total bytes; Put refuses a write that would push
+// usage at or past hard. Injected as an Option so the store stays decoupled from
+// the diskusage package and tests can drive the fence deterministically.
+type diskGuard struct {
+	hard  float64
+	usage func() (availableBytes, capacityBytes int64, err error)
+}
+
+// Option configures a FileStore. Follows the functional-options pattern so the
+// disk guard (and future knobs) are opt-in without churning NewFileStore's
+// signature.
+type Option func(*FileStore)
+
+// WithDiskGuard refuses writes once the data filesystem reaches the hard
+// watermark (a fraction in (0,1]). usage returns the filesystem's available and
+// total bytes — wire it to diskusage.Measure(dataDir). A measurement error
+// fails open (the write is attempted) so a transient statfs hiccup cannot wedge
+// all writes; the absolute backstop is then the filesystem's own ENOSPC.
+func WithDiskGuard(hard float64, usage func() (availableBytes, capacityBytes int64, err error)) Option {
+	return func(s *FileStore) {
+		if hard > 0 && usage != nil {
+			s.guard = &diskGuard{hard: hard, usage: usage}
+		}
+	}
 }
 
 // NewFileStore creates the data directory if it does not exist and
 // fails fast on misconfiguration (missing cipher, non-writable root)
 // so the operator gets a startup error instead of a runtime failure on
 // the first Put.
-func NewFileStore(root string, cipher *crypto.Cipher) (*FileStore, error) {
+func NewFileStore(root string, cipher *crypto.Cipher, opts ...Option) (*FileStore, error) {
 	if cipher == nil {
 		return nil, errors.New("silo: chunkstore needs a non-nil *crypto.Cipher; build one with crypto.NewCipher(cfg.EncryptionKey)")
 	}
@@ -42,7 +70,11 @@ func NewFileStore(root string, cipher *crypto.Cipher) (*FileStore, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("could not create the chunk data directory %q (%w); check the path is on a writable filesystem and silod has permission", root, err)
 	}
-	return &FileStore{root: root, cipher: cipher}, nil
+	s := &FileStore{root: root, cipher: cipher}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 func (s *FileStore) path(id string) string {
@@ -59,6 +91,9 @@ func (s *FileStore) Put(_ context.Context, id string, data []byte) (Info, error)
 	if err != nil {
 		return Info{}, fmt.Errorf("could not encrypt chunk %q for storage (%w); see silod logs for details", id, err)
 	}
+	if err := s.checkSpace(int64(len(envelope))); err != nil {
+		return Info{}, err
+	}
 
 	final := s.path(id)
 	tmp := filepath.Join(s.root, id+tmpExt)
@@ -72,6 +107,26 @@ func (s *FileStore) Put(_ context.Context, id string, data []byte) (Info, error)
 		StoredBytes: int64(len(envelope)),
 		CreatedAt:   time.Now().UTC(),
 	}, nil
+}
+
+// checkSpace enforces the hard disk watermark before a write. It refuses the
+// chunk (ErrNoSpace) when storing it would push the data filesystem to or past
+// the hard fraction. With no guard configured, or when the measurement fails,
+// it allows the write — the filesystem's own ENOSPC is the ultimate backstop.
+func (s *FileStore) checkSpace(envelopeBytes int64) error {
+	if s.guard == nil {
+		return nil
+	}
+	avail, capacity, err := s.guard.usage()
+	if err != nil || capacity <= 0 {
+		return nil // fail open: never let a statfs hiccup wedge all writes
+	}
+	// Reserve = the bytes that must stay free to keep usage below hard.
+	reserve := int64(float64(capacity) * (1 - s.guard.hard))
+	if avail-envelopeBytes < reserve {
+		return fmt.Errorf("could not store chunk: %w (available %d B, reserve %d B of %d B capacity)", ErrNoSpace, avail, reserve, capacity)
+	}
+	return nil
 }
 
 // RawChunk returns the chunk's on-disk encrypted envelope as-is, without

@@ -98,6 +98,12 @@ type Node struct {
 	// tooling; zero means "not advertised yet".
 	CapacityBytes int64
 	UsedBytes     int64
+	// Pressured is the node's self-declared DiskPressure condition (the soft
+	// high-watermark). The node sets its own flag with hysteresis and gossips
+	// it, exactly as a kubelet sets its node condition; peers read it for
+	// operator visibility. It does not change placement (see
+	// internal/diskpressure for why).
+	Pressured bool
 }
 
 // Event is one gossiped claim about another node. Apply merges Event
@@ -113,6 +119,7 @@ type Event struct {
 	At            time.Time `json:"at,omitempty"`
 	CapacityBytes int64     `json:"capacity_bytes,omitempty"`
 	UsedBytes     int64     `json:"used_bytes,omitempty"`
+	Pressured     bool      `json:"pressured,omitempty"`
 }
 
 // Now is the clock the table reads to stamp LastChange. Production
@@ -189,19 +196,20 @@ func (m *Membership) SetSelfAddress(addr string) {
 	m.members[m.self] = cur
 }
 
-// SetSelfCapacity updates the local node's advertised backing-store capacity
-// and usage and bumps incarnation so peers accept the new figures. It reports
-// whether anything changed, so the caller can avoid re-advertising (and the
-// incarnation churn that brings) when usage has not moved meaningfully.
-func (m *Membership) SetSelfCapacity(capacityBytes, usedBytes int64) bool {
+// SetSelfCapacity updates the local node's advertised backing-store capacity,
+// usage, and DiskPressure condition and bumps incarnation so peers accept the
+// new figures. It reports whether anything changed, so the caller can avoid
+// re-advertising (and the incarnation churn that brings) when nothing moved.
+func (m *Membership) SetSelfCapacity(capacityBytes, usedBytes int64, pressured bool) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cur := m.members[m.self]
-	if cur.CapacityBytes == capacityBytes && cur.UsedBytes == usedBytes {
+	if cur.CapacityBytes == capacityBytes && cur.UsedBytes == usedBytes && cur.Pressured == pressured {
 		return false
 	}
 	cur.CapacityBytes = capacityBytes
 	cur.UsedBytes = usedBytes
+	cur.Pressured = pressured
 	cur.Incarnation++
 	cur.State = StateAlive
 	cur.LastChange = Now()
@@ -309,6 +317,7 @@ func (m *Membership) applyLocked(ev Event) (Node, bool) {
 			LastChange:    now,
 			CapacityBytes: ev.CapacityBytes,
 			UsedBytes:     ev.UsedBytes,
+			Pressured:     ev.Pressured,
 		}
 		m.members[ev.ID] = n
 		return n, true
@@ -348,6 +357,10 @@ func applyCapacity(n *Node, ev Event) {
 	if ev.CapacityBytes > 0 {
 		n.CapacityBytes = ev.CapacityBytes
 		n.UsedBytes = ev.UsedBytes
+		// Pressured rides with a real capacity advert (the owner sets both in
+		// the same SetSelfCapacity call), so it is only trusted alongside one —
+		// a bare state relay leaves the last-known condition untouched.
+		n.Pressured = ev.Pressured
 	}
 }
 
