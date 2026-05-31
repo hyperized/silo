@@ -2,6 +2,9 @@ apiVersion: 1
 
 datasources:
   - name: silo-prometheus
+    # Pinned so dashboards can reference the datasource by a stable uid rather
+    # than a provisioning-time random one (both bundled dashboards do).
+    uid: silo-prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090

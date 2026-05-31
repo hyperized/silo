@@ -455,7 +455,12 @@ for you.
 
 - **Liveness:** `GET http://<node>:7080/healthz`
 - **Metrics:** `GET http://<node>:7080/metrics` (Prometheus). The `make up` stack
-  scrapes all nodes and ships a Grafana dashboard (`:3030`, anonymous viewer).
+  scrapes all nodes and ships Grafana dashboards (`:3030`, anonymous viewer) in
+  the **silo** folder. **silo — overview** is the one to open: a row of
+  green/red health markers (nodes online, failed members, under-replication,
+  disk pressure, fullest disk, clock-skew and protocol-incompatibility alerts)
+  over per-subject graphs (membership, replication, storage, chunk I/O latency,
+  namespace convergence, clock, backup).
 
 Notable series:
 
