@@ -87,6 +87,34 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
   protocol. Surfacing protocol + per-peer compatibility through the status RPC
   would let an operator watch an upgrade converge without scraping `/metrics`.
 
+## Performance — measured floor, deferred follow-ups
+
+The data plane now has a benchmark baseline (`make bench`: AES-GCM
+encrypt/decrypt, the full-fsync chunk `Put`/`Get`, and the placement locator).
+What it established and what it leaves open:
+
+- **No cluster-level / end-to-end benchmarks.** The benchmarks are in-process
+  micro-benchmarks; write latency through the real network fan-out + remote
+  fsync + metadata RPC is analysed but not measured (needs a live multi-node
+  cluster, which this dev/CI environment can't boot — no Docker). A
+  loopback-cluster benchmark and a perf-regression gate in CI are future work.
+- **Remote-fetch reassembly allocates per frame.** `internal/replication/peers_grpc.go`
+  `Fetch` grows the chunk with `append` per 64 KiB frame (~64 reallocations per
+  4 MiB remote read) instead of pre-sizing from the Info frame. A clear, low-risk
+  win, left undone because it wasn't benchmarked — the in-process path doesn't
+  exercise it.
+- **Per-volume write serialization is by design, and is the main write ceiling.**
+  `volume.WriteAt` holds one `writeMu` across the whole read-modify-write, so
+  disjoint extents of the same volume can't be written concurrently. This is
+  inherent to the single-fenced-writer model; per-extent locking would lift it
+  but adds complexity and isn't planned.
+- **fsync-per-`Put`** (file + dir) is synchronous on the write path — correct for
+  crash consistency. Batching multiple chunk writes behind one fsync would raise
+  throughput at the cost of a wider durability window; not planned.
+- One floor *was* raised: `crypto.EncryptChunk` now seals in place rather than
+  copying the ciphertext into the envelope (+~34% encrypt throughput, allocations
+  halved). `DecryptChunk` was already single-allocation.
+
 ## Reserved-but-not-yet-enforced
 
 - **StorageClass parameters** `region-affinity` and `snapshot-retention` are

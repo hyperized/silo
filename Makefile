@@ -95,6 +95,9 @@ test-cover: ## Run unit tests and print coverage (excludes generated code).
 test-integration: ## Run integration tests (require docker, build-tag 'integration').
 	@go test $(GO_TEST_FLAGS) -tags=integration ./test/integration/...
 
+bench: ## Run the data-plane benchmarks (crypto, chunk store, placement).
+	@go test -run '^$$' -bench=. -benchmem ./internal/crypto/... ./internal/chunkstore/... ./internal/placement/...
+
 fuzz: ## Fuzz the parse/merge/placement boundaries on demand (override: make fuzz FUZZTIME=60s).
 	@go test -run='^$$' -fuzz='^FuzzReadMessage$$'  -fuzztime=$(FUZZTIME) ./internal/gossip/
 	@go test -run='^$$' -fuzz='^FuzzDecryptChunk$$' -fuzztime=$(FUZZTIME) ./internal/crypto/

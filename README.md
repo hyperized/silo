@@ -194,7 +194,7 @@ troubleshooting (the `nbd` module, lease takeover, sidecar RBAC) are in
 | Block volumes: extent map, fenced single-writer lease, NBD server, COW snapshots | ✅ |
 | **Kubernetes CSI driver** — provision, attach, mount, snapshot, clone; Helm chart | ✅ |
 | FUSE (RWX) filesystem surface — from-scratch protocol library, close-to-open | ✅ |
-| Observability/ops — Prometheus metrics, `siloctl status`, drain, capacity rebalance | ✅ |
+| Observability/ops — Prometheus metrics, **Grafana overview dashboard** (health markers + per-subject graphs), `siloctl status`, drain, capacity rebalance | ✅ |
 | Security hardening — cloud KMS keys (AWS/GCP/Azure), cert auto-rotation, CRL revocation, scoped capability tokens | ✅ |
 | Durability/upgrades — encrypted backup to S3/GCS/Azure, rolling-upgrade protocol handshake | ✅ |
 | nvme-tcp block transport | ⏳ v1.1 (kernel-bound) |
