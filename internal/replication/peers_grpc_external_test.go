@@ -39,7 +39,7 @@ func (errCoordinator) Stat(context.Context, string) (chunkstore.Info, error) {
 
 // startReplicaServer runs a real ChunkStore over insecure gRPC backed by a
 // fresh encrypted FileStore, returning its dial address and a stopper.
-func startReplicaServer(t *testing.T) string {
+func startReplicaServer(t testing.TB) string {
 	t.Helper()
 	key := make([]byte, crypto.ClusterKeyBytes)
 	if _, err := rand.Read(key); err != nil {

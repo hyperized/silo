@@ -31,6 +31,7 @@ type gossipNode struct {
 	httpAddr      string
 	bootstrapAddr string
 	gossipAddr    string
+	grpcAddr      string
 	dataDir       string
 	env           []string
 	logFile       string
@@ -46,7 +47,7 @@ type gossipNode struct {
 // that means seeds need explicit fingerprint pinning for production
 // but for an isolated three-process gossip test we can hand-roll a
 // shared CA via SILO_TLS_CA_CERT/_KEY.
-func startGossipNode(t *testing.T, bin string, id string, seeds []string, sharedCACert, sharedCAKey, encryptionKey string, isCASeed bool) *gossipNode {
+func startGossipNode(t testing.TB, bin string, id string, seeds []string, sharedCACert, sharedCAKey, encryptionKey string, isCASeed bool) *gossipNode {
 	t.Helper()
 	dataDir := t.TempDir()
 	httpAddr := freePort(t)
@@ -80,6 +81,7 @@ func startGossipNode(t *testing.T, bin string, id string, seeds []string, shared
 		httpAddr:      httpAddr,
 		bootstrapAddr: bootstrapAddr,
 		gossipAddr:    gossipAddr,
+		grpcAddr:      grpcAddr,
 		dataDir:       dataDir,
 		env:           env,
 		logFile:       filepath.Join(dataDir, "silod.log"),
@@ -88,7 +90,7 @@ func startGossipNode(t *testing.T, bin string, id string, seeds []string, shared
 	return node
 }
 
-func (n *gossipNode) spawn(t *testing.T, bin string) {
+func (n *gossipNode) spawn(t testing.TB, bin string) {
 	t.Helper()
 	cmd := exec.Command(bin)
 	cmd.Env = n.env
@@ -171,7 +173,7 @@ func (n *gossipNode) countStateChanges(targetID, state string) int {
 
 // buildSilod compiles cmd/silod and returns the binary path. Tests
 // re-use the binary across cases via a per-test sync.Once.
-func buildSilod(t *testing.T) string {
+func buildSilod(t testing.TB) string {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "silod")
 	cmd := exec.Command("go", "build", "-o", bin, "../../cmd/silod")
@@ -187,7 +189,7 @@ func buildSilod(t *testing.T) string {
 // three-node test can point every silod at the same material — the
 // gossip mTLS handshake fails otherwise (each silod would mint a
 // different self-signed CA).
-func mintSharedCA(t *testing.T, bin string) (caCertPath, caKeyPath, encryptionKey string) {
+func mintSharedCA(t testing.TB, bin string) (caCertPath, caKeyPath, encryptionKey string) {
 	t.Helper()
 	dir := t.TempDir()
 	caCertPath = filepath.Join(dir, "ca.crt")

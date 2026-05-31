@@ -19,7 +19,7 @@ GO_PKGS := ./...
 # `make fuzz FUZZTIME=60s` per target.
 FUZZTIME ?= 1000000x
 
-.PHONY: help up up-local down restart build images test test-cover test-integration fuzz lint fmt vet clean logs status check proto nbd-demo nbd-demo-vm
+.PHONY: help up up-local down restart build images test test-cover test-integration bench bench-cluster fuzz lint fmt vet clean logs status check proto nbd-demo nbd-demo-vm
 .DEFAULT_GOAL := up
 
 help: ## Show this help and exit.
@@ -129,8 +129,11 @@ test-cover: ## Run unit tests and print coverage (excludes generated code).
 test-integration: ## Run integration tests (require docker, build-tag 'integration').
 	@go test $(GO_TEST_FLAGS) -tags=integration ./test/integration/...
 
-bench: ## Run the data-plane benchmarks (crypto, chunk store, placement).
-	@go test -run '^$$' -bench=. -benchmem ./internal/crypto/... ./internal/chunkstore/... ./internal/placement/...
+bench: ## Run the data-plane benchmarks (crypto, chunk store, placement, peers).
+	@go test -run '^$$' -bench=. -benchmem ./internal/crypto/... ./internal/chunkstore/... ./internal/placement/... ./internal/replication/...
+
+bench-cluster: ## Run end-to-end cluster benchmarks (spawns 3 real silod processes; build-tag 'integration').
+	@go test -run='^$$' -bench='^BenchmarkCluster' -benchmem -timeout=10m -tags=integration ./test/integration/...
 
 fuzz: ## Fuzz the parse/merge/placement boundaries on demand (override: make fuzz FUZZTIME=60s).
 	@go test -run='^$$' -fuzz='^FuzzReadMessage$$'  -fuzztime=$(FUZZTIME) ./internal/gossip/

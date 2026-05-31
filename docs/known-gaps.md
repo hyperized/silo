@@ -89,20 +89,39 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
 
 ## Performance — measured floor, deferred follow-ups
 
-The data plane now has a benchmark baseline (`make bench`: AES-GCM
-encrypt/decrypt, the full-fsync chunk `Put`/`Get`, and the placement locator).
-What it established and what it leaves open:
+The data plane has two benchmark layers now:
 
-- **No cluster-level / end-to-end benchmarks.** The benchmarks are in-process
-  micro-benchmarks; write latency through the real network fan-out + remote
-  fsync + metadata RPC is analysed but not measured (needs a live multi-node
-  cluster, which this dev/CI environment can't boot — no Docker). A
-  loopback-cluster benchmark and a perf-regression gate in CI are future work.
-- **Remote-fetch reassembly allocates per frame.** `internal/replication/peers_grpc.go`
-  `Fetch` grows the chunk with `append` per 64 KiB frame (~64 reallocations per
-  4 MiB remote read) instead of pre-sizing from the Info frame. A clear, low-risk
-  win, left undone because it wasn't benchmarked — the in-process path doesn't
-  exercise it.
+- `make bench` — in-process micro-benchmarks: AES-GCM encrypt/decrypt, the
+  full-fsync chunk `Put`/`Get`, the placement locator, and the gRPC peer
+  Store/Fetch path against a real ChunkService over insecure loopback (the
+  remote-fetch hot path without the mTLS + network cost).
+- `make bench-cluster` — end-to-end benchmarks against a real 3-node silod
+  cluster spawned by the integration scaffold: quorum write fan-out, local +
+  cross-node reads (`SILO_REPLICATION=1` to force every Get through
+  `peers_grpc.Fetch`), the writer/reader SDK streaming path, namespace mkdir,
+  and the cheap `Stat` floor. Tagged `integration`; build-tag gated like the
+  rest of the integration suite.
+
+Headline numbers on an Apple M2 Pro (3-node loopback cluster, repl=3 except
+`CrossNode` which uses repl=1 to force every Get through `peers_grpc.Fetch`):
+
+| Bench | 4 KiB | 64 KiB | 4 MiB |
+|---|---|---|---|
+| `ChunkPut` (quorum write + remote fsync) | 17 ms | 15 ms | 22 ms / 191 MB/s |
+| `ChunkGet_Local` (local replica) | 128 µs | 239 µs / 274 MB/s | 5.0 ms / 842 MB/s |
+| `ChunkGet_CrossNode` (forced peer Fetch) | 246 µs | 447 µs / 147 MB/s | 40 ms / 105 MB/s |
+| `WriterSDK` (4 MiB stream, multi-chunk fan-out) | — | — | 25 ms / 166 MB/s |
+| `ReaderSDK` (4 MiB stream, manifest replay) | — | — | 5.0 ms / 847 MB/s |
+| `Stat` (metadata RPC) | 76 µs | — | — |
+| `NamespaceMkdir` (CRDT entry) | 1.0 ms | — | — |
+
+The fsync floor dominates ChunkPut at all sizes — there's no per-byte slope
+on the small chunks because both fsync(file) and fsync(dir) happen unconditionally.
+Cross-node reads are ~8× slower than local at 4 MiB on a single machine; on
+real hardware where the network and disk are separate, the gap narrows.
+
+What's still open:
+
 - **Per-volume write serialization is by design, and is the main write ceiling.**
   `volume.WriteAt` holds one `writeMu` across the whole read-modify-write, so
   disjoint extents of the same volume can't be written concurrently. This is
@@ -111,9 +130,19 @@ What it established and what it leaves open:
 - **fsync-per-`Put`** (file + dir) is synchronous on the write path — correct for
   crash consistency. Batching multiple chunk writes behind one fsync would raise
   throughput at the cost of a wider durability window; not planned.
-- One floor *was* raised: `crypto.EncryptChunk` now seals in place rather than
-  copying the ciphertext into the envelope (+~34% encrypt throughput, allocations
-  halved). `DecryptChunk` was already single-allocation.
+- **No perf-regression gate in CI yet.** Both bench targets run on demand; a
+  comparison harness that fails CI on a regression past a threshold is the
+  obvious next step but is not wired.
+
+Floors raised so far:
+
+- `crypto.EncryptChunk` now seals in place rather than copying the ciphertext
+  into the envelope (+~34% encrypt throughput, allocations halved).
+  `DecryptChunk` was already single-allocation.
+- `peers_grpc.Fetch` now pre-sizes the reassembly buffer from the Info frame
+  rather than `append`-ing per 64 KiB frame. Measured against the new in-process
+  Fetch bench (4 MiB chunk): −48% bytes allocated, −18% latency, +23%
+  throughput. Smaller chunks are unaffected (single frame).
 
 ## Reserved-but-not-yet-enforced
 

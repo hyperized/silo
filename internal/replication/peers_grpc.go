@@ -115,6 +115,12 @@ func (p *GRPCPeers) Fetch(ctx context.Context, addr, id string) ([]byte, chunkst
 	if err != nil {
 		return nil, chunkstore.Info{}, fmt.Errorf("replication: could not open a replica fetch from peer %s for chunk %q (%w)", addr, id, err)
 	}
+	// The server sends an Info frame first and then PlainBytes worth of
+	// data frames; pre-sizing the reassembly buffer from Info turns the
+	// ~PlainBytes/64KiB reallocations a naive `append` would do into a
+	// single allocation. Falls back to plain append if the server omits
+	// the Info frame or reports a non-positive size — defensive only,
+	// silod's server path always sends Info first.
 	var (
 		data []byte
 		info chunkstore.Info
@@ -130,6 +136,9 @@ func (p *GRPCPeers) Fetch(ctx context.Context, addr, id string) ([]byte, chunkst
 		switch body := msg.Body.(type) {
 		case *chunkv1.GetResponse_Info:
 			info = infoFromProto(body.Info)
+			if data == nil && info.PlainBytes > 0 {
+				data = make([]byte, 0, info.PlainBytes)
+			}
 		case *chunkv1.GetResponse_Data:
 			data = append(data, body.Data...)
 		}
