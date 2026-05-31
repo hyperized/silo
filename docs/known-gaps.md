@@ -92,9 +92,12 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
 The data plane has two benchmark layers now:
 
 - `make bench` — in-process micro-benchmarks: AES-GCM encrypt/decrypt, the
-  full-fsync chunk `Put`/`Get`, the placement locator, and the gRPC peer
+  full-fsync chunk `Put`/`Get`, the placement locator, the gRPC peer
   Store/Fetch path against a real ChunkService over insecure loopback (the
-  remote-fetch hot path without the mTLS + network cost).
+  remote-fetch hot path without the mTLS + network cost), and the volume
+  block-I/O layer over a real encrypted chunk store (the NBD per-extent
+  cost: copy-on-write + AES-GCM seal + fsync per extent for writes;
+  GetChunk + AES-GCM open per extent for reads).
 - `make bench-cluster` — end-to-end benchmarks against a real 3-node silod
   cluster spawned by the integration scaffold: quorum write fan-out, local +
   cross-node reads (`SILO_REPLICATION=1` to force every Get through
@@ -119,6 +122,21 @@ The fsync floor dominates ChunkPut at all sizes — there's no per-byte slope
 on the small chunks because both fsync(file) and fsync(dir) happen unconditionally.
 Cross-node reads are ~8× slower than local at 4 MiB on a single machine; on
 real hardware where the network and disk are separate, the gap narrows.
+
+Volume block-I/O (single-node, 64 KiB extent, same hardware):
+
+| Bench | Per op | Throughput |
+|---|---|---|
+| `WriteAt_AlignedFullExtent` (64 KiB) | 5.9 ms | 11 MB/s |
+| `WriteAt_SmallWriteHotExtent` (4 KiB into mapped extent) | 6.2 ms | 0.66 MB/s |
+| `ReadAt_Sequential` (64 KiB) | 38 µs | 1.7 GB/s |
+| `ReadAt_RandomSmall` (4 KiB random) | 40 µs | 104 MB/s |
+
+Writes are fsync-bound — a small write inside an extent costs nearly the
+same wall time as a full-extent aligned write because both seal exactly one
+new chunk. The small/random read pays full extent-decrypt cost per 4 KiB
+returned; that's the extent-amplification floor for read-heavy small-block
+workloads (OLTP, FS metadata).
 
 What's still open:
 
