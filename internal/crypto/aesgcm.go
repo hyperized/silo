@@ -92,16 +92,20 @@ func (c *Cipher) EncryptChunk(plaintext []byte) ([]byte, error) {
 	}
 
 	wrappedDEK := c.wrap.Seal(nil, wrapNonce, dek, nil)
-	ciphertext := newGCM(dek).Seal(nil, chunkNonce, plaintext, nil)
 
-	out := make([]byte, 0, HeaderBytes+len(ciphertext))
+	// Build the header, then seal the chunk directly onto its tail. Passing the
+	// header buffer as Seal's dst writes the ciphertext+tag in place — avoiding
+	// a separate full-chunk ciphertext allocation and the copy of it into the
+	// envelope. Capacity is exact (HeaderBytes + plaintext + tag), so the seal
+	// never reallocates.
+	out := make([]byte, 0, OverheadBytes+len(plaintext))
 	out = append(out, magic[:]...)
 	out = append(out, currentVersion)
 	out = append(out, 0, 0, 0)
 	out = append(out, wrapNonce...)
 	out = append(out, wrappedDEK...)
 	out = append(out, chunkNonce...)
-	out = append(out, ciphertext...)
+	out = newGCM(dek).Seal(out, chunkNonce, plaintext, nil)
 	return out, nil
 }
 
