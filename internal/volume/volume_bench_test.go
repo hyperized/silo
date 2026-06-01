@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	mathrand "math/rand/v2"
+	"sync"
 	"testing"
 
 	"github.com/hyperized/silo/internal/chunkstore"
@@ -50,8 +51,13 @@ func (c *fileChunks) PutChunk(ctx context.Context, id string, data []byte) error
 // I/O cost — extent slicing, COW pipeline, real chunk seal/fsync — without
 // dragging the CRDT namespace's gossip/anti-entropy machinery in. The
 // namespace surface is benched separately by ClusterNamespaceMkdir.
+//
+// The mutex matches the contract the real namespace satisfies: multiple
+// WriteExtents from a single WriteAt now run in parallel, so the metadata
+// store has to be safe for concurrent updates from one writer.
 type benchMeta struct {
 	size    int64
+	mu      sync.Mutex
 	extents map[uint64]string
 }
 
@@ -62,11 +68,15 @@ func newBenchMeta(extentSize int64) *benchMeta {
 func (m *benchMeta) ExtentSize(string) (int64, error) { return m.size, nil }
 
 func (m *benchMeta) Extent(_ string, idx uint64) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	id, ok := m.extents[idx]
 	return id, ok, nil
 }
 
 func (m *benchMeta) WriteExtent(_ string, idx uint64, id, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.extents[idx] = id
 	return nil
 }
@@ -140,6 +150,40 @@ func BenchmarkVolumeWriteAt_SmallWriteHotExtent(b *testing.B) {
 		if _, err := v.WriteAt(payload, off); err != nil {
 			b.Fatalf("WriteAt: %v", err)
 		}
+	}
+}
+
+// BenchmarkVolumeWriteAt_MultiExtent measures writes that span several
+// extents in one call. With a 64 KiB extent and a 1 MiB or 4 MiB write,
+// the loop dispatches 16 or 64 per-extent puts respectively — the path
+// that benefits from in-WriteAt parallelism. Aligned + full-extent so
+// the read-modify-write skip is hit on every iteration.
+func BenchmarkVolumeWriteAt_MultiExtent(b *testing.B) {
+	const extentSize = 64 << 10
+	for _, sz := range []struct {
+		name  string
+		bytes int
+	}{
+		{"1MiB", 1 << 20},
+		{"4MiB", 4 << 20},
+	} {
+		b.Run(sz.name, func(b *testing.B) {
+			v := openBenchVolume(b, extentSize)
+			payload := make([]byte, sz.bytes)
+			if _, err := rand.Read(payload); err != nil {
+				b.Fatalf("rand: %v", err)
+			}
+			b.SetBytes(int64(sz.bytes))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := range b.N {
+				// Step past the prior write so we keep hitting the
+				// "unmapped extent" fast path on every iteration.
+				if _, err := v.WriteAt(payload, int64(i)*int64(sz.bytes)); err != nil {
+					b.Fatalf("WriteAt: %v", err)
+				}
+			}
+		})
 	}
 }
 

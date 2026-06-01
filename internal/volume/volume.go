@@ -10,11 +10,21 @@ package volume
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
 	"github.com/hyperized/silo/internal/writer"
 )
+
+// writeAtParallelism caps the number of extent puts a single WriteAt
+// can have in flight at once. A 4 MiB streaming write at the default
+// 64 KiB extent already spans 64 extents; without a cap we'd fire 64
+// PutChunk+WriteExtent goroutines, and each one fans out to N replicas
+// — that's NxN replica RPCs from one syscall. The cap is loose, just
+// enough to keep the replication coordinator's per-peer queues from
+// piling up.
+var writeAtParallelism = max(2*runtime.GOMAXPROCS(0), 16)
 
 // newWriterID is the identity seam. Production derives a fresh writer id;
 // tests override it to exercise the entropy-failure path.
@@ -97,6 +107,12 @@ func (v *Volume) ReadAt(p []byte, off int64) (int, error) {
 // extent the write touches is rewritten as a fresh chunk and rebound. It
 // satisfies io.WriterAt. A write is fenced (ErrLeaseHeld) if holder no longer
 // holds the lease.
+//
+// A single WriteAt touches each extent at most once (the loop steps to the
+// next extent boundary each iteration), so the per-extent jobs are independent
+// — different chunk ids, different extent-map entries. Multi-extent writes
+// dispatch the per-extent work in parallel; the per-volume writeMu still
+// serializes WriteAt calls against each other.
 func (v *Volume) WriteAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, fmt.Errorf("volume: negative write offset %d", off)
@@ -104,31 +120,80 @@ func (v *Volume) WriteAt(p []byte, off int64) (int, error) {
 	v.writeMu.Lock()
 	defer v.writeMu.Unlock()
 
-	written := 0
-	for written < len(p) {
-		idx, within := v.locate(off + int64(written))
-		n := min(len(p)-written, int(v.extentSize)-within)
+	// Plan the jobs: one entry per extent the write touches. The plan
+	// is cheap (no IO) and lets us decide between the sequential path
+	// (single extent) and the parallel path (many extents) without
+	// duplicating logic.
+	type job struct {
+		idx    uint64
+		within int
+		nBytes int
+		srcOff int // offset into p
+	}
+	jobs := make([]job, 0, 4)
+	planned := 0
+	for planned < len(p) {
+		idx, within := v.locate(off + int64(planned))
+		n := min(len(p)-planned, int(v.extentSize)-within)
+		jobs = append(jobs, job{idx: idx, within: within, nBytes: n, srcOff: planned})
+		planned += n
+	}
 
+	writeOne := func(j job) error {
 		extent := make([]byte, v.extentSize)
-		if within != 0 || n != int(v.extentSize) {
-			// Partial extent: read the current contents before overlaying, so
-			// the bytes outside the written range are preserved.
-			cur, err := v.extentBytes(idx)
+		if j.within != 0 || j.nBytes != int(v.extentSize) {
+			// Partial extent: read the current contents before overlaying,
+			// so the bytes outside the written range are preserved.
+			cur, err := v.extentBytes(j.idx)
 			if err != nil {
-				return written, err
+				return err
 			}
 			copy(extent, cur)
 		}
-		copy(extent[within:within+n], p[written:written+n])
+		copy(extent[j.within:j.within+j.nBytes], p[j.srcOff:j.srcOff+j.nBytes])
 
 		id := writer.ChunkID(v.writerID, 0, v.counter.Add(1)-1)
 		if err := v.chunks.PutChunk(v.ctx, id, extent); err != nil {
+			return err
+		}
+		return v.meta.WriteExtent(v.path, j.idx, id, v.holder)
+	}
+
+	// Single-extent writes (the common case for small block IO) skip
+	// the goroutine + semaphore machinery entirely.
+	if len(jobs) == 1 {
+		if err := writeOne(jobs[0]); err != nil {
+			return 0, err
+		}
+		return jobs[0].nBytes, nil
+	}
+
+	errs := make([]error, len(jobs))
+	sem := make(chan struct{}, writeAtParallelism)
+	var wg sync.WaitGroup
+	for i, j := range jobs {
+		wg.Add(1)
+		sem <- struct{}{} // bound in-flight extent puts
+		go func(i int, j job) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			errs[i] = writeOne(j)
+		}(i, j)
+	}
+	wg.Wait()
+
+	// Report the longest contiguous prefix that succeeded. A later job
+	// past a failure may have persisted its WriteExtent before the
+	// failure surfaced; readers will see that new chunk through the
+	// extent map, but the caller can't tell from a partial-write return
+	// value alone — so we treat anything after the first error as
+	// "indeterminate" by io.WriterAt's contract.
+	written := 0
+	for i, err := range errs {
+		if err != nil {
 			return written, err
 		}
-		if err := v.meta.WriteExtent(v.path, idx, id, v.holder); err != nil {
-			return written, err
-		}
-		written += n
+		written += jobs[i].nBytes
 	}
 	return written, nil
 }
