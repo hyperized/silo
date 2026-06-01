@@ -9,10 +9,10 @@ import (
 
 type errMeta struct{}
 
-func (errMeta) ExtentSize(string) (int64, error)                          { return 4096, nil }
-func (errMeta) Extent(string, uint64) (string, bool, error)               { return "", false, nil }
-func (errMeta) WriteExtent(string, uint64, string, string) error          { return nil }
-func (errMeta) WriteExtents(string, []uint64, []string, string) error     { return nil }
+func (errMeta) ExtentSize(string) (int64, error)                      { return 4096, nil }
+func (errMeta) Extent(string, uint64) (string, bool, error)           { return "", false, nil }
+func (errMeta) WriteExtent(string, uint64, string, string) error      { return nil }
+func (errMeta) WriteExtents(string, []uint64, []string, string) error { return nil }
 
 func TestOpen_EntropyFailure(t *testing.T) {
 	prev := newWriterID
