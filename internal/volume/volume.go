@@ -32,10 +32,18 @@ var newWriterID = writer.NewWriterID
 
 // Metadata is the slice of the namespace a volume's block I/O needs. The
 // namespace satisfies it.
+//
+// WriteExtents is the batch counterpart of WriteExtent and is what the
+// parallel WriteAt path uses to coalesce 64-ish per-extent rebinds (a 4 MiB
+// write at the default 64 KiB extent) into one lock + one persist on the
+// namespace side. Implementations whose persist step is cheap may forward
+// WriteExtents to WriteExtent in a loop; the production namespace coalesces.
+// indexes and chunkIDs are positionally paired.
 type Metadata interface {
 	ExtentSize(path string) (int64, error)
 	Extent(path string, index uint64) (chunkID string, mapped bool, err error)
 	WriteExtent(path string, index uint64, chunkID, holder string) error
+	WriteExtents(path string, indexes []uint64, chunkIDs []string, holder string) error
 }
 
 // Chunks reads and writes whole chunks by id, in plaintext. A node's
@@ -139,36 +147,39 @@ func (v *Volume) WriteAt(p []byte, off int64) (int, error) {
 		planned += n
 	}
 
-	writeOne := func(j job) error {
+	// Single-extent writes (the common case for small block IO) skip the
+	// goroutine + semaphore machinery entirely and use the single-WriteExtent
+	// fast path.
+	if len(jobs) == 1 {
+		j := jobs[0]
 		extent := make([]byte, v.extentSize)
 		if j.within != 0 || j.nBytes != int(v.extentSize) {
-			// Partial extent: read the current contents before overlaying,
-			// so the bytes outside the written range are preserved.
 			cur, err := v.extentBytes(j.idx)
 			if err != nil {
-				return err
+				return 0, err
 			}
 			copy(extent, cur)
 		}
 		copy(extent[j.within:j.within+j.nBytes], p[j.srcOff:j.srcOff+j.nBytes])
-
 		id := writer.ChunkID(v.writerID, 0, v.counter.Add(1)-1)
 		if err := v.chunks.PutChunk(v.ctx, id, extent); err != nil {
-			return err
-		}
-		return v.meta.WriteExtent(v.path, j.idx, id, v.holder)
-	}
-
-	// Single-extent writes (the common case for small block IO) skip
-	// the goroutine + semaphore machinery entirely.
-	if len(jobs) == 1 {
-		if err := writeOne(jobs[0]); err != nil {
 			return 0, err
 		}
-		return jobs[0].nBytes, nil
+		if err := v.meta.WriteExtent(v.path, j.idx, id, v.holder); err != nil {
+			return 0, err
+		}
+		return j.nBytes, nil
 	}
 
-	errs := make([]error, len(jobs))
+	// Multi-extent parallel path: each worker only does its own chunk Put;
+	// the metadata rebind for every successful job is coalesced into a single
+	// WriteExtents at the end so the namespace lock + persist is paid once
+	// instead of len(jobs) times.
+	type result struct {
+		chunkID string
+		err     error
+	}
+	results := make([]result, len(jobs))
 	sem := make(chan struct{}, writeAtParallelism)
 	var wg sync.WaitGroup
 	for i, j := range jobs {
@@ -177,25 +188,55 @@ func (v *Volume) WriteAt(p []byte, off int64) (int, error) {
 		go func(i int, j job) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			errs[i] = writeOne(j)
+			extent := make([]byte, v.extentSize)
+			if j.within != 0 || j.nBytes != int(v.extentSize) {
+				cur, err := v.extentBytes(j.idx)
+				if err != nil {
+					results[i] = result{err: err}
+					return
+				}
+				copy(extent, cur)
+			}
+			copy(extent[j.within:j.within+j.nBytes], p[j.srcOff:j.srcOff+j.nBytes])
+			id := writer.ChunkID(v.writerID, 0, v.counter.Add(1)-1)
+			if err := v.chunks.PutChunk(v.ctx, id, extent); err != nil {
+				results[i] = result{err: err}
+				return
+			}
+			results[i] = result{chunkID: id}
 		}(i, j)
 	}
 	wg.Wait()
 
-	// Report the longest contiguous prefix that succeeded. A later job
-	// past a failure may have persisted its WriteExtent before the
-	// failure surfaced; readers will see that new chunk through the
-	// extent map, but the caller can't tell from a partial-write return
-	// value alone — so we treat anything after the first error as
-	// "indeterminate" by io.WriterAt's contract.
-	written := 0
-	for i, err := range errs {
-		if err != nil {
-			return written, err
+	// Walk the results in order, collecting the longest contiguous prefix
+	// that succeeded. Anything past the first error is "indeterminate" by
+	// the io.WriterAt contract — a later worker may have persisted its chunk
+	// but we never rebind an extent to it, so the chunk is unreferenced and
+	// left for GC.
+	var (
+		indexes  []uint64
+		chunkIDs []string
+		written  int
+		firstErr error
+	)
+	for i, r := range results {
+		if r.err != nil {
+			firstErr = r.err
+			break
 		}
+		indexes = append(indexes, jobs[i].idx)
+		chunkIDs = append(chunkIDs, r.chunkID)
 		written += jobs[i].nBytes
 	}
-	return written, nil
+	if len(indexes) > 0 {
+		if err := v.meta.WriteExtents(v.path, indexes, chunkIDs, v.holder); err != nil {
+			// Metadata batch failed: none of the chunks are visible to a
+			// reader (no extents rebound). The chunk Puts that did complete
+			// are unreferenced and left for GC.
+			return 0, err
+		}
+	}
+	return written, firstErr
 }
 
 // locate maps an absolute byte offset to its extent index and the offset

@@ -81,6 +81,15 @@ func (m *benchMeta) WriteExtent(_ string, idx uint64, id, _ string) error {
 	return nil
 }
 
+func (m *benchMeta) WriteExtents(_ string, indexes []uint64, ids []string, _ string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, idx := range indexes {
+		m.extents[idx] = ids[i]
+	}
+	return nil
+}
+
 // openBenchVolume opens a Volume backed by a real encrypted chunk store
 // and an in-memory metadata sized to extentSize.
 func openBenchVolume(b *testing.B, extentSize int64) *volume.Volume {

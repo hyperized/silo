@@ -96,6 +96,21 @@ func (m *fakeMeta) WriteExtent(_ string, idx uint64, id, _ string) error {
 	return nil
 }
 
+func (m *fakeMeta) WriteExtents(_ string, indexes []uint64, ids []string, _ string) error {
+	if m.writeErr != nil {
+		return m.writeErr
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.extents == nil {
+		m.extents = map[uint64]string{}
+	}
+	for i, idx := range indexes {
+		m.extents[idx] = ids[i]
+	}
+	return nil
+}
+
 func (m *fakeMeta) set(idx uint64, id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

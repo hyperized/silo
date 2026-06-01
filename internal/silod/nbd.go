@@ -20,6 +20,7 @@ type nsVolumes interface {
 	ExtentSize(path string) (int64, error)
 	Extent(path string, index uint64) (string, bool, error)
 	WriteExtent(path string, index uint64, chunkID, holder string) error
+	WriteExtents(path string, indexes []uint64, chunkIDs []string, holder string) error
 	Size(path string) (int64, error)
 	AcquireLease(path, holder string) (namespace.Lease, error)
 	ReleaseLease(path, holder string) error

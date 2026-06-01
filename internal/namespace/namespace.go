@@ -580,6 +580,40 @@ func (n *Namespace) WriteExtent(path string, index uint64, chunkID, holder strin
 	return nil
 }
 
+// WriteExtents rebinds many extents in one atomic batch: one lock acquisition,
+// one persistLocked instead of one per call. Used by the block-I/O layer when
+// a single WriteAt spans multiple extents — the parallel per-extent loop now
+// fires PutChunk calls concurrently, so coalescing the metadata side keeps the
+// namespace from becoming the new bottleneck. All updates share one HLC; the
+// CRDT merge logic compares timestamps per extent index so concurrent peers
+// converge identically whether they see the updates as one batch or many.
+//
+// indexes and chunkIDs are positionally paired; their lengths must match.
+// An empty batch is a successful no-op (no persist).
+func (n *Namespace) WriteExtents(path string, indexes []uint64, chunkIDs []string, holder string) error {
+	if len(indexes) != len(chunkIDs) {
+		return fmt.Errorf("namespace: WriteExtents needs paired slices, got %d indexes and %d chunk ids", len(indexes), len(chunkIDs))
+	}
+	if len(indexes) == 0 {
+		return nil
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return err
+	}
+	if vol.lease.Value != holder {
+		return fmt.Errorf("namespace: %q is held by %s, not %q; only the lease holder may write: %w", path, leaseHolderName(vol.lease.Value), holder, ErrLeaseHeld)
+	}
+	ts := n.clock.Now()
+	for i, idx := range indexes {
+		vol.extents.Set(idx, chunkIDs[i], ts)
+	}
+	n.persistLocked()
+	return nil
+}
+
 // Extent returns the chunk id backing the extent at index of the volume at
 // path, and whether that extent is mapped. An unmapped extent reads as zeros.
 // This is the per-block lookup the block-I/O path uses, avoiding a full

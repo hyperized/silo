@@ -55,9 +55,10 @@ func (n *fakeNS) ExtentSize(string) (int64, error) {
 	}
 	return 4096, nil
 }
-func (n *fakeNS) Extent(string, uint64) (string, bool, error)      { return "", false, nil }
-func (n *fakeNS) WriteExtent(string, uint64, string, string) error { return nil }
-func (n *fakeNS) Size(string) (int64, error)                       { return n.size, n.sizeErr }
+func (n *fakeNS) Extent(string, uint64) (string, bool, error)             { return "", false, nil }
+func (n *fakeNS) WriteExtent(string, uint64, string, string) error        { return nil }
+func (n *fakeNS) WriteExtents(string, []uint64, []string, string) error   { return nil }
+func (n *fakeNS) Size(string) (int64, error)                              { return n.size, n.sizeErr }
 func (n *fakeNS) AcquireLease(string, string) (namespace.Lease, error) {
 	return namespace.Lease{}, n.acquireErr
 }
