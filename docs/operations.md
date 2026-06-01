@@ -5,6 +5,8 @@ deployment topologies, how credentials and encryption work, and how to diagnose
 the common problems. For the Kubernetes CSI driver specifically, see
 [kubernetes.md](kubernetes.md).
 
+**Jump to:** [Configuration](#configuration) · [Deployment paths](#deployment-paths) · [Operator credentials](#claiming-operator-credentials) · [Capacity rebalancing](#capacity-rebalancing) · [Backups](#backups) · [Draining a node](#draining-a-node) · [Rolling upgrades](#rolling-upgrades) · [Block volumes (NBD)](#block-volumes-over-nbd) · [Health & metrics](#health--metrics) · [Troubleshooting](#troubleshooting)
+
 ---
 
 ## Configuration

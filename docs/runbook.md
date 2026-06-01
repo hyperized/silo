@@ -10,6 +10,8 @@ The throughline: **silo is recoverable by default — no protocol step needs a h
 to break a tie — but two things are not recoverable, and the checklist exists to
 protect them: the cluster encryption key and the CA key.**
 
+**Jump to:** [Pre-production checklist](#pre-production-checklist) · [Golden-signal alerts](#alerts-the-golden-signals) · [Failure-recovery playbooks](#failure-recovery-playbooks) · [Routine procedures](#routine-procedures-index)
+
 ---
 
 ## Pre-production checklist

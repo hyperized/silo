@@ -7,6 +7,8 @@ node, no metadata tier, no quorum to lose, no rebalance ceremony. It gives your
 pods `ReadWriteOnce` volumes through an ordinary `PersistentVolumeClaim` — and
 heals itself through network partitions without paging you.
 
+**Jump to:** [Why silo](#why-silo) · [How it works](#how-it-works-in-30-seconds) · [Try locally](#try-it-in-5-minutes-local) · [Deploy](#deploy) · [Kubernetes](#use-it-on-kubernetes) · [vs Ceph](#performance-trade-offs-vs-ceph) · [What works today](#what-works-today) · [Docs](#documentation) · [Build from source](#building-from-source)
+
 ---
 
 ## Why silo
@@ -26,7 +28,7 @@ understanding placement groups. silo is built around the opposite bet.
 silo deliberately trades a few things for this simplicity: volumes are
 `ReadWriteOnce` (single fenced writer), the filesystem surface is close-to-open
 coherent (NFS-style), and there's no erasure coding yet. If you need RWX today or
-EC, silo isn't there yet — see [Out of scope](PLAN.md#10-out-of-scope-v1).
+EC, silo isn't there yet — see [docs/known-gaps.md](docs/known-gaps.md).
 
 ---
 
@@ -277,7 +279,6 @@ make nbd-demo-vm   # boots a throwaway aarch64 Linux guest under QEMU with the
 - **[docs/operations.md](docs/operations.md)** — operator guide: configuration reference, deployment topologies, mTLS/credentials, NBD, troubleshooting
 - **[docs/runbook.md](docs/runbook.md)** — production readiness checklist, golden-signal alerts, and failure-recovery playbooks
 - **[docs/threat-model.md](docs/threat-model.md)** — what silo defends against, how, and the current security edges
-- **[PLAN.md](PLAN.md)** — full design, decisions, milestones, and scope
 - **[docs/known-gaps.md](docs/known-gaps.md)** — what's not finished yet and why (deferred work, kernel-bound seams)
 - **[deploy/helm/silo-csi/README.md](deploy/helm/silo-csi/README.md)** — chart reference
 - **[.env.example](.env.example)** — annotated `silod` configuration
@@ -302,8 +303,6 @@ Requirements: Go 1.25+, and Docker for the local cluster and image builds.
 - **Recoverable by default** — no protocol step requires a human to break a tie.
 - **Errors are instructions** — every error tells you what to do next, not just what broke.
 - **Stdlib-first** — external dependencies require justification (the FUSE protocol and the CSI bindings are built/vendored in-tree, not pulled as libraries).
-
-See [PLAN.md §1](PLAN.md#1-design-principles) for the full set.
 
 ## License
 

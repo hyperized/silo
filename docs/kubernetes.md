@@ -6,6 +6,8 @@ actually go wrong on day one.
 
 If you just want the happy path, jump to [Install](#install).
 
+**Jump to:** [What gets deployed](#what-gets-deployed) · [Prerequisites](#prerequisites) · [Install](#install) · [Provision a volume](#provision-a-volume) · [Snapshots](#snapshots) · [Mutual TLS](#mutual-tls-to-silod) · [Troubleshooting](#troubleshooting) · [Uninstall](#uninstall)
+
 ---
 
 ## What gets deployed
@@ -113,7 +115,7 @@ writer at a time).
 ```yaml
 parameters:
   chunk-size: "4Mi"          # copy-on-write extent size — honoured today
-  replicas: "3"              # reserved (placement lands in M9)
+  replicas: "3"              # reserved (richer placement deferred)
   region-affinity: ""        # reserved
   snapshot-retention: "24h"  # reserved
 ```

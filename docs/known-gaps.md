@@ -1,8 +1,9 @@
 # Known gaps & deferred work
 
 A running, honest list of what is *not* finished, why, and what it would take to
-close. Kept current as milestones land. For the milestone roadmap see
-[PLAN.md](../PLAN.md).
+close. Kept current as the work lands.
+
+**Jump to:** [Real-host validation](#needs-validation-on-a-real-linux-host) · [FUSE opcodes](#fuse-opcodes-not-yet-implemented) · [Backup & transports](#backup-transports-and-observability--deferred) · [Operations & security](#operations-and-security--deferred) · [Performance](#performance--measured-floor-deferred-follow-ups) · [Reserved parameters](#reserved-but-not-yet-enforced)
 
 ## Needs validation on a real Linux host
 
@@ -16,40 +17,40 @@ environment has no `/dev/fuse`, no mount privileges, and no kernel nvme-tcp.
   mount. To close: run `silo-fuse <dir>` against a `make up` cluster on a host
   with the `fuse` module and `CAP_SYS_ADMIN`, then run the fstest suite.
 
-## M8 — FUSE: opcodes not yet implemented
+## FUSE: opcodes not yet implemented
 
-The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
+The library covers the **core** opcodes. Deferred:
 
 - `RENAME`, `SYMLINK`, `READLINK`, `LINK`, `FSYNC`, `STATFS`, `INTERRUPT`,
   extended attributes (`GETXATTR`/`SETXATTR`/`LISTXATTR`/`REMOVEXATTR`).
-- `SiloFS` therefore has no rename (the plan lists rename as best-effort).
-- Performance hardening (F3): worker-pool dispatch (requests are served
+- `SiloFS` therefore has no rename (best-effort, deferred).
+- Performance hardening: worker-pool dispatch (requests are served
   sequentially today), zero-copy/splice, readahead/writeback caching modes,
   `FUSE_PASSTHROUGH`.
 - fstest conformance suite (gated on a real mount, above).
 
-## M9 — deferred
+## Backup, transports, and observability — deferred
 
 - **Automated restore.** Backup *export* ships (encrypted chunks + namespace to
   local/S3/GCS/Azure, `SILO_BACKUP_TARGET`); restoring is a manual procedure
   today (recreate the data dir from the export, start with the same cluster
   key). A `siloctl restore` command is future work.
 - **nvme-tcp target.** An alternative block transport to NBD. Deferred to a
-  dedicated effort on a host with a kernel nvme-tcp initiator — it is the plan's
-  largest kernel-bound piece and is **v1.1-scoped** (`PLAN.md` decision #6). The
-  pure NVMe/TCP PDU codec could be built and unit-tested first (as the FUSE
-  protocol layer was), with the kernel round-trip validated on a real host.
+  dedicated effort on a host with a kernel nvme-tcp initiator — it is the
+  largest kernel-bound piece and is **v1.1-scoped**. The pure NVMe/TCP PDU
+  codec could be built and unit-tested first (as the FUSE protocol layer was),
+  with the kernel round-trip validated on a real host.
 - **Data-key cache hit-rate metric.** silod currently unwraps each chunk's data
   key on demand; there is no DEK cache to measure. Closing this is two steps:
   add a wrapped-DEK cache in `internal/crypto`, then expose
   `silo_crypto_datakey_cache_{hits,misses}_total`. (The *cluster*-key source is
   done — static/file/AWS-KMS/GCP-KMS/Azure-KV; this is the per-chunk DEK cache.)
-- **Replication "queue depth" metric.** The plan lists it; today the equivalent
-  health signal is `silo_replication_shortfall_chunks` (under-replicated count).
-  A true in-flight re-replication queue gauge would require instrumenting the
+- **Replication "queue depth" metric.** Today the equivalent health signal is
+  `silo_replication_shortfall_chunks` (under-replicated count). A true
+  in-flight re-replication queue gauge would require instrumenting the
   scrubber's work queue.
 
-## M10 — deferred
+## Operations and security — deferred
 
 - **Retroactive migration / GC off a pressured node.** Disk-pressure steering
   (`SILO_DISK_PRESSURE_STEERING`, default on) stops *new* chunks from landing on
@@ -80,7 +81,7 @@ The library covers the **core (F1)** opcodes. Deferred (FUSE track F2/F3):
   (`chunk:write`), not by resource — there is no "write only under /tenant-a" or
   "attach only volume X" yet, and no RBAC mapped to namespace ACLs. Tokens also
   cannot be revoked individually before expiry (rely on short TTLs, or rotate the
-  CA). Per-resource scoping and a token denylist are roadmapped (M10/U5).
+  CA). Per-resource scoping and a token denylist are roadmapped.
 - **Protocol version in the status RPC.** The rolling-upgrade handshake exposes
   each node's protocol via `silo_gossip_protocol_version` (and fences too-old
   peers), but `siloctl status` reports only the build semver, not the wire

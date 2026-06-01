@@ -5,6 +5,8 @@ the implementation — when something is not yet enforced it says so and links t
 [known-gaps.md](known-gaps.md). For operational how-tos see
 [operations.md](operations.md).
 
+**Jump to:** [Assets](#assets) · [Trust boundaries](#trust-boundaries) · [Threats & mitigations](#threats-and-mitigations) · [Authorization](#authorization-current-limits) · [Operator responsibilities](#operator-responsibilities) · [Out of scope](#out-of-scope-today)
+
 ## Assets
 
 1. **Tenant data** — the bytes in files and block volumes.
@@ -110,7 +112,7 @@ operator, `spiffe://silo/client/`) are token-scoped.
 Limits that remain: capabilities are **operation classes, not resources** — a
 token grants `chunk:write` cluster-wide, not "write under /tenant-a". Per-resource
 scoping (path-prefix / per-volume) and RBAC mapped to namespace ACLs are
-roadmapped (M10/U5). When `SILO_REQUIRE_TOKENS` is off (the default), mTLS
+roadmapped. When `SILO_REQUIRE_TOKENS` is off (the default), mTLS
 membership alone authorises every call — treat a cluster cert as all-or-nothing,
 and use revocation (above) to take access away.
 
