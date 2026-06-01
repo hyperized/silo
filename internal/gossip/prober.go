@@ -117,20 +117,25 @@ func (s *Subsystem) runProbeTick(tracker *suspectTracker) {
 func (s *Subsystem) probeDirect(target, addr string) bool {
 	conn, err := s.dialer.Dial(addr, s.opts.ClientTLS, s.opts.ProbeTimeout)
 	if err != nil {
+		s.logger.Debug("gossip probe dial failed", "target", target, "addr", addr, "err", err)
 		return false
 	}
 	defer func() { _ = conn.Close() }()
 	if err := applyTimeouts(conn, s.opts.ProbeTimeout); err != nil {
+		s.logger.Debug("gossip probe set deadline failed", "target", target, "err", err)
 		return false
 	}
 	if err := writeMessage(conn, s.selfEnvelope(KindPing, target)); err != nil {
+		s.logger.Debug("gossip probe write failed", "target", target, "err", err)
 		return false
 	}
 	resp, err := readMessage(conn)
 	if err != nil {
+		s.logger.Debug("gossip probe read failed", "target", target, "err", err)
 		return false
 	}
 	if resp.Kind != KindAck {
+		s.logger.Debug("gossip probe non-ack", "target", target, "kind", string(resp.Kind))
 		return false
 	}
 	s.applyIncoming(resp)
