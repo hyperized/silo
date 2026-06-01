@@ -348,7 +348,8 @@ add capacity or drain.
 Set `SILO_BACKUP_TARGET` and each node periodically exports its **encrypted
 chunks** (copied as-is, still AES-GCM under the cluster key) and its **namespace
 snapshot** to object storage. `SILO_BACKUP_INTERVAL` (a Go duration) paces it
-(default 6h).
+(default 6h, first export fires one interval after boot so a crash-loop cannot
+stampede the bucket).
 
 | Target URL | Backend |
 |---|---|
@@ -357,21 +358,170 @@ snapshot** to object storage. `SILO_BACKUP_INTERVAL` (a Go duration) paces it
 | `gs://bucket/prefix` | Google Cloud Storage |
 | `az://account/container/prefix` | Azure Blob |
 
-Cloud credentials come from each provider's standard chain. The namespace is a
-CRDT replicated to every node, so any node's snapshot is the cluster manifest;
-chunks are node-local, so a **full backup is the union of every node's chunk
-export** — point every node at the same bucket (different `namespace/<node>.json`
-keys keep them from colliding).
+Cloud credentials come from each provider's standard chain — no silo-specific
+credential env vars. The namespace is a CRDT replicated to every node, so any
+node's snapshot is the cluster manifest; chunks are node-local, so a **full
+cluster backup is the union of every node's chunk export** — point every node
+at the **same** bucket+prefix and they will not collide (each node namespaces
+its snapshot by `SILO_NODE_ID`; chunk IDs are content-addressed so two nodes
+holding the same chunk overwrite the same key with identical bytes).
 
-```sh
-export SILO_BACKUP_TARGET=s3://my-backups/silo \
-       SILO_BACKUP_INTERVAL=1h
+### Object layout
+
+Inside the prefix the exporter writes two flat directories:
+
+```
+<prefix>/
+  namespace/<node-id>.json   # one per node, the CRDT snapshot
+  chunks/<chunk-id>          # encrypted chunks, content-addressed
 ```
 
-Watch `silo_backup_runs_total`, `silo_backup_failures_total`, and
-`silo_backup_last_chunks`. Restore from a backup (recreate the data dir from the
-exported chunks + namespace, then start silod with the same cluster key) is an
-operator-driven procedure today; an automated restore command is roadmapped.
+A new chunk is only added; an existing chunk is overwritten with the same
+bytes. Deletion is **not** propagated to the bucket — see [lifecycle](#bucket-lifecycle-cost)
+below for keeping it bounded.
+
+### AWS S3
+
+1. Create the bucket (any region; pick one close to your nodes for egress cost).
+   Enable **default SSE** (SSE-S3 or SSE-KMS) if your policy requires it — the
+   chunks are already AES-GCM encrypted under the cluster key, so SSE is
+   defence-in-depth, not the primary protection.
+2. Grant the silod runtime identity (EC2 instance role, EKS IRSA, ECS task role,
+   or a static IAM user — in that order of preference) write access to the
+   prefix:
+
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [{
+       "Effect": "Allow",
+       "Action": ["s3:PutObject"],
+       "Resource": "arn:aws:s3:::my-backups/silo/*"
+     }, {
+       "Effect": "Allow",
+       "Action": ["s3:ListBucket"],
+       "Resource": "arn:aws:s3:::my-backups",
+       "Condition": {"StringLike": {"s3:prefix": ["silo/*"]}}
+     }]
+   }
+   ```
+
+   The exporter only needs `PutObject`; `ListBucket` is for the restore side
+   (and for ops, when you `aws s3 ls` to check progress).
+3. Point silod at it. On EC2/EKS the SDK reads the instance/role credentials;
+   off-cloud, set the usual `AWS_REGION`, `AWS_ACCESS_KEY_ID`,
+   `AWS_SECRET_ACCESS_KEY` (or `AWS_PROFILE`) in silod's environment.
+
+   ```sh
+   export SILO_BACKUP_TARGET=s3://my-backups/silo \
+          SILO_BACKUP_INTERVAL=1h \
+          AWS_REGION=eu-west-1
+   ```
+
+### Google Cloud Storage
+
+1. Create the bucket. **Uniform** bucket-level access is fine — the SDK uses
+   IAM, not ACLs.
+2. Grant the silod service account `roles/storage.objectCreator` on the bucket
+   (or the broader `roles/storage.objectAdmin` if you also want it to list/read
+   for restore tooling).
+3. Credentials come from Application Default Credentials: a workload identity
+   on GKE, a service-account JSON via `GOOGLE_APPLICATION_CREDENTIALS`, or
+   `gcloud auth application-default login` for an operator host.
+
+   ```sh
+   export SILO_BACKUP_TARGET=gs://my-backups/silo
+   ```
+
+### Azure Blob
+
+1. Create a storage account and a container under it. The URL form is
+   `az://<account>/<container>/<prefix>` — the account name maps to
+   `https://<account>.blob.core.windows.net`.
+2. Grant the silod identity `Storage Blob Data Contributor` on the container.
+   On AKS a managed identity / workload identity is the path of least
+   friction; off-cloud, set `AZURE_CLIENT_ID` + `AZURE_TENANT_ID` +
+   `AZURE_CLIENT_SECRET` (service principal) in silod's environment.
+
+   ```sh
+   export SILO_BACKUP_TARGET=az://mybackups/silo/prod
+   ```
+
+### Bucket lifecycle & cost
+
+A backup is **incremental in cost, cumulative in storage**: every interval a
+node re-uploads any chunk that exists, and writes the current namespace
+snapshot. With content-addressed chunk IDs, an unchanged chunk is overwritten
+with the same bytes (one PUT, no version churn unless you have versioning on).
+With versioning on, expect one new object version per cycle per chunk — turn
+on a lifecycle rule to expire old versions, e.g. on S3:
+
+```json
+{
+  "Rules": [{
+    "ID": "silo-old-versions",
+    "Status": "Enabled",
+    "Filter": {"Prefix": "silo/"},
+    "NoncurrentVersionExpiration": {"NoncurrentDays": 30}
+  }]
+}
+```
+
+Deleted chunks are not GC'd from the bucket — the exporter only writes. If
+that matters, expire by age (e.g. delete objects older than N days that the
+current namespace no longer references; a `siloctl backup gc` is roadmapped).
+
+### Monitoring
+
+Each node exposes:
+
+- `silo_backup_runs_total` — exports attempted (counter; should climb at the
+  cadence of `SILO_BACKUP_INTERVAL`).
+- `silo_backup_failures_total` — exports that errored. **Alert** when this
+  climbs without recovery (the runbook lists it).
+- `silo_backup_last_chunks` — chunk count of the last successful export
+  (gauge; useful as a sanity check vs. `silo_storage_chunks`).
+
+The first export takes one full interval; if `silo_backup_runs_total` is still
+zero an hour after boot with `SILO_BACKUP_INTERVAL=1h`, look at silod's logs
+for `backup failed; will retry next cycle`.
+
+### Restore
+
+Restore is a manual procedure today — copy the bucket back onto a fresh node
+and start silod. The cluster encryption key is **not** in the backup; you
+must have it independently.
+
+1. **Provision a fresh node** with the same `SILO_DATA_DIR` layout and the
+   **same cluster encryption key** (`SILO_ENCRYPTION_KEY` / `…_KEY_PATH` /
+   KMS settings). Without the key, the chunks are unrecoverable ciphertext.
+2. **Hydrate the data directory** from the bucket. The chunks land under
+   `<DATA_DIR>/chunks/` and the namespace snapshot is loaded on first boot:
+
+   ```sh
+   aws s3 sync s3://my-backups/silo/chunks/    /var/lib/silo/chunks/
+   aws s3 cp   s3://my-backups/silo/namespace/<node-id>.json \
+               /var/lib/silo/namespace.json
+   ```
+
+   (For GCS use `gsutil rsync` / `gcloud storage cp`; for Azure use
+   `az storage blob download-batch`.) For a multi-node restore, point every
+   node at the same chunks/ directory state — chunk IDs are global, so a node
+   can serve any chunk it holds.
+3. **Start silod.** It rebuilds its in-memory indices from the data dir,
+   reloads the namespace snapshot, and rejoins (or starts) the cluster. The
+   scrubber will repair replication on the freshly joined nodes.
+4. **Verify.** `siloctl status` should show the expected volumes and
+   `silo_storage_chunks` should match the restored count; mount a volume via
+   NBD/CSI and confirm the contents.
+
+Cross-region disaster recovery is a special case of the same flow: configure
+S3 cross-region replication (or its GCS/Azure equivalents) on the backup
+bucket so the data is already in the recovery region when you need it.
+
+> Reminder: **back up the encryption key separately** from the chunk bucket —
+> losing it loses the data. KMS-wrapped key blobs are safe to keep next to
+> the backups; raw static keys are not.
 
 ## Draining a node
 

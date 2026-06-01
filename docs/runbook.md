@@ -139,11 +139,13 @@ source and restart.
 
 ### Restoring from a backup
 
-Backups hold each node's still-encrypted chunks plus the namespace snapshot. To
-restore: stand up silod with the **same cluster encryption key**, recreate the data
-directory from the exported `chunks/` and `namespace/`, and start the node. The
-namespace CRD reconciles; chunks are served as-is. This is operator-driven today —
-an automated `siloctl restore` is roadmapped ([known-gaps.md](known-gaps.md)).
+Backups hold each node's still-encrypted chunks plus the namespace snapshot. The
+full procedure (provider-specific `aws s3 sync` / `gsutil rsync` / `az` commands,
+data-dir layout, post-restore verification) lives in
+[operations.md#restore](operations.md#restore). The short version: same cluster
+encryption key + hydrate `<DATA_DIR>/chunks/` and the namespace snapshot from the
+bucket + start silod. An automated `siloctl restore` is roadmapped
+([known-gaps.md](known-gaps.md)).
 
 ---
 
