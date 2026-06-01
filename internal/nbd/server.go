@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 // Protocol magics and flags (see the NBD protocol spec).
@@ -58,6 +59,15 @@ const (
 // or buggy client cannot make the server allocate unbounded memory per
 // request. A var so tests can lower it without sending huge payloads.
 var maxRequestBytes uint32 = 64 << 20
+
+// maxInflightPerConn bounds the number of NBD requests one connection can
+// have outstanding inside the server. The transmission protocol allows the
+// server to reply out of order (each reply carries the client's handle), so
+// reads and writes overlap across the worker pool while the connection's
+// single TCP reader keeps pulling new requests off the wire. A small cap
+// keeps a misbehaving client from spawning unbounded per-request goroutines
+// and chunkstore fan-outs from one socket.
+const maxInflightPerConn = 32
 
 // Device is the block device an export serves: random-access I/O plus a fixed
 // advertised size.
@@ -284,10 +294,44 @@ func transmissionFlags() uint16 {
 
 // transmit runs the request/reply loop until the client disconnects or the
 // connection is closed (which is how a shutdown unblocks the read).
+//
+// Requests are dispatched to a bounded worker pool so reads and writes overlap
+// across the connection — the NBD spec lets the server reply out of order, and
+// the kernel's nbd client correlates replies by handle. Reply writes go through
+// a single mutex so a multi-byte reply (a read's header + payload) isn't
+// interleaved with another worker's reply. cmdFlush drains the inflight set
+// before replying so its ack means "every prior write is durable," and cmdDisc
+// drains so we don't return while workers are mid-write.
 func (s *Server) transmit(conn net.Conn, dev Device) error {
+	cs := &connState{conn: conn, dev: dev, logger: s.logger, sem: make(chan struct{}, maxInflightPerConn)}
+	readerErr := cs.readLoop()
+	cs.inflight.Wait()
+	if e := cs.firstWriteErr.Load(); e != nil {
+		return *e
+	}
+	return readerErr
+}
+
+// connState carries the per-connection plumbing the reader loop and the worker
+// goroutines share: the conn itself, a write mutex that serialises one full
+// reply at a time, the inflight WaitGroup that drains on flush/disc/shutdown,
+// and an atomic that records the first reply-write error so the reader can
+// surface it on return (a worker's failed write means the client is gone, but
+// that's still a connection-level error the caller wants to log).
+type connState struct {
+	conn          net.Conn
+	dev           Device
+	logger        *slog.Logger
+	writeMu       sync.Mutex
+	inflight      sync.WaitGroup
+	sem           chan struct{}
+	firstWriteErr atomic.Pointer[error]
+}
+
+func (cs *connState) readLoop() error {
 	header := make([]byte, 28)
 	for {
-		if _, err := io.ReadFull(conn, header); err != nil {
+		if _, err := io.ReadFull(cs.conn, header); err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
@@ -301,63 +345,103 @@ func (s *Server) transmit(conn net.Conn, dev Device) error {
 		offset := binary.BigEndian.Uint64(header[16:24])
 		length := binary.BigEndian.Uint32(header[24:28])
 
-		done, err := s.dispatch(conn, dev, cmd, handle, offset, length)
-		if err != nil {
-			return err
+		// Read the write payload synchronously on the reader loop — only this
+		// goroutine ever reads from conn, so workers never race for input.
+		var writePayload []byte
+		if cmd == cmdWrite {
+			if length > maxRequestBytes {
+				// Drain the oversized payload so the wire stays framed, then
+				// queue an errInval reply against the same handle.
+				if _, err := io.CopyN(io.Discard, cs.conn, int64(length)); err != nil {
+					return err
+				}
+				cs.schedule(func() { cs.reply(errInval, handle, nil) })
+				continue
+			}
+			writePayload = make([]byte, length)
+			if _, err := io.ReadFull(cs.conn, writePayload); err != nil {
+				return fmt.Errorf("nbd: reading write payload (%w)", err)
+			}
 		}
-		if done {
+
+		switch cmd {
+		case cmdDisc:
 			return nil
+		case cmdFlush:
+			// Drain in-flight before acking the flush so the client's
+			// "everything prior is durable" contract holds even though earlier
+			// writes ran on the worker pool.
+			cs.inflight.Wait()
+			cs.reply(0, handle, nil)
+		case cmdTrim:
+			// silo volumes are sparse already; treat discard as a successful no-op.
+			cs.schedule(func() { cs.reply(0, handle, nil) })
+		case cmdRead:
+			cs.schedule(func() { cs.serveRead(handle, offset, length) })
+		case cmdWrite:
+			cs.schedule(func() { cs.serveWrite(handle, offset, length, writePayload) })
+		default:
+			cs.schedule(func() { cs.reply(errInval, handle, nil) })
 		}
 	}
 }
 
-// dispatch handles one transmission command, returning done=true when the
-// client asked to disconnect.
-func (s *Server) dispatch(conn net.Conn, dev Device, cmd uint16, handle, offset uint64, length uint32) (bool, error) {
-	switch cmd {
-	case cmdDisc:
-		return true, nil
-	case cmdFlush:
-		return false, writeReply(conn, 0, handle, nil)
-	case cmdTrim:
-		// silo volumes are sparse already; treat discard as a successful no-op.
-		return false, writeReply(conn, 0, handle, nil)
-	case cmdRead:
-		if length > maxRequestBytes || outOfBounds(dev, offset, length) {
-			return false, writeReply(conn, errInval, handle, nil)
-		}
-		buf := make([]byte, length)
-		// A short read (n < length) with a nil error would otherwise ship the
-		// untouched tail of buf as a successful reply. Treat it as an I/O error
-		// so the client never sees fabricated zeros where bytes were expected.
-		if n, err := dev.ReadAt(buf, int64(offset)); err != nil || uint32(n) != length { // #nosec G115 -- offset bounds-checked; n is in [0,length]
-			s.logger.Warn("nbd read failed", "offset", offset, "length", length, "read", n, "error", err)
-			return false, writeReply(conn, errIO, handle, nil)
-		}
-		return false, writeReply(conn, 0, handle, buf)
-	case cmdWrite:
-		if length > maxRequestBytes {
-			// Still drain the payload so the stream stays framed, then reject.
-			if _, err := io.CopyN(io.Discard, conn, int64(length)); err != nil {
-				return false, err
-			}
-			return false, writeReply(conn, errInval, handle, nil)
-		}
-		buf := make([]byte, length)
-		if _, err := io.ReadFull(conn, buf); err != nil {
-			return false, fmt.Errorf("nbd: reading write payload (%w)", err)
-		}
-		if outOfBounds(dev, offset, length) {
-			return false, writeReply(conn, errInval, handle, nil)
-		}
-		if _, err := dev.WriteAt(buf, int64(offset)); err != nil { // #nosec G115 -- offset bounds-checked
-			s.logger.Warn("nbd write failed", "offset", offset, "length", length, "error", err)
-			return false, writeReply(conn, errIO, handle, nil)
-		}
-		return false, writeReply(conn, 0, handle, nil)
-	default:
-		return false, writeReply(conn, errInval, handle, nil)
+// schedule fires fn on the worker pool. The semaphore acquire happens on the
+// reader's goroutine so the loop blocks when the pool is full — that is the
+// per-connection backpressure that keeps a hot client from outrunning the
+// chunk store.
+func (cs *connState) schedule(fn func()) {
+	cs.sem <- struct{}{}
+	cs.inflight.Add(1)
+	go func() {
+		defer cs.inflight.Done()
+		defer func() { <-cs.sem }()
+		fn()
+	}()
+}
+
+// reply serializes one full NBD reply (header + optional data) under writeMu
+// so a read's header + payload isn't interleaved with another worker's reply,
+// and records the first write error for the reader loop to surface. A failed
+// reply means the conn is broken; the reader's next ReadFull will hit the
+// same condition and unwind.
+func (cs *connState) reply(errCode uint32, handle uint64, data []byte) {
+	cs.writeMu.Lock()
+	err := writeReply(cs.conn, errCode, handle, data)
+	cs.writeMu.Unlock()
+	if err != nil {
+		cs.firstWriteErr.CompareAndSwap(nil, &err)
 	}
+}
+
+func (cs *connState) serveRead(handle, offset uint64, length uint32) {
+	if length > maxRequestBytes || outOfBounds(cs.dev, offset, length) {
+		cs.reply(errInval, handle, nil)
+		return
+	}
+	buf := make([]byte, length)
+	// A short read (n < length) with a nil error would otherwise ship the
+	// untouched tail of buf as a successful reply. Treat it as an I/O error
+	// so the client never sees fabricated zeros where bytes were expected.
+	if n, err := cs.dev.ReadAt(buf, int64(offset)); err != nil || uint32(n) != length { // #nosec G115 -- offset bounds-checked; n is in [0,length]
+		cs.logger.Warn("nbd read failed", "offset", offset, "length", length, "read", n, "error", err)
+		cs.reply(errIO, handle, nil)
+		return
+	}
+	cs.reply(0, handle, buf)
+}
+
+func (cs *connState) serveWrite(handle, offset uint64, length uint32, payload []byte) {
+	if outOfBounds(cs.dev, offset, length) {
+		cs.reply(errInval, handle, nil)
+		return
+	}
+	if _, err := cs.dev.WriteAt(payload, int64(offset)); err != nil { // #nosec G115 -- offset bounds-checked
+		cs.logger.Warn("nbd write failed", "offset", offset, "length", length, "error", err)
+		cs.reply(errIO, handle, nil)
+		return
+	}
+	cs.reply(0, handle, nil)
 }
 
 // outOfBounds reports whether a [offset, offset+length) request from the client

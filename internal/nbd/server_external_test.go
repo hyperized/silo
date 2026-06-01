@@ -818,6 +818,146 @@ func TestServer_ServeAcceptsAndStops(t *testing.T) {
 	}
 }
 
+// TestServer_ConcurrentRequestsAreCorrelatedByHandle proves the parallel
+// transmit loop. A reader and a writer fire many in-flight requests with
+// distinct handles, never waiting between them, then read all the replies in
+// whatever order the server happens to emit them. The test passes if every
+// reply matches the request that carried the same handle — that is, the
+// server can serve requests out of order and still attribute each reply
+// correctly.
+//
+// We make the device slow so the worker pool actually overlaps the requests:
+// without the artificial latency the server would finish each request before
+// the next header arrives over net.Pipe, and the test would silently pass on
+// a sequential implementation too.
+func TestServer_ConcurrentRequestsAreCorrelatedByHandle(t *testing.T) {
+	dev := &memDevice{data: make([]byte, 4096)}
+	conn, done := serveConn(t, &slowBackend{dev: &slowDevice{Device: dev, perOp: 20 * time.Millisecond}})
+	c := &testClient{t: t, conn: conn}
+	c.greet(cFlagNoZeroes)
+	c.exportName("vol", true)
+
+	// Seed every distinct extent we'll read so the data is stable.
+	for i := 0; i < 8; i++ {
+		payload := []byte{byte('A' + i)}
+		c.write(buildRequest(1, uint64(i)*8, 1, uint64(100+i)))
+		c.write(payload)
+	}
+	// Drain the 8 write replies (order does not matter; writes carry no data).
+	for i := 0; i < 8; i++ {
+		c.readOneReply(0)
+	}
+
+	// Fire 16 reads back-to-back without reading any reply in between, so the
+	// server has them all in flight at once.
+	const reads = 16
+	for i := 0; i < reads; i++ {
+		c.write(buildRequest(0, uint64(i%8)*8, 1, uint64(1000+i)))
+	}
+	// Match each reply to its request by handle; require every handle to come
+	// back exactly once.
+	pending := map[uint64]byte{}
+	for i := 0; i < reads; i++ {
+		pending[uint64(1000+i)] = byte('A' + (i % 8))
+	}
+	for i := 0; i < reads; i++ {
+		rep := c.readOneReply(1)
+		want, ok := pending[rep.handle]
+		if !ok {
+			t.Fatalf("reply for unknown handle %d", rep.handle)
+		}
+		delete(pending, rep.handle)
+		if rep.errCode != 0 {
+			t.Fatalf("read handle %d errored: %d", rep.handle, rep.errCode)
+		}
+		if len(rep.data) != 1 || rep.data[0] != want {
+			t.Fatalf("read handle %d data = %v (%c), want %c", rep.handle, rep.data, rep.data[0], want)
+		}
+	}
+	if len(pending) > 0 {
+		t.Fatalf("missing replies for handles %v", pending)
+	}
+	c.disconnect()
+	if err := <-done; err != nil {
+		t.Errorf("ServeConn: %v", err)
+	}
+}
+
+// buildRequest assembles one NBD transmission request header for the given
+// command/offset/length/handle. The test uses this directly so it can stage
+// many requests on the wire without reading replies between them.
+func buildRequest(cmd uint16, offset uint64, length uint32, handle uint64) []byte {
+	h := be32(magicRequest)
+	h = append(h, be16(0)...)
+	h = append(h, be16(cmd)...)
+	h = append(h, be64(handle)...)
+	h = append(h, be64(offset)...)
+	h = append(h, be32(length)...)
+	return h
+}
+
+// rep is a parsed NBD reply: error code, the handle the server echoed back,
+// and the payload (empty for everything except a successful read).
+type rep struct {
+	errCode uint32
+	handle  uint64
+	data    []byte
+}
+
+// readOneReply parses a transmission-phase reply: 16-byte header (magic,
+// errCode, handle) followed by dataLen bytes of payload when the reply is
+// for a successful read. The caller passes dataLen because the reply
+// header does not carry it — that's the request's `length` field.
+func (c *testClient) readOneReply(dataLen int) rep {
+	c.t.Helper()
+	head := make([]byte, 16)
+	c.must(io.ReadFull(c.conn, head))
+	if binary.BigEndian.Uint32(head[0:4]) != magicReply {
+		c.t.Fatalf("bad reply magic")
+	}
+	r := rep{
+		errCode: binary.BigEndian.Uint32(head[4:8]),
+		handle:  binary.BigEndian.Uint64(head[8:16]),
+	}
+	if r.errCode == 0 && dataLen > 0 {
+		r.data = make([]byte, dataLen)
+		c.must(io.ReadFull(c.conn, r.data))
+	}
+	return r
+}
+
+// slowDevice wraps a Device and sleeps perOp before each ReadAt / WriteAt so
+// concurrent requests overlap inside the server's worker pool. Without this
+// the net.Pipe + memDevice path completes each request before the next
+// header arrives, and the test can't distinguish parallel from sequential.
+type slowDevice struct {
+	nbd.Device
+	perOp time.Duration
+}
+
+func (d *slowDevice) ReadAt(p []byte, off int64) (int, error) {
+	time.Sleep(d.perOp)
+	return d.Device.ReadAt(p, off)
+}
+
+func (d *slowDevice) WriteAt(p []byte, off int64) (int, error) {
+	time.Sleep(d.perOp)
+	return d.Device.WriteAt(p, off)
+}
+
+// slowBackend is the equivalent of backend but keyed on the nbd.Device
+// interface so the concurrent-handles test can hand it a slowDevice wrapper.
+// Kept narrow on purpose — the existing tests stay on the concrete backend
+// type so a refactor of memDevice can't cascade unexpectedly into them.
+type slowBackend struct {
+	dev      nbd.Device
+	released atomic.Bool
+}
+
+func (b *slowBackend) Open(_ context.Context, _ string) (nbd.Device, func(), error) {
+	return b.dev, func() { b.released.Store(true) }, nil
+}
+
 func TestServer_ServeReturnsErrorOnListenerClose(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
