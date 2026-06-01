@@ -7,11 +7,6 @@ node, no metadata tier, no quorum to lose, no rebalance ceremony. It gives your
 pods `ReadWriteOnce` volumes through an ordinary `PersistentVolumeClaim` — and
 heals itself through network partitions without paging you.
 
-> **Status:** active development, through **M7 (CSI driver)**. The data plane
-> (encrypted replicated chunks, gossip membership, CRDT namespace, writer/reader
-> SDKs, block volumes over NBD) and the Kubernetes CSI driver are in place. See
-> [PLAN.md](PLAN.md) for the full roadmap.
-
 ---
 
 ## Why silo
@@ -180,6 +175,56 @@ Snapshots are CSI-native (`VolumeSnapshot`), and a snapshot can seed a new PVC
 (clone/restore). The full StorageClass parameters, snapshot workflow, and
 troubleshooting (the `nbd` module, lease takeover, sidecar RBAC) are in
 [docs/kubernetes.md](docs/kubernetes.md).
+
+---
+
+## Performance trade-offs vs Ceph
+
+silo's writes are slower than Ceph's at default settings, and we don't pretend
+otherwise. The trade is deliberate.
+
+**What silo does on every write.** When a client writes a chunk over NBD:
+
+1. silod encrypts the chunk and hands it to the placement layer.
+2. Two or three nodes (your choice via `SILO_REPLICATION`) receive a copy.
+3. Each of those nodes writes the chunk to disk **and forces it to physical
+   storage** before answering "done".
+4. silod tells the client OK only after a quorum has done so.
+
+Once silod says the write succeeded, the data is on real disk on multiple
+machines. No background work to drain, no in-flight state to recover.
+
+**What Ceph does instead.** Ceph acknowledges from a journal — the data is on a
+fast journal device but hasn't reached its final home yet, and the journal
+drains in the background. That is why default-tuned Ceph wins on small
+synchronous writes: most of the cost is paid later.
+
+**Where you'll feel it.** Workloads dominated by small synchronous writes —
+database transaction logs, `fsync`-heavy filesystems, NBD-backed swap — will be
+noticeably faster on Ceph. Bulk sequential I/O is much closer, because the
+per-write overhead spreads across more bytes.
+
+**Why silo doesn't trade durability for latency this way.**
+
+- **Failure recovery stays simple.** If a silod dies mid-write, the write
+  either landed on a quorum of disks (it happened) or it didn't (it failed).
+  There is no third "the journal said OK, the data isn't at rest yet" state to
+  reason about during a node loss.
+- **Nothing to size or tune.** No journal device to provision, no
+  fast-pool/slow-pool tiering, no separate write-ahead log to manage. The
+  number you benchmark on day one is the number production sees.
+
+**Knobs you do get.**
+
+- `SILO_REPLICATION=2` lands writes on two disks instead of three. Still
+  real-disk durable on every ACK, just fewer copies before silod says OK.
+- The CSI StorageClass `chunk-size` parameter sets extent size per volume.
+  Larger extents amortize per-chunk overhead for sequential workloads; smaller
+  extents reduce read amplification for small random reads.
+
+If you optimise for transaction-log latency, Ceph at defaults will likely be
+faster. If you'd rather know exactly what state your data is in after a node
+failure, silo is the trade.
 
 ---
 
