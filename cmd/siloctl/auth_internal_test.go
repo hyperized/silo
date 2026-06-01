@@ -104,7 +104,7 @@ func mintCAResponse(t *testing.T) *bootstrapv1.JoinResponse {
 
 func TestRunAuth_NoArgsShowsUsage(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := runAuth(nil, &out, &errBuf); code != 2 {
+	if code := runAuth(nil, nil, &out, &errBuf); code != 2 {
 		t.Errorf("got %d, want 2", code)
 	}
 	if !strings.Contains(out.String(), "siloctl auth") {
@@ -114,12 +114,12 @@ func TestRunAuth_NoArgsShowsUsage(t *testing.T) {
 
 func TestRunAuth_HelpAndUnknown(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := runAuth([]string{"help"}, &out, &errBuf); code != 0 {
+	if code := runAuth([]string{"help"}, nil, &out, &errBuf); code != 0 {
 		t.Errorf("help exit: got %d, want 0", code)
 	}
 	out.Reset()
 	errBuf.Reset()
-	if code := runAuth([]string{"banana"}, &out, &errBuf); code != 2 {
+	if code := runAuth([]string{"banana"}, nil, &out, &errBuf); code != 2 {
 		t.Errorf("unknown sub exit: got %d, want 2", code)
 	}
 	if !strings.Contains(errBuf.String(), "unknown subcommand") {
@@ -140,7 +140,7 @@ func TestRunAuthInit_MissingFlags(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, errBuf bytes.Buffer
-			code := runAuth(tc.args, &out, &errBuf)
+			code := runAuth(tc.args, nil, &out, &errBuf)
 			if code != 2 {
 				t.Errorf("got %d, want 2 (stderr=%q)", code, errBuf.String())
 			}
@@ -165,7 +165,7 @@ func TestRunAuthInit_HappyPathWritesMaterial(t *testing.T) {
 		"--server-fingerprint", fp,
 		"--principal", "alice@host",
 		"--config-dir", dir,
-	}, &out, &errBuf)
+	}, nil, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("got %d, want 0; stderr=%q", code, errBuf.String())
 	}
@@ -197,7 +197,7 @@ func TestRunAuthInit_TOFUWarningWhenNoFingerprint(t *testing.T) {
 		"--token", "t",
 		"--server", addr,
 		"--config-dir", dir,
-	}, &out, &errBuf)
+	}, nil, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("got %d, want 0; stderr=%q", code, errBuf.String())
 	}
@@ -222,7 +222,7 @@ func TestRunAuthInit_FingerprintMismatchRefuses(t *testing.T) {
 		"--server", addr,
 		"--server-fingerprint", "sha256:0000000000000000000000000000000000000000000000000000000000000000",
 		"--config-dir", dir,
-	}, &out, &errBuf)
+	}, nil, &out, &errBuf)
 	if code == 0 {
 		t.Errorf("got 0, want non-zero; stderr=%q", errBuf.String())
 	}
@@ -236,7 +236,7 @@ func TestRunAuthInit_DialFailure(t *testing.T) {
 	}
 	dir := t.TempDir()
 	var out, errBuf bytes.Buffer
-	code := runAuth([]string{"init", "--token", "t", "--server", "x:1", "--config-dir", dir}, &out, &errBuf)
+	code := runAuth([]string{"init", "--token", "t", "--server", "x:1", "--config-dir", dir}, nil, &out, &errBuf)
 	if code != 1 {
 		t.Errorf("got %d, want 1", code)
 	}
@@ -258,7 +258,7 @@ func TestRunAuthInit_JoinRPCError(t *testing.T) {
 		"--server", addr,
 		"--server-fingerprint", fp,
 		"--config-dir", dir,
-	}, &out, &errBuf)
+	}, nil, &out, &errBuf)
 	if code == 0 {
 		t.Error("want non-zero exit on join failure")
 	}
@@ -283,7 +283,7 @@ func TestRunAuthInit_WriteMaterialFailure(t *testing.T) {
 		"--server", addr,
 		"--server-fingerprint", fp,
 		"--config-dir", filepath.Join(blocker, "subdir"),
-	}, &out, &errBuf)
+	}, nil, &out, &errBuf)
 	if code == 0 {
 		t.Error("want non-zero exit when config dir is unwritable")
 	}
@@ -297,7 +297,7 @@ func TestRunAuthInit_ConfigDirResolveFailure(t *testing.T) {
 	t.Cleanup(func() { userConfigDir = prev })
 	userConfigDir = func() (string, error) { return "", errors.New("simulated user-dir lookup failure") }
 	var out, errBuf bytes.Buffer
-	code := runAuth([]string{"init", "--token", "t", "--server", "x:1"}, &out, &errBuf)
+	code := runAuth([]string{"init", "--token", "t", "--server", "x:1"}, nil, &out, &errBuf)
 	if code != 1 {
 		t.Errorf("got %d, want 1", code)
 	}
@@ -322,7 +322,7 @@ func TestRunAuthInit_DefaultPrincipalSent(t *testing.T) {
 		"--server", addr,
 		"--server-fingerprint", fp,
 		"--config-dir", dir,
-	}, &out, &errBuf); code != 0 {
+	}, nil, &out, &errBuf); code != 0 {
 		t.Fatalf("got %d, want 0; stderr=%q", code, errBuf.String())
 	}
 	if svc.gotPrincipal == "" {
@@ -343,7 +343,7 @@ func TestRunAuthStatus_HappyPath(t *testing.T) {
 	}
 
 	var out, errBuf bytes.Buffer
-	if code := runAuth([]string{"status", "--config-dir", dir}, &out, &errBuf); code != 0 {
+	if code := runAuth([]string{"status", "--config-dir", dir}, nil, &out, &errBuf); code != 0 {
 		t.Fatalf("got %d, want 0; stderr=%q", code, errBuf.String())
 	}
 	for _, want := range []string{
@@ -361,7 +361,7 @@ func TestRunAuthStatus_HappyPath(t *testing.T) {
 
 func TestRunAuthStatus_NoCredentials(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := runAuth([]string{"status", "--config-dir", t.TempDir()}, &out, &errBuf); code != 1 {
+	if code := runAuth([]string{"status", "--config-dir", t.TempDir()}, nil, &out, &errBuf); code != 1 {
 		t.Errorf("got %d, want 1", code)
 	}
 	if !strings.Contains(errBuf.String(), "auth init") {
@@ -376,7 +376,7 @@ func TestRunAuthStatus_MissingClientCert(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	var out, errBuf bytes.Buffer
-	if code := runAuth([]string{"status", "--config-dir", dir}, &out, &errBuf); code != 1 {
+	if code := runAuth([]string{"status", "--config-dir", dir}, nil, &out, &errBuf); code != 1 {
 		t.Errorf("got %d, want 1", code)
 	}
 	if !strings.Contains(errBuf.String(), "client cert") {
@@ -392,7 +392,7 @@ func TestRunAuthStatus_GarbageCAcert(t *testing.T) {
 		}
 	}
 	var out, errBuf bytes.Buffer
-	if code := runAuth([]string{"status", "--config-dir", dir}, &out, &errBuf); code != 1 {
+	if code := runAuth([]string{"status", "--config-dir", dir}, nil, &out, &errBuf); code != 1 {
 		t.Errorf("got %d, want 1", code)
 	}
 	if !strings.Contains(errBuf.String(), "cluster CA") {
@@ -413,7 +413,7 @@ func TestRunAuthStatus_GarbageClientCert(t *testing.T) {
 		t.Fatalf("write client key: %v", err)
 	}
 	var out, errBuf bytes.Buffer
-	if code := runAuth([]string{"status", "--config-dir", dir}, &out, &errBuf); code != 1 {
+	if code := runAuth([]string{"status", "--config-dir", dir}, nil, &out, &errBuf); code != 1 {
 		t.Errorf("got %d, want 1", code)
 	}
 	if !strings.Contains(errBuf.String(), "client cert") {
@@ -426,7 +426,7 @@ func TestRunAuthStatus_ConfigDirResolveFailure(t *testing.T) {
 	t.Cleanup(func() { userConfigDir = prev })
 	userConfigDir = func() (string, error) { return "", errors.New("simulated user-dir lookup failure") }
 	var out, errBuf bytes.Buffer
-	if code := runAuth([]string{"status"}, &out, &errBuf); code != 1 {
+	if code := runAuth([]string{"status"}, nil, &out, &errBuf); code != 1 {
 		t.Errorf("got %d, want 1", code)
 	}
 }
@@ -452,7 +452,7 @@ func TestRunAuthStatus_NoConfigJSONStillSucceeds(t *testing.T) {
 		t.Fatalf("write client key: %v", err)
 	}
 	var out, errBuf bytes.Buffer
-	if code := runAuth([]string{"status", "--config-dir", dir}, &out, &errBuf); code != 0 {
+	if code := runAuth([]string{"status", "--config-dir", dir}, nil, &out, &errBuf); code != 0 {
 		t.Errorf("got %d, want 0; stderr=%q", code, errBuf.String())
 	}
 	if strings.Contains(out.String(), "Chunk server:") || strings.Contains(out.String(), "Joined via:") {
@@ -462,7 +462,7 @@ func TestRunAuthStatus_NoConfigJSONStillSucceeds(t *testing.T) {
 
 func TestRunAuthStatus_FlagParseError(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	if code := runAuth([]string{"status", "--no-such-flag"}, &out, &errBuf); code != 2 {
+	if code := runAuth([]string{"status", "--no-such-flag"}, nil, &out, &errBuf); code != 2 {
 		t.Errorf("got %d, want 2", code)
 	}
 }
@@ -646,5 +646,162 @@ func TestBuildBootstrapTLSConfig_VerifyConnection(t *testing.T) {
 	}
 	if check != nil {
 		_ = check
+	}
+}
+
+// seedCredentials writes a minimal but valid credential set to dir so
+// the clean tests don't need to spin up a real bootstrap server.
+func seedCredentials(t *testing.T, dir string) {
+	t.Helper()
+	caPEM, _, err := clustertls.GenerateCA("silo-clean-test", time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	files := map[string][]byte{
+		"ca.crt":      caPEM,
+		"client.crt":  []byte("client-cert\n"),
+		"client.key":  []byte("client-key\n"),
+		"config.json": []byte(`{"default_server":"127.0.0.1:7001","principal":"alice@host"}`),
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
+func TestRunAuthClean_NoFilesPresent(t *testing.T) {
+	dir := t.TempDir()
+	var out, errBuf bytes.Buffer
+	if code := runAuth([]string{"clean", "--config-dir", dir}, nil, &out, &errBuf); code != 0 {
+		t.Fatalf("got %d, want 0 (stderr=%q)", code, errBuf.String())
+	}
+	if !strings.Contains(out.String(), "Nothing to clean") {
+		t.Errorf("stdout should explain idempotent no-op, got %q", out.String())
+	}
+}
+
+func TestRunAuthClean_YesFlagSkipsPrompt(t *testing.T) {
+	dir := t.TempDir()
+	seedCredentials(t, dir)
+	var out, errBuf bytes.Buffer
+	// --yes means stdin is not read; pass nil to prove that.
+	if code := runAuth([]string{"clean", "--config-dir", dir, "--yes"}, nil, &out, &errBuf); code != 0 {
+		t.Fatalf("got %d, want 0 (stderr=%q)", code, errBuf.String())
+	}
+	for _, name := range credentialFiles {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s should be removed, stat err: %v", name, err)
+		}
+	}
+	if !strings.Contains(out.String(), "Deleted") {
+		t.Errorf("stdout should confirm deletion, got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "Principal: alice@host") {
+		t.Errorf("stdout should surface principal from config.json, got %q", out.String())
+	}
+	if !strings.Contains(out.String(), "CA fingerprint:") {
+		t.Errorf("stdout should surface CA fingerprint from ca.crt, got %q", out.String())
+	}
+}
+
+func TestRunAuthClean_PromptAccepted(t *testing.T) {
+	dir := t.TempDir()
+	seedCredentials(t, dir)
+	var out, errBuf bytes.Buffer
+	if code := runAuth([]string{"clean", "--config-dir", dir}, strings.NewReader("y\n"), &out, &errBuf); code != 0 {
+		t.Fatalf("got %d, want 0 (stderr=%q)", code, errBuf.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.crt")); !os.IsNotExist(err) {
+		t.Errorf("ca.crt should be removed, stat err: %v", err)
+	}
+}
+
+func TestRunAuthClean_PromptDeclined(t *testing.T) {
+	dir := t.TempDir()
+	seedCredentials(t, dir)
+	var out, errBuf bytes.Buffer
+	// Anything other than y/yes (including a bare newline) declines.
+	if code := runAuth([]string{"clean", "--config-dir", dir}, strings.NewReader("\n"), &out, &errBuf); code != 0 {
+		t.Fatalf("got %d, want 0 (stderr=%q)", code, errBuf.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.crt")); err != nil {
+		t.Errorf("ca.crt should still exist after decline, got %v", err)
+	}
+	if !strings.Contains(out.String(), "Aborted") {
+		t.Errorf("stdout should say aborted, got %q", out.String())
+	}
+}
+
+func TestRunAuthClean_PromptEOFTreatedAsDecline(t *testing.T) {
+	dir := t.TempDir()
+	seedCredentials(t, dir)
+	var out, errBuf bytes.Buffer
+	// Empty stdin: ReadString returns io.EOF, which we treat as a non-"y"
+	// answer rather than a hard error — keeps non-interactive shells from
+	// nuking credentials when stdin is closed.
+	if code := runAuth([]string{"clean", "--config-dir", dir}, strings.NewReader(""), &out, &errBuf); code != 0 {
+		t.Fatalf("got %d, want 0 (stderr=%q)", code, errBuf.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.crt")); err != nil {
+		t.Errorf("ca.crt should still exist after EOF on prompt, got %v", err)
+	}
+}
+
+func TestRunAuthClean_OnlySomeFilesPresent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	// Only one of the four files exists; clean should remove what's
+	// there and not fail on the missing ones.
+	if err := os.WriteFile(filepath.Join(dir, "ca.crt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	var out, errBuf bytes.Buffer
+	if code := runAuth([]string{"clean", "--config-dir", dir, "--yes"}, nil, &out, &errBuf); code != 0 {
+		t.Fatalf("got %d, want 0 (stderr=%q)", code, errBuf.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.crt")); !os.IsNotExist(err) {
+		t.Errorf("ca.crt should be removed, stat err: %v", err)
+	}
+}
+
+func TestRunAuthClean_FlagParseError(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	if code := runAuth([]string{"clean", "--no-such-flag"}, nil, &out, &errBuf); code != 2 {
+		t.Errorf("got %d, want 2", code)
+	}
+}
+
+func TestRunAuthClean_RemoveFailureReportsContext(t *testing.T) {
+	dir := t.TempDir()
+	seedCredentials(t, dir)
+	// Drop write permission on the dir so os.Remove fails with EACCES.
+	// Skipped on platforms where 0o500 isn't enforced (e.g. running as root).
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	canary := filepath.Join(dir, "ca.crt")
+	if err := os.Remove(canary); err == nil {
+		// Restore the file and skip — this platform (or user) lets us
+		// remove from a non-writable dir, which makes the test meaningless.
+		_ = os.WriteFile(canary, []byte("x"), 0o600)
+		t.Skip("filesystem permits removal from read-only directory; cannot exercise the failure branch")
+	} else {
+		_ = os.WriteFile(canary, []byte("x"), 0o600)
+	}
+
+	var out, errBuf bytes.Buffer
+	if code := runAuth([]string{"clean", "--config-dir", dir, "--yes"}, nil, &out, &errBuf); code != 1 {
+		t.Fatalf("got %d, want 1 (stderr=%q)", code, errBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "filesystem permissions") {
+		t.Errorf("stderr should point at the permissions problem, got %q", errBuf.String())
 	}
 }

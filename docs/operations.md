@@ -273,6 +273,9 @@ flags needed.
 - Inspect your credentials: `siloctl auth status`
 - Mint another token (e.g. for a teammate): restart `silod` with
   `SILO_PRINT_BOOTSTRAP_TOKEN=1`.
+- Wipe cached credentials (e.g. before re-joining a freshly-bootstrapped
+  cluster whose CA has rotated): `siloctl auth clean` (prompts; pass `--yes`
+  to skip). `make down` runs this automatically.
 
 The same `~/.config/silo/` material (`ca.crt`, `client.crt`, `client.key`) is
 what you load into the CSI controller's `silod.tls.secretName` Secret for mTLS

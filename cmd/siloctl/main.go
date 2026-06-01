@@ -36,7 +36,7 @@ func runMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	switch cmd {
 	case "auth":
-		return runAuth(rest, stdout, stderr)
+		return runAuth(rest, stdin, stdout, stderr)
 	case "chunk":
 		return runChunk(rest, stdin, stdout, stderr)
 	case "ns":

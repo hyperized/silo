@@ -22,7 +22,7 @@ var statusNow = time.Now
 
 func runStatus(args []string, stdout, stderr io.Writer) int {
 	fs, server := newSubFlagSet("status", stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	if len(fs.Args()) != 0 {

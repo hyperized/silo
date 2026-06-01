@@ -83,7 +83,7 @@ func runCARevoke(args []string, stdout, stderr io.Writer) int {
 	var certFiles, serials stringSlice
 	fs.Var(&certFiles, "cert", "certificate file whose serial to revoke (repeatable)")
 	fs.Var(&serials, "serial", "hex serial to revoke (repeatable)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	if *crlPath == "" {
@@ -134,7 +134,7 @@ func runCAListRevoked(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	caCert := fs.String("ca-cert", envDefault("SILO_TLS_CA_CERT", ""), "cluster CA certificate (PEM)")
 	crlPath := fs.String("crl", "", "CRL file to read")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	if *crlPath == "" {

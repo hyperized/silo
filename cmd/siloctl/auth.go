@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -69,7 +70,7 @@ var userConfigDir = func() (string, error) {
 	return filepath.Join(dir, "silo"), nil
 }
 
-func runAuth(args []string, stdout, stderr io.Writer) int {
+func runAuth(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isHelpFlag(args[0]) {
 		printAuthUsage(stdout)
 		if len(args) == 0 {
@@ -87,6 +88,8 @@ func runAuth(args []string, stdout, stderr io.Writer) int {
 		return runAuthStatus(rest, stdout, stderr)
 	case "mint-token":
 		return runAuthMintToken(rest, stdout, stderr)
+	case "clean":
+		return runAuthClean(rest, stdin, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "siloctl auth: unknown subcommand %q. Run 'siloctl auth help'.\n", sub)
 		return 2
@@ -105,6 +108,8 @@ Usage:
   siloctl auth mint-token --principal <who> --cap <capability> [--cap …]
                     [--ttl <duration>] [--ca-cert <path>] [--ca-key <path>]
 
+  siloctl auth clean [--config-dir <path>] [--yes]
+
 'init' redeems a one-time join token printed by silod on first boot and writes
 the resulting CA cert, client cert, and client key into the config directory
 (default: $XDG_CONFIG_HOME/silo or ~/.config/silo).
@@ -117,6 +122,9 @@ that a CSI/FUSE/operator client presents via SILO_TOKEN when silod runs with
 SILO_REQUIRE_TOKENS=1. Capabilities: chunk:read, chunk:write, namespace:read,
 namespace:write, status:read, node:admin, or '*' for all. Run it on a host that
 holds the CA key.
+
+'clean' deletes the cached cluster credentials so the next 'auth init' starts
+from a clean slate. Prompts before deleting; pass --yes to skip the prompt.
 `)
 }
 
@@ -130,7 +138,7 @@ func runAuthInit(args []string, stdout, stderr io.Writer) int {
 		principal   = fs.String("principal", defaultPrincipal(), "identity to attribute the cert to in audit logs")
 		configDir   = fs.String("config-dir", "", "where to write ca.crt, client.crt, client.key (default: per-user config dir)")
 	)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	if *token == "" {
@@ -195,7 +203,7 @@ func runAuthMintToken(args []string, stdout, stderr io.Writer) int {
 	ttl := fs.Duration("ttl", defaultTokenTTL, "how long the token is valid")
 	var caps stringSlice
 	fs.Var(&caps, "cap", "capability to grant (repeatable): chunk:read, chunk:write, namespace:read, namespace:write, status:read, node:admin, *")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	if *principal == "" {
@@ -243,7 +251,7 @@ func runAuthStatus(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("siloctl auth status", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configDir := fs.String("config-dir", "", "where to read ca.crt, client.crt, client.key from (default: per-user config dir)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	dir, err := resolveConfigDir(*configDir)
@@ -285,6 +293,93 @@ func runAuthStatus(args []string, stdout, stderr io.Writer) int {
 	if cfg.DefaultServer != "" {
 		fmt.Fprintf(stdout, "  Joined via:       %s (bootstrap port)\n", cfg.DefaultServer)
 	}
+	return 0
+}
+
+// credentialFiles is the set of files 'auth init' writes; 'auth clean'
+// removes the same set so the two commands stay in lockstep when fields
+// are added.
+var credentialFiles = []string{"ca.crt", "client.crt", "client.key", "config.json"}
+
+func runAuthClean(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("siloctl auth clean", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configDir := fs.String("config-dir", "", "where to remove ca.crt, client.crt, client.key, config.json (default: per-user config dir)")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt")
+	if err := parseFlexible(fs, args); err != nil {
+		return 2
+	}
+
+	dir, err := resolveConfigDir(*configDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "siloctl auth clean: %v\n", err)
+		return 1
+	}
+
+	present := make([]string, 0, len(credentialFiles))
+	for _, name := range credentialFiles {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			present = append(present, name)
+		}
+	}
+	if len(present) == 0 {
+		fmt.Fprintf(stdout, "Nothing to clean at %s (no cluster credentials found).\n", dir)
+		return 0
+	}
+
+	fmt.Fprintf(stdout, "About to delete cluster credentials at %s:\n", dir)
+	for _, name := range present {
+		fmt.Fprintf(stdout, "  %s\n", name)
+	}
+	// Best-effort context so the operator can tell which cluster they're
+	// about to forget; failures here are not fatal — the user already
+	// asked to clean.
+	if cfg, err := loadAuthConfig(dir); err == nil {
+		if cfg.Principal != "" {
+			fmt.Fprintf(stdout, "Principal: %s\n", cfg.Principal)
+		}
+		if cfg.DefaultServer != "" {
+			fmt.Fprintf(stdout, "Joined via: %s\n", cfg.DefaultServer)
+		}
+	}
+	if caBytes, err := os.ReadFile(filepath.Join(dir, "ca.crt")); err == nil { // #nosec G304 -- operator's own config dir
+		if caCert, err := parseSingleCert(caBytes); err == nil {
+			fmt.Fprintf(stdout, "CA fingerprint: %s\n", fingerprintCert(caCert))
+		}
+	}
+
+	if !*yes {
+		fmt.Fprint(stdout, "Delete these credentials? [y/N]: ")
+		reader := bufio.NewReader(stdin)
+		line, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			fmt.Fprintf(stderr, "siloctl auth clean: could not read confirmation (%v); re-run with --yes to skip the prompt\n", err)
+			return 1
+		}
+		answer := strings.ToLower(strings.TrimSpace(line))
+		if answer != "y" && answer != "yes" {
+			fmt.Fprintln(stdout, "Aborted; nothing was deleted.")
+			return 0
+		}
+	}
+
+	var firstErr error
+	removed := 0
+	for _, name := range present {
+		path := filepath.Join(dir, name)
+		if err := os.Remove(path); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+	if firstErr != nil {
+		fmt.Fprintf(stderr, "siloctl auth clean: removed %d of %d files; first error: %v; check filesystem permissions on %s\n", removed, len(present), firstErr, dir)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Deleted %d credential file(s) from %s. Run 'siloctl auth init' to claim new credentials.\n", removed, dir)
 	return 0
 }
 

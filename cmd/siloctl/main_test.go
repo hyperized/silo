@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"flag"
 	"io"
 	"log/slog"
 	"net"
@@ -491,6 +492,106 @@ func TestEnvDefault(t *testing.T) {
 	}
 	if got := envDefault("SILOCTL_NO_SUCH_VAR_AT_ALL", "fallback"); got != "fallback" {
 		t.Errorf("unset: got %q, want fallback", got)
+	}
+}
+
+func TestParseFlexible(t *testing.T) {
+	// Every case below registers --size (string), --yes (bool), and uses
+	// fs.Args() for the positional tail. They cover the matrix that
+	// matters operationally: positional anywhere, --foo=bar inline,
+	// bool flag in front of positional, `--` terminator, and a bare `-`
+	// stdin sentinel.
+	type want struct {
+		size       string
+		yes        bool
+		positional []string
+		parseErr   bool
+	}
+	cases := []struct {
+		name string
+		args []string
+		want want
+	}{
+		{
+			name: "flags before positional (canonical)",
+			args: []string{"--size", "1G", "/v"},
+			want: want{size: "1G", positional: []string{"/v"}},
+		},
+		{
+			name: "positional before flags (the bug report)",
+			args: []string{"/v", "--size", "1G"},
+			want: want{size: "1G", positional: []string{"/v"}},
+		},
+		{
+			name: "positional sandwiched between flags",
+			args: []string{"--size", "1G", "/v", "--yes"},
+			want: want{size: "1G", yes: true, positional: []string{"/v"}},
+		},
+		{
+			name: "inline --flag=value with leading positional",
+			args: []string{"/v", "--size=2G"},
+			want: want{size: "2G", positional: []string{"/v"}},
+		},
+		{
+			name: "bool flag does not consume the next positional",
+			args: []string{"--yes", "/v"},
+			want: want{yes: true, positional: []string{"/v"}},
+		},
+		{
+			name: "multiple positionals preserve order",
+			args: []string{"a", "--size", "1G", "b", "c"},
+			want: want{size: "1G", positional: []string{"a", "b", "c"}},
+		},
+		{
+			name: "-- terminates flag processing",
+			args: []string{"--size", "1G", "--", "--not-a-flag", "/v"},
+			want: want{size: "1G", positional: []string{"--not-a-flag", "/v"}},
+		},
+		{
+			name: "bare dash is positional (stdin sentinel)",
+			args: []string{"-", "--size", "1G"},
+			want: want{size: "1G", positional: []string{"-"}},
+		},
+		{
+			name: "unknown flag still surfaces as a parse error",
+			args: []string{"--bogus", "x", "/v"},
+			want: want{parseErr: true},
+		},
+		{
+			name: "no args parses cleanly with zero positional",
+			args: nil,
+			want: want{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			size := fs.String("size", "", "")
+			yes := fs.Bool("yes", false, "")
+			err := parseFlexible(fs, tc.args)
+			if (err != nil) != tc.want.parseErr {
+				t.Fatalf("err = %v, parseErr = %v", err, tc.want.parseErr)
+			}
+			if tc.want.parseErr {
+				return
+			}
+			if *size != tc.want.size {
+				t.Errorf("size = %q, want %q", *size, tc.want.size)
+			}
+			if *yes != tc.want.yes {
+				t.Errorf("yes = %v, want %v", *yes, tc.want.yes)
+			}
+			got := fs.Args()
+			if len(got) != len(tc.want.positional) {
+				t.Fatalf("positional = %v, want %v", got, tc.want.positional)
+			}
+			for i, p := range tc.want.positional {
+				if got[i] != p {
+					t.Errorf("positional[%d] = %q, want %q", i, got[i], p)
+				}
+			}
+		})
 	}
 }
 

@@ -58,7 +58,7 @@ Mutations converge to other nodes over gossip within a few seconds.
 // success line.
 func runNSMutate(args []string, stdout, stderr io.Writer, op, success string) int {
 	fs, server := newSubFlagSet(op, stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	rest := fs.Args()
@@ -96,7 +96,7 @@ func runNSMutate(args []string, stdout, stderr io.Writer, op, success string) in
 
 func runNSList(args []string, stdout, stderr io.Writer) int {
 	fs, server := newSubFlagSet("ns ls", stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	path := "/"

@@ -33,8 +33,11 @@ func printVolumeUsage(w io.Writer) {
 	fmt.Fprint(w, `siloctl volume — create and manage block volumes
 
 Usage:
-  siloctl volume create <path> --size <size> [--extent-size <size>]
-  siloctl volume snapshot <source-path> <dest-path>
+  siloctl volume create [--server=host:port] --size <size> [--extent-size <size>] <path>
+  siloctl volume snapshot [--server=host:port] <source-path> <dest-path>
+
+Flags and positional arguments may appear in any order; the examples above
+follow Unix convention (flags first, paths last).
 
 Sizes take an optional unit suffix: K, M, G, or T (powers of 1024); a bare
 number is bytes. A volume backs an NBD block device — mount it with
@@ -44,8 +47,6 @@ A snapshot is a point-in-time, copy-on-write copy: it shares the source's
 data until either side is written, so it is cheap to take and never blocks
 the source. Take a snapshot while the source is idle (unmounted or quiesced)
 for a crash-consistent image.
-
-Each subcommand accepts --server=host:port to point at a different silod.
 `)
 }
 
@@ -53,7 +54,7 @@ func runVolumeCreate(args []string, stdout, stderr io.Writer) int {
 	fs, server := newSubFlagSet("volume create", stderr)
 	sizeStr := fs.String("size", "", "block-device size, e.g. 10G, 512M, or a bare byte count (required)")
 	extentStr := fs.String("extent-size", "", "copy-on-write unit, e.g. 64K; empty uses the server default")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	rest := fs.Args()
@@ -104,7 +105,7 @@ func runVolumeCreate(args []string, stdout, stderr io.Writer) int {
 
 func runVolumeSnapshot(args []string, stdout, stderr io.Writer) int {
 	fs, server := newSubFlagSet("volume snapshot", stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	rest := fs.Args()

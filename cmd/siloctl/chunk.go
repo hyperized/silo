@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc"
@@ -179,6 +180,66 @@ func newSubFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *string) {
 	return fs, server
 }
 
+// boolFlagger matches the stdlib flag package's unexported boolFlag
+// interface: a Value that consumes no following argument. We replicate
+// it here so parseFlexible can tell `--yes <path>` apart from
+// `--size <bytes>`.
+type boolFlagger interface {
+	flag.Value
+	IsBoolFlag() bool
+}
+
+// parseFlexible parses args after reordering them so flags appear
+// before positional arguments. Stdlib flag.Parse stops at the first
+// non-flag token, which made `siloctl volume create /v --size 1G`
+// silently drop --size. Reordering lets operators write subcommand
+// arguments in either order. Returns the same error flag.Parse would.
+func parseFlexible(fs *flag.FlagSet, args []string) error {
+	var flags, positional []string
+	i := 0
+	for i < len(args) {
+		arg := args[i]
+		// `--` ends flag processing; preserve the terminator AND the
+		// tail in-place so fs.Parse keeps stdlib semantics (anything
+		// after `--` stays positional, even dash-prefixed paths).
+		if arg == "--" {
+			flags = append(flags, args[i:]...)
+			break
+		}
+		// A bare `-` is conventionally a stdin sentinel, not a flag.
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positional = append(positional, arg)
+			i++
+			continue
+		}
+		// Inline form `--foo=bar` / `-f=bar` is self-contained — never
+		// consume the next token.
+		if strings.Contains(arg, "=") {
+			flags = append(flags, arg)
+			i++
+			continue
+		}
+		// Bare `--foo` / `-f`: consume the next token as its value
+		// unless the flag is registered as a bool.
+		name := strings.TrimLeft(arg, "-")
+		flags = append(flags, arg)
+		i++
+		def := fs.Lookup(name)
+		if def == nil {
+			// Let fs.Parse report the unknown flag with its usual error.
+			continue
+		}
+		if bf, ok := def.Value.(boolFlagger); ok && bf.IsBoolFlag() {
+			continue
+		}
+		if i < len(args) {
+			flags = append(flags, args[i])
+			i++
+		}
+	}
+	return fs.Parse(append(flags, positional...))
+}
+
 // configuredChunkServer reads default_grpc_server from the auth config
 // the operator wrote during 'auth init'. Returns the hard-coded loopback
 // fallback when no config is present so single-node dev still works
@@ -197,7 +258,7 @@ func configuredChunkServer() string {
 
 func runChunkPut(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs, server := newSubFlagSet("put", stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	rest := fs.Args()
@@ -261,7 +322,7 @@ func runChunkPut(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 func runChunkGet(args []string, stdout, stderr io.Writer) int {
 	fs, server := newSubFlagSet("get", stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	rest := fs.Args()
@@ -332,7 +393,7 @@ func runChunkGet(args []string, stdout, stderr io.Writer) int {
 
 func runChunkDelete(args []string, stdout, stderr io.Writer) int {
 	fs, server := newSubFlagSet("delete", stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	rest := fs.Args()
@@ -361,7 +422,7 @@ func runChunkDelete(args []string, stdout, stderr io.Writer) int {
 
 func runChunkStat(args []string, stdout, stderr io.Writer) int {
 	fs, server := newSubFlagSet("stat", stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	rest := fs.Args()

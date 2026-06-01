@@ -72,13 +72,12 @@ make up        # build + boot 3 silod nodes (+ Prometheus on :9090, Grafana on :
 make build     # compile ./bin/{silod,siloctl,silo-csi}
 ```
 
-`make up` prints a one-time, single-use join command in **silo-a's logs**. Grab
-it and claim your operator credentials (this writes the cluster CA + your client
-cert to `~/.config/silo/` and remembers the server):
+`make up` scrapes silo-a's bootstrap token from the container logs and prints a
+paste-ready `siloctl auth init` command. Run it to claim your operator
+credentials (this writes the cluster CA + your client cert to `~/.config/silo/`
+and remembers the server):
 
 ```sh
-docker logs silo-a 2>&1 | grep -A8 'bootstrap token'   # copy the `siloctl auth init …` line
-
 ./bin/siloctl auth init \
   --token <TOKEN> \
   --server 127.0.0.1:7001 \

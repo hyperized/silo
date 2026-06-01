@@ -19,7 +19,7 @@ GO_PKGS := ./...
 # `make fuzz FUZZTIME=60s` per target.
 FUZZTIME ?= 1000000x
 
-.PHONY: help up up-local down restart build images test test-cover test-integration bench bench-cluster fuzz lint fmt vet clean logs status check proto nbd-demo nbd-demo-vm
+.PHONY: help up up-local down restart build images test test-cover test-integration bench bench-cluster fuzz lint fmt vet clean clean-creds logs status check proto nbd-demo nbd-demo-vm
 .DEFAULT_GOAL := up
 
 help: ## Show this help and exit.
@@ -29,13 +29,29 @@ help: ## Show this help and exit.
 
 # --- Local cluster -----------------------------------------------------------
 
-up: deploy/.env ## Build and start a 3-node silo cluster locally.
-	@$(COMPOSE) up -d --build
-	@printf "\nsilo is starting. Useful next steps:\n"
+up: deploy/.env ## Build and start a 3-node silo cluster locally; print a ready-to-paste 'siloctl auth init'.
+	@SILO_PRINT_BOOTSTRAP_TOKEN=1 $(COMPOSE) up -d --build
+	@printf "\nWaiting for silo-a to report healthy…\n"
+	@for _ in $$(seq 1 30); do \
+	  if curl -sf --max-time 2 http://localhost:7080/healthz >/dev/null 2>&1; then break; fi; \
+	  sleep 1; \
+	done
+	@token=$$($(COMPOSE) logs --no-log-prefix silo-a 2>/dev/null | awk '$$1=="token:"{t=$$2} END{print t}'); \
+	 fp=$$($(COMPOSE) logs --no-log-prefix silo-a 2>/dev/null | awk '$$1=="server" && $$2=="fingerprint:"{f=$$3} END{print f}'); \
+	 if [ -n "$$token" ] && [ -n "$$fp" ]; then \
+	   printf "\nClaim operator credentials (single-use token from silo-a):\n\n"; \
+	   printf "  ./bin/siloctl auth init \\\\\n"; \
+	   printf "    --token %s \\\\\n" "$$token"; \
+	   printf "    --server 127.0.0.1:7001 \\\\\n"; \
+	   printf "    --server-fingerprint %s\n" "$$fp"; \
+	 else \
+	   printf "\nCould not find a bootstrap token in silo-a's recent logs. If silo-a didn't restart on this 'make up', try:\n  %s restart silo-a\nthen re-run 'make up'.\n" "$(COMPOSE)"; \
+	 fi
+	@printf "\nUseful next steps:\n"
 	@printf "  make status     check /healthz on every node\n"
 	@printf "  make logs       follow logs across the cluster\n"
-	@printf "  make down       stop everything (volumes removed)\n\n"
-	@printf "Endpoints (give them ~10s to come up):\n"
+	@printf "  make down       stop everything (volumes + creds removed)\n\n"
+	@printf "Endpoints:\n"
 	@printf "  http://localhost:7080/healthz   silo-a\n"
 	@printf "  http://localhost:7081/healthz   silo-b\n"
 	@printf "  http://localhost:7082/healthz   silo-c\n"
@@ -45,8 +61,24 @@ up: deploy/.env ## Build and start a 3-node silo cluster locally.
 up-local: deploy/.env ## Run a single silod in the foreground (fast dev loop).
 	@$(COMPOSE_LOCAL) up --build
 
-down: ## Stop the cluster and remove its volumes.
+down: ## Stop the cluster, remove its volumes, and wipe local artifacts that are stale once the cluster CA is gone.
 	@$(COMPOSE) down -v
+	@if [ -x "$(BIN)/siloctl" ]; then \
+	  $(BIN)/siloctl auth clean --yes >/dev/null 2>&1 || true; \
+	  printf "Wiped cached operator credentials (the cluster CA is gone).\n"; \
+	else \
+	  printf "(skipping credential wipe: %s not built; run 'make clean-creds' yourself if needed)\n" "$(BIN)/siloctl"; \
+	fi
+	@if [ -f deploy/.env ]; then \
+	  rm -f deploy/.env; \
+	  printf "Removed deploy/.env (the SILO_ENCRYPTION_KEY it held has no data left to unwrap).\n"; \
+	fi
+
+clean-creds: ## Delete cached operator credentials (prompts; pass YES=1 to skip).
+	@if [ ! -x "$(BIN)/siloctl" ]; then \
+	  printf "siloctl not built; run 'make build' first\n" >&2; exit 1; \
+	fi
+	@if [ "$$YES" = "1" ]; then $(BIN)/siloctl auth clean --yes; else $(BIN)/siloctl auth clean; fi
 
 restart: down up ## Stop and restart the cluster.
 

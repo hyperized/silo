@@ -53,7 +53,7 @@ Each subcommand accepts --server=host:port to target a specific silod.
 
 func runNodeDrain(args []string, stdout, stderr io.Writer) int {
 	fs, server := newSubFlagSet("node drain", stderr)
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlexible(fs, args); err != nil {
 		return 2
 	}
 	if len(fs.Args()) != 0 {

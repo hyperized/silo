@@ -17,7 +17,7 @@ func TestAuthMintToken_HappyPath(t *testing.T) {
 	code := runAuth([]string{
 		"mint-token", "--ca-cert=" + certPath, "--ca-key=" + keyPath,
 		"--principal=csi@cluster", "--cap=chunk:read", "--cap=chunk:write", "--ttl=2h",
-	}, &out, &errBuf)
+	}, nil, &out, &errBuf)
 	if code != 0 {
 		t.Fatalf("mint-token code = %d, err = %s", code, errBuf.String())
 	}
@@ -60,7 +60,7 @@ func TestAuthMintToken_UsageErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, errBuf bytes.Buffer
-			if code := runAuth(tc.args, &out, &errBuf); code != tc.want {
+			if code := runAuth(tc.args, nil, &out, &errBuf); code != tc.want {
 				t.Errorf("code = %d, want %d (err=%s)", code, tc.want, errBuf.String())
 			}
 		})
@@ -81,7 +81,7 @@ func TestAuthMintToken_RuntimeErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, errBuf bytes.Buffer
-			if code := runAuth(tc.args, &out, &errBuf); code != 1 {
+			if code := runAuth(tc.args, nil, &out, &errBuf); code != 1 {
 				t.Errorf("code = %d, want 1", code)
 			}
 			if !strings.Contains(errBuf.String(), tc.want) {
