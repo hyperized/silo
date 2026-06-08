@@ -26,6 +26,31 @@ the glue between Kubernetes and your silo cluster:
 It does **not** deploy `silod`. The driver connects to a silo cluster you run
 (`silod.address`). See [Prerequisites](#prerequisites).
 
+How the pieces fit together:
+
+```
+   kubectl apply PVC                                   your pods
+          │                                                │
+          ▼                                                ▼  ReadWriteOnce mount
+   ┌──────────────┐   CSI gRPC    ┌───────────────────────────────────┐
+   │  silo-csi    │──────────────▶│  silo-csi node plugin (DaemonSet)  │
+   │  controller  │               │  attaches over NBD, mkfs, mounts   │
+   └──────┬───────┘               └────────────────┬──────────────────┘
+          │ create/snapshot volume                 │ NBD to node-local silod
+          ▼                                         ▼
+   ┌───────────────────────────────────────────────────────────────────┐
+   │            Cluster of identical silod nodes (gossip + CRDT)         │
+   │   chunk store · consistent-hash placement · N-way replication      │
+   └───────────────────────────────────────────────────────────────────┘
+```
+
+- **Provision:** the controller turns a PVC into a silo volume (an extent map).
+- **Attach:** the node plugin opens the volume over NBD from the silod on that
+  node, which **takes the volume's lease and fences any prior holder**, so a pod
+  rescheduled onto a new node steals its disk cleanly.
+- **Heal:** lose a node and its chunks re-replicate onto survivors in the
+  background; the namespace converges over gossip.
+
 ---
 
 ## Prerequisites

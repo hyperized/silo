@@ -1,14 +1,35 @@
-# Performance and the trade vs Ceph
+# The trade vs Ceph
 
-silo's writes are slower than Ceph's at default settings, and we don't pretend
-otherwise. The trade is deliberate, and this page explains exactly what you are
-buying with the extra latency so you can decide whether it fits your workload.
+silo trades against Ceph on two axes: a smaller operational surface in exchange
+for fewer features, and on-disk durability on every ACK in exchange for some write
+latency. This page explains both so you can decide whether the trade fits.
 
-**Jump to:** [What silo does on every write](#what-silo-does-on-every-write) ·
+**Jump to:** [Operational surface](#operational-surface) ·
+[What silo does on every write](#what-silo-does-on-every-write) ·
 [What Ceph does instead](#what-ceph-does-instead) ·
 [Where you'll feel it](#where-youll-feel-it) ·
 [Why silo makes this trade](#why-silo-doesnt-trade-durability-for-latency) ·
 [Knobs you get](#knobs-you-do-get) · [Measured baseline](#measured-baseline)
+
+---
+
+## Operational surface
+
+Running replicated storage well usually means running a lot of moving parts. A
+typical Ceph/Rook install has several daemon types to place and scale (monitors
+that must hold quorum, managers, metadata servers, an OSD per disk), a
+placement-group model you size up front and reshape as you grow, and an operator
+whose custom resources span dozens of fields before a single volume exists. It is
+powerful and proven — and most of that surface area is something you have to
+understand *before* you can run it safely.
+
+silo makes a smaller bet: one component (`silod`), deployed the same way
+everywhere, with as few decisions as possible between you and a working volume.
+You give up features for that — `ReadWriteOnce` volumes, close-to-open FUSE
+coherence, no erasure coding yet (see
+[What works today](../README.md#what-works-today) and
+[known-gaps.md](known-gaps.md)) — and on small synchronous writes you give up some
+latency, which the rest of this page covers.
 
 ---
 

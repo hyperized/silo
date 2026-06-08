@@ -7,25 +7,39 @@ no quorum to lose, no rebalance ceremony. It gives your pods `ReadWriteOnce`
 volumes through an ordinary `PersistentVolumeClaim` — and heals itself through
 network partitions without paging you.
 
-**Jump to:** [Design principles](#design-principles) · [What you get](#what-you-get) · [Why silo](#why-silo) · [How it works](#how-it-works-in-30-seconds) · [Try locally](#try-it-in-5-minutes-local) · [Deploy](#deploy) · [Kubernetes](#use-it-on-kubernetes) · [Performance](#performance) · [What works today](#what-works-today) · [Docs](#documentation)
+**Jump to:** [Design principles](#design-principles) · [What you get](#what-you-get) · [Try locally](#try-it-in-5-minutes-local) · [Deploy](#deploy) · [Kubernetes](#use-it-on-kubernetes) · [Performance](#performance) · [What works today](#what-works-today) · [Docs](#documentation)
 
 ---
 
 ## Design principles
 
-Four choices shape everything else. A feature that would violate one doesn't ship.
+silo's bet is that storage you can operate beats storage with every feature: one
+component, deployed the same way everywhere, with as few decisions as possible
+between you and a working volume. Five choices follow, and a feature that would
+violate one doesn't ship.
 
 - **One binary, symmetric nodes.** Every node runs the same `silod` and can do
-  every job — there are no monitor/metadata/OSD roles to size, place, and babysit.
-  Operational simplicity is the whole point.
+  every job — no monitor/metadata/OSD roles to size, place, and babysit. You
+  deploy one thing and scale it by adding more of the same.
+- **No quorum to lose.** Membership is SWIM gossip and the namespace is a CRDT, so
+  a partition keeps serving on both sides and **converges automatically** when the
+  network heals — no Raft, no "2 of 3 monitors up." A node joins by pointing at one
+  peer and leaves by dying; re-replication is a paced background task, not a
+  stop-the-world rebalance.
 - **Recoverable by default.** No protocol step needs a human to break a tie. A
-  partition heals on its own: both sides keep serving and converge when the link
-  returns.
+  volume is an extent map of immutable, encrypted chunks under a **fenced**
+  single-writer lease, so a split brain can't corrupt it and snapshots are free.
 - **Errors are instructions.** Every error tells you what to do next, not just
   what broke.
-- **Stdlib-first.** External dependencies require justification — the FUSE
-  protocol and the CSI bindings are built in-tree rather than pulled as libraries,
-  so there's less to audit and nothing surprising in the supply chain.
+- **Stdlib-first.** External dependencies require justification — the FUSE protocol
+  and CSI bindings are built in-tree, and volumes attach over **NBD** from the
+  mainline kernel, so there's no client to install and little to audit.
+
+silo trades a few things for this: volumes are `ReadWriteOnce`, the FUSE surface
+is close-to-open coherent (NFS-style), and there's no erasure coding yet. If you
+need RWX or EC today, silo isn't there — see [docs/known-gaps.md](docs/known-gaps.md).
+How this compares to Ceph, in operational surface and write latency, is in
+[docs/performance.md](docs/performance.md).
 
 ---
 
@@ -47,60 +61,6 @@ Four choices shape everything else. A feature that would violate one doesn't shi
 - **Operability built in.** Prometheus metrics, a ready-made Grafana overview
   dashboard (health markers over per-subject graphs), and a `siloctl` CLI for
   status, draining, and capacity rebalancing.
-
----
-
-## Why silo
-
-Running replicated storage well usually means running a lot of moving parts. A
-typical Ceph/Rook install has several daemon types to place and scale (monitors
-that must hold quorum, managers, metadata servers, an OSD per disk), a
-placement-group model you size up front and reshape as you grow, and an operator
-whose custom resources span dozens of fields before a single volume exists. It is
-powerful and proven — and most of that surface area is something you have to
-understand *before* you can run it safely.
-
-silo makes a smaller bet: one component, deployed the same way everywhere, with
-as few decisions as possible between you and a working volume.
-
-| You want | silo gives you |
-|---|---|
-| **One thing to deploy** | A single binary, `silod`. Every node is identical — no daemon roles to size or place. |
-| **No quorum to lose** | Membership is SWIM gossip; the namespace is a CRDT. A partition keeps serving on both sides and **converges automatically** when the network heals — no Raft, no "2 of 3 monitors up." |
-| **Joins and leaves that aren't events** | A node joins by pointing at one peer and leaves by dying. Re-replication is a paced background task, not a stop-the-world rebalance. |
-| **Storage you can reason about** | A volume is an extent map of immutable, encrypted chunks. Snapshots are free. A single-writer lease is **fenced**, so a split brain can't corrupt a volume. |
-| **No client to install** | Volumes attach over **NBD**, which ships in the mainline Linux kernel. |
-
-silo deliberately trades a few things for this simplicity: volumes are
-`ReadWriteOnce` (single fenced writer), the filesystem surface is close-to-open
-coherent (NFS-style), and there's no erasure coding yet. If you need RWX or EC
-today, silo isn't there — see [docs/known-gaps.md](docs/known-gaps.md).
-
----
-
-## How it works in 30 seconds
-
-```
-   kubectl apply PVC                                   your pods
-          │                                                │
-          ▼                                                ▼  ReadWriteOnce mount
-   ┌──────────────┐   CSI gRPC    ┌───────────────────────────────────┐
-   │  silo-csi    │──────────────▶│  silo-csi node plugin (DaemonSet)  │
-   │  controller  │               │  attaches over NBD, mkfs, mounts   │
-   └──────┬───────┘               └────────────────┬──────────────────┘
-          │ create/snapshot volume                 │ NBD to node-local silod
-          ▼                                         ▼
-   ┌───────────────────────────────────────────────────────────────────┐
-   │            Cluster of identical silod nodes (gossip + CRDT)         │
-   │   chunk store · consistent-hash placement · N-way replication      │
-   └───────────────────────────────────────────────────────────────────┘
-```
-
-- **Provision:** the controller turns a PVC into a silo volume (an extent map).
-- **Attach:** the node plugin opens the volume over NBD from the silod on that
-  node, which **takes the volume's lease and fences any prior holder**.
-- **Heal:** lose a node and its chunks re-replicate onto survivors in the
-  background; the namespace converges over gossip.
 
 ---
 
@@ -254,7 +214,7 @@ does on a write and why — is in **[docs/performance.md](docs/performance.md)**
 
 - **[docs/kubernetes.md](docs/kubernetes.md)** — install and operate silo-csi on Kubernetes (Helm values, StorageClass, snapshots, troubleshooting)
 - **[docs/operations.md](docs/operations.md)** — operator guide: configuration, deployment paths (co-located and dedicated), mTLS/credentials, NBD, troubleshooting
-- **[docs/performance.md](docs/performance.md)** — the write path, the trade vs Ceph, and the measured baseline
+- **[docs/performance.md](docs/performance.md)** — the trade vs Ceph: operational surface, the write path, and the measured baseline
 - **[docs/runbook.md](docs/runbook.md)** — production readiness checklist, golden-signal alerts, failure-recovery playbooks
 - **[docs/threat-model.md](docs/threat-model.md)** — what silo defends against, how, and the current security edges
 - **[docs/known-gaps.md](docs/known-gaps.md)** — what's not finished yet and why (deferred work, kernel-bound seams)
