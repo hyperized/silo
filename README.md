@@ -7,7 +7,7 @@ no quorum to lose, no rebalance ceremony. It gives your pods `ReadWriteOnce`
 volumes through an ordinary `PersistentVolumeClaim` — and heals itself through
 network partitions without paging you.
 
-**Jump to:** [Design principles](#design-principles) · [Why silo](#why-silo) · [What you get](#what-you-get) · [How it works](#how-it-works-in-30-seconds) · [Try locally](#try-it-in-5-minutes-local) · [Deploy](#deploy) · [Kubernetes](#use-it-on-kubernetes) · [Performance](#performance) · [What works today](#what-works-today) · [Docs](#documentation)
+**Jump to:** [Design principles](#design-principles) · [What you get](#what-you-get) · [Why silo](#why-silo) · [How it works](#how-it-works-in-30-seconds) · [Try locally](#try-it-in-5-minutes-local) · [Deploy](#deploy) · [Kubernetes](#use-it-on-kubernetes) · [Performance](#performance) · [What works today](#what-works-today) · [Docs](#documentation)
 
 ---
 
@@ -26,6 +26,27 @@ Four choices shape everything else. A feature that would violate one doesn't shi
 - **Stdlib-first.** External dependencies require justification — the FUSE
   protocol and the CSI bindings are built in-tree rather than pulled as libraries,
   so there's less to audit and nothing surprising in the supply chain.
+
+---
+
+## What you get
+
+- **Block volumes for Kubernetes.** An ordinary `PersistentVolumeClaim` against
+  the `silo` StorageClass becomes a `ReadWriteOnce` device in your pod. CSI-native
+  snapshots and clones; a fenced lease so a rescheduled pod steals its disk
+  cleanly instead of corrupting it.
+- **Self-healing replication.** Every chunk lives on N nodes. Lose one and its
+  chunks re-replicate onto survivors in the background — no rebalance to babysit.
+- **Encrypted at rest, always.** Chunks are AES-GCM encrypted with per-chunk keys;
+  cluster traffic is mTLS. Keys come from a file or a cloud KMS (AWS/GCP/Azure).
+- **Partition-tolerant namespace.** `mkdir`/`touch`/`ls`/`rm` keep working on both
+  sides of a split and converge afterward, with conflicts surfaced rather than
+  silently dropped.
+- **A shared filesystem too.** A from-scratch FUSE surface gives RWX,
+  close-to-open coherent access where you need many readers.
+- **Operability built in.** Prometheus metrics, a ready-made Grafana overview
+  dashboard (health markers over per-subject graphs), and a `siloctl` CLI for
+  status, draining, and capacity rebalancing.
 
 ---
 
@@ -54,27 +75,6 @@ silo deliberately trades a few things for this simplicity: volumes are
 `ReadWriteOnce` (single fenced writer), the filesystem surface is close-to-open
 coherent (NFS-style), and there's no erasure coding yet. If you need RWX or EC
 today, silo isn't there — see [docs/known-gaps.md](docs/known-gaps.md).
-
----
-
-## What you get
-
-- **Block volumes for Kubernetes.** An ordinary `PersistentVolumeClaim` against
-  the `silo` StorageClass becomes a `ReadWriteOnce` device in your pod. CSI-native
-  snapshots and clones; a fenced lease so a rescheduled pod steals its disk
-  cleanly instead of corrupting it.
-- **Self-healing replication.** Every chunk lives on N nodes. Lose one and its
-  chunks re-replicate onto survivors in the background — no rebalance to babysit.
-- **Encrypted at rest, always.** Chunks are AES-GCM encrypted with per-chunk keys;
-  cluster traffic is mTLS. Keys come from a file or a cloud KMS (AWS/GCP/Azure).
-- **Partition-tolerant namespace.** `mkdir`/`touch`/`ls`/`rm` keep working on both
-  sides of a split and converge afterward, with conflicts surfaced rather than
-  silently dropped.
-- **A shared filesystem too.** A from-scratch FUSE surface gives RWX,
-  close-to-open coherent access where you need many readers.
-- **Operability built in.** Prometheus metrics, a ready-made Grafana overview
-  dashboard (health markers over per-subject graphs), and a `siloctl` CLI for
-  status, draining, and capacity rebalancing.
 
 ---
 
