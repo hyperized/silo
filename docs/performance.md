@@ -41,10 +41,17 @@ When a client writes a chunk over NBD:
 2. Two or three nodes (your choice via `SILO_REPLICATION`) receive a copy.
 3. Each of those nodes writes the chunk to disk **and forces it to physical
    storage** before answering "done".
-4. silod tells the client OK only after a quorum has done so.
+4. silod tells the client OK only after a majority of that chunk's replicas have
+   done so.
 
 Once silod says the write succeeded, the data is on real disk on multiple
 machines. There is no background work to drain and no in-flight state to recover.
+
+This majority is **per chunk** — it is the chunk's own replica set acknowledging,
+not a cluster-wide consensus quorum. It is unrelated to the "no quorum to lose"
+property of membership: there is no Raft/monitor quorum that, once lost, takes the
+cluster down. Losing nodes here never blocks the cluster; it only leaves some
+chunks under-replicated until the scrubber heals them onto survivors.
 
 ## What Ceph does instead
 
@@ -63,7 +70,8 @@ more bytes.
 ## Why silo doesn't trade durability for latency
 
 - **Failure recovery stays simple.** If a silod dies mid-write, the write either
-  landed on a quorum of disks (it happened) or it didn't (it failed). There is no
+  landed on a majority of the chunk's replicas (it happened) or it didn't (it
+  failed). There is no
   third "the journal said OK, the data isn't at rest yet" state to reason about
   during a node loss.
 - **Nothing to size or tune.** No journal device to provision, no

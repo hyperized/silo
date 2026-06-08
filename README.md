@@ -181,9 +181,9 @@ and troubleshooting are in **[docs/kubernetes.md](docs/kubernetes.md)**.
 ## Performance
 
 silo's writes are slower than Ceph's at default settings, and the trade is
-deliberate: **every write is on real disk on a quorum of nodes before silod says
-OK** — no journal to drain, no in-flight state to recover after a node loss. The
-number you benchmark on day one is the number production sees.
+deliberate: **every write is flushed to real disk on multiple nodes before silod
+says OK** — no journal to drain, no in-flight state to recover after a node loss.
+The number you benchmark on day one is the number production sees.
 
 That costs you on small synchronous writes (transaction logs, `fsync`-heavy
 filesystems); bulk sequential I/O is much closer. `SILO_REPLICATION=2` and the
