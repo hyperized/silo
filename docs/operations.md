@@ -164,21 +164,35 @@ re-run `siloctl ca revoke` (even with no new serials) to refresh it.
 
 ## Deployment paths
 
-silo runs the same single binary everywhere; what changes is how many you run
-and how they find each other. There are three supported paths — pick by your
-durability and orchestration needs:
+silo runs the same single binary everywhere; what changes is *where* it runs and
+how many you run. Two axes decide your shape.
+
+**Where the disks live — co-located or dedicated.**
+
+- **Co-located (small scale).** Run silod on machines you already have: your
+  Kubernetes control-plane or worker nodes, or a couple of existing hosts. Inside
+  Kubernetes that's a DaemonSet using node-local disk; outside it's the standalone
+  binary under systemd. No separate storage hardware to buy or manage — this is
+  the right place to start and is fully production-capable with 3+ nodes.
+- **Dedicated (larger scale).** Run silod on its own set of machines sized for
+  storage and point your clients (Kubernetes clusters or anything speaking the
+  gRPC/NBD surface) at them. Same binary, same wiring; you've just moved the disks
+  off the compute nodes so storage and compute scale independently.
+
+**How many you run — durability.**
 
 | Path | Nodes | Survives a node loss? | Use it for |
 |---|---|---|---|
 | **[Standalone](#1-standalone-single-node)** | 1 | **No** (single copy — back it up) | edge, a single host, dev, a small block-volume or object store |
-| **[Cluster](#2-cluster-multi-node)** | 3+ | **Yes** (replication factor N) | self-managed hosts / VMs / Compose that need HA |
+| **[Cluster](#2-cluster-multi-node)** | 3+ | **Yes** (replication factor N) | co-located on your nodes, or a dedicated fleet |
 | **[Kubernetes](#3-kubernetes)** | 3+ | **Yes** | pods consuming silo as a CSI StorageClass |
 
-All three are production-capable. The difference between Standalone and Cluster
-is replication: a standalone node keeps **one** copy of each chunk (replication
+All paths are production-capable. The difference between Standalone and Cluster is
+replication: a standalone node keeps **one** copy of each chunk (replication
 clamps to the node count), so its durability comes from the disk and from
 [backups](#backups), not from peers. Add nodes — same CA, same encryption key —
-and it becomes a Cluster with no data migration.
+and it becomes a Cluster with no data migration, whether those nodes are
+co-located or dedicated.
 
 ### 1. Standalone (single node)
 
@@ -241,14 +255,25 @@ Each node serves its own gRPC/NBD locally; any node can coordinate a write.
 
 ### 3. Kubernetes
 
-Run `silod` as a `hostNetwork` DaemonSet (one per node) so the CSI node plugin
-reaches it at `127.0.0.1:10809`, fronted by a `Service` for the controller's
-gRPC. Set `SILO_GOSSIP_ADVERTISE` to the Pod IP (downward API), `SILO_NBD_ADDR`
-to enable block serving, and mount `SILO_DATA_DIR` on durable node-local storage.
-The cluster wiring is the same as path 2; the [`silo-csi` Helm chart](../deploy/helm/silo-csi)
-then installs the driver that turns volumes into a StorageClass. silod itself is
-operator-deployed today (a packaged `silod` chart is roadmapped —
-[known-gaps.md](known-gaps.md)). Full guide: **[kubernetes.md](kubernetes.md)**.
+**Co-located (the common case).** Run `silod` as a `hostNetwork` DaemonSet (one
+per node) so the CSI node plugin reaches it at `127.0.0.1:10809`, fronted by a
+`Service` for the controller's gRPC. Set `SILO_GOSSIP_ADVERTISE` to the Pod IP
+(downward API), `SILO_NBD_ADDR` to enable block serving, and mount
+`SILO_DATA_DIR` on durable node-local storage. The DaemonSet lands silod on
+whichever nodes you select — control-plane nodes for a small cluster, or a
+labelled subset of workers — using disk you already have.
+
+**Dedicated.** For a larger or independently-scaled store, run the silod Cluster
+(path 2) on its own machines and point the CSI controller at it via
+`silod.address`; the node plugin dials that fleet instead of a node-local silod.
+Storage capacity then grows by adding silod machines without touching the compute
+nodes.
+
+Either way the cluster wiring is the same as path 2; the
+[`silo-csi` Helm chart](../deploy/helm/silo-csi) installs the driver that turns
+volumes into a StorageClass. silod itself is operator-deployed today (a packaged
+`silod` chart is roadmapped — [known-gaps.md](known-gaps.md)). Full guide:
+**[kubernetes.md](kubernetes.md)**.
 
 ---
 
@@ -603,6 +628,23 @@ Attaching takes the volume's **single-writer lease** and fences any stale
 holder, so moving a volume between hosts is safe — the old writer's writes are
 refused at the data nodes. On Kubernetes the CSI node plugin does all of this
 for you.
+
+Two end-to-end demos prove the block surface from a clean checkout; they differ
+in *which* NBD client mounts the volume, because that client is the part worth
+verifying independently:
+
+```sh
+make nbd-demo      # privileged Linux container: nbd-client attaches the volume,
+                   # mkfs.ext4 + mount, write/read, detach/re-attach to show the
+                   # data persists. Needs a Linux host with the `nbd` kernel
+                   # module (the macOS Docker VM does not ship it).
+
+make nbd-demo-vm   # boots a throwaway aarch64 Linux guest under QEMU with the
+                   # volume attached as its virtio disk over NBD, so QEMU's own
+                   # NBD client is the verifier. Runs fully on macOS via the
+                   # Hypervisor framework — no host NBD kernel module needed.
+                   # Requires `qemu` (brew install qemu) and Docker.
+```
 
 ---
 
