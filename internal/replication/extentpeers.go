@@ -118,6 +118,22 @@ func (p *ExtentGRPCPeers) Stat(ctx context.Context, addr, volumeID string) (bool
 	return resp.GetHas(), resp.GetCount(), nil
 }
 
+// Delete asks addr to remove volumeID's map from its local store — the per-peer
+// half of the coordinator's delete fan-out. The peer treats an unknown map as
+// success, so this is idempotent.
+func (p *ExtentGRPCPeers) Delete(ctx context.Context, addr, volumeID string) error {
+	cli, err := p.client(addr)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, extentPeerTimeout)
+	defer cancel()
+	if _, err := cli.Delete(ctx, &extentv1.DeleteRequest{VolumeId: volumeID}); err != nil {
+		return fmt.Errorf("replication: peer %s did not delete the extent map of volume %q (%w)", addr, volumeID, err)
+	}
+	return nil
+}
+
 // Close shuts every cached peer connection. Called on silod shutdown.
 func (p *ExtentGRPCPeers) Close() error {
 	p.mu.Lock()

@@ -88,6 +88,17 @@ func TestExtentPeers_ApplyFetchStatRoundTrip(t *testing.T) {
 	if len(gotBig) != 2500 {
 		t.Errorf("fetched %d entries, want 2500", len(gotBig))
 	}
+
+	// Delete removes a map; Stat then reports it absent. Deleting again is a no-op.
+	if err := peers.Delete(ctx, addr, "vol"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if has, _, _ := peers.Stat(ctx, addr, "vol"); has {
+		t.Error("Stat should report a deleted map as absent")
+	}
+	if err := peers.Delete(ctx, addr, "never-existed"); err != nil {
+		t.Errorf("Delete of an unknown map should be a no-op, got %v", err)
+	}
 }
 
 func TestExtentPeers_ServerRejectsEmptyVolume(t *testing.T) {
@@ -104,5 +115,8 @@ func TestExtentPeers_ServerRejectsEmptyVolume(t *testing.T) {
 	}
 	if _, _, err := peers.Stat(ctx, addr, ""); err == nil {
 		t.Error("Stat with an empty volume id should error")
+	}
+	if err := peers.Delete(ctx, addr, ""); err == nil {
+		t.Error("Delete with an empty volume id should error")
 	}
 }

@@ -23,11 +23,13 @@ func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)
 
 // fakeES is a minimal extent store for the service unit tests.
 type fakeES struct {
-	merged  map[string][]crdt.MapEntry[uint64, string]
-	ensured []string
-	snap    map[string][]crdt.MapEntry[uint64, string]
-	has     map[string]bool
-	length  map[string]int
+	merged    map[string][]crdt.MapEntry[uint64, string]
+	ensured   []string
+	snap      map[string][]crdt.MapEntry[uint64, string]
+	has       map[string]bool
+	length    map[string]int
+	deleted   []string
+	deleteErr error
 }
 
 func newFakeES() *fakeES {
@@ -39,6 +41,13 @@ func (f *fakeES) Ensure(vol string)                                   { f.ensure
 func (f *fakeES) Snapshot(vol string) []crdt.MapEntry[uint64, string] { return f.snap[vol] }
 func (f *fakeES) Has(vol string) bool                                 { return f.has[vol] }
 func (f *fakeES) Len(vol string) int                                  { return f.length[vol] }
+func (f *fakeES) Delete(vol string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deleted = append(f.deleted, vol)
+	return nil
+}
 
 // collectStream captures the GetResponse frames the service streams.
 type collectStream struct {
@@ -124,6 +133,30 @@ func TestExtentService_Get(t *testing.T) {
 	// A Send failure surfaces.
 	if err := svc.Get(&extentv1.GetRequest{VolumeId: "vol"}, errStream{}); err == nil {
 		t.Error("a Send failure should surface")
+	}
+}
+
+func TestExtentService_Delete(t *testing.T) {
+	store := newFakeES()
+	svc := transport.NewExtentService(store, quiet())
+	ctx := context.Background()
+
+	if _, err := svc.Delete(ctx, &extentv1.DeleteRequest{VolumeId: ""}); code(err) != codes.InvalidArgument {
+		t.Errorf("empty volume id: got code %v, want InvalidArgument", code(err))
+	}
+
+	if _, err := svc.Delete(ctx, &extentv1.DeleteRequest{VolumeId: "vol"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if len(store.deleted) != 1 || store.deleted[0] != "vol" {
+		t.Errorf("Delete not forwarded to the store: %v", store.deleted)
+	}
+
+	// A store failure becomes an Internal error so the caller can fall back on
+	// the reaper.
+	store.deleteErr = errors.New("read-only fs")
+	if _, err := svc.Delete(ctx, &extentv1.DeleteRequest{VolumeId: "vol"}); code(err) != codes.Internal {
+		t.Errorf("store failure: got code %v, want Internal", code(err))
 	}
 }
 

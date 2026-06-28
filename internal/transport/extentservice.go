@@ -28,6 +28,7 @@ type ExtentStore interface {
 	Snapshot(volumeID string) []crdt.MapEntry[uint64, string]
 	Has(volumeID string) bool
 	Len(volumeID string) int
+	Delete(volumeID string) error
 }
 
 // ExtentService adapts an extent-map store to the gRPC ExtentMap service.
@@ -89,6 +90,20 @@ func (s *ExtentService) Stat(_ context.Context, req *extentv1.StatRequest) (*ext
 		Has:   s.store.Has(req.GetVolumeId()),
 		Count: int64(s.store.Len(req.GetVolumeId())),
 	}, nil
+}
+
+// Delete removes a volume's map from this node, idempotently — the coordinator
+// fans this out to the replica set on volume deletion. Removing an unknown map
+// is success; a real removal failure (e.g. a read-only data dir) is surfaced so
+// the caller can fall back on the reaper.
+func (s *ExtentService) Delete(_ context.Context, req *extentv1.DeleteRequest) (*extentv1.DeleteResponse, error) {
+	if req.GetVolumeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "extent: a volume id is required")
+	}
+	if err := s.store.Delete(req.GetVolumeId()); err != nil {
+		return nil, status.Errorf(codes.Internal, "extent: could not delete the map of volume %q (%v)", req.GetVolumeId(), err)
+	}
+	return &extentv1.DeleteResponse{}, nil
 }
 
 // entriesFromProto converts wire entries into CRDT map entries.
