@@ -142,7 +142,7 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 		openTokenStore = prevTokens
 	})
 	newHTTPSubsystem = func(_ *config.Config, _ string, _ *slog.Logger, _ http.Handler) subsystem { return httpSub }
-	newGRPCSubsystem = func(_ *config.Config, _ *tls.Config, _ *transport.TokenAuthenticator, _ chunkstore.Store, _ transport.Coordinator, _ transport.NamespaceOps, _ transport.ExtentStore, _ transport.StatusMembers, _ transport.Drainer, _ string, _ *slog.Logger) subsystem {
+	newGRPCSubsystem = func(_ *config.Config, _ *tls.Config, _ *transport.TokenAuthenticator, _ chunkstore.Store, _ transport.Coordinator, _ transport.NamespaceOps, _ transport.ExtentStore, _ transport.ExtentDeleter, _ transport.StatusMembers, _ transport.Drainer, _ string, _ *slog.Logger) subsystem {
 		return grpcSub
 	}
 	newBootstrapSubsystem = func(_ *config.Config, _ *tls.Config, _ transport.TokenRedeemer, _ transport.ClientCertMinter, _ *slog.Logger) subsystem {

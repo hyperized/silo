@@ -24,6 +24,17 @@ type NamespaceOps interface {
 	Manifest(path string) ([]string, error)
 	CreateVolume(path string, extentSize int64, opts ...namespace.VolumeOption) (string, error)
 	SnapshotVolume(srcPath, dstPath string) (string, error)
+	VolumeInodeID(path string) (string, error)
+}
+
+// ExtentDeleter removes a volume's extent map from its replica set.
+// *replication.ExtentCoordinator satisfies it via DeleteMap. When wired (see
+// WithExtentDeleter), Remove deletes a volume's map synchronously as the volume
+// is removed — the prompt half of the delete path; the extent reaper is the
+// backstop. Without it, Remove touches only the directory tree and the reaper
+// alone reclaims the map.
+type ExtentDeleter interface {
+	DeleteMap(ctx context.Context, volumeID string) error
 }
 
 // NamespaceService exposes the node's namespace replica over gRPC. Writes
@@ -32,13 +43,27 @@ type NamespaceOps interface {
 type NamespaceService struct {
 	namespacev1.UnimplementedNamespaceStoreServer
 
-	ns     NamespaceOps
-	logger *slog.Logger
+	ns            NamespaceOps
+	extentDeleter ExtentDeleter
+	logger        *slog.Logger
+}
+
+// NamespaceOption configures a NamespaceService at construction.
+type NamespaceOption func(*NamespaceService)
+
+// WithExtentDeleter makes Remove also delete a removed volume's extent map from
+// its replica set, so a deleted volume's map does not outlive it.
+func WithExtentDeleter(d ExtentDeleter) NamespaceOption {
+	return func(s *NamespaceService) { s.extentDeleter = d }
 }
 
 // NewNamespaceService wires a namespace replica onto the gRPC surface.
-func NewNamespaceService(ns NamespaceOps, logger *slog.Logger) *NamespaceService {
-	return &NamespaceService{ns: ns, logger: logger}
+func NewNamespaceService(ns NamespaceOps, logger *slog.Logger, opts ...NamespaceOption) *NamespaceService {
+	s := &NamespaceService{ns: ns, logger: logger}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Mkdir creates a directory at the requested path.
@@ -59,10 +84,25 @@ func (s *NamespaceService) Touch(_ context.Context, req *namespacev1.TouchReques
 	return &namespacev1.TouchResponse{Inode: id}, nil
 }
 
-// Remove deletes the entry at the requested path.
-func (s *NamespaceService) Remove(_ context.Context, req *namespacev1.RemoveRequest) (*namespacev1.RemoveResponse, error) {
+// Remove deletes the entry at the requested path. When an extent deleter is
+// wired and the path is a volume, its extent map is also deleted from the
+// replica set — captured before removal (afterwards the path no longer
+// resolves) and best-effort afterwards (a failure is logged, not returned: the
+// volume is logically gone and the reaper reclaims any leftover map).
+func (s *NamespaceService) Remove(ctx context.Context, req *namespacev1.RemoveRequest) (*namespacev1.RemoveResponse, error) {
+	var volumeID string
+	if s.extentDeleter != nil {
+		if id, err := s.ns.VolumeInodeID(req.GetPath()); err == nil {
+			volumeID = id // a non-volume (dir, or missing) yields no id and is skipped
+		}
+	}
 	if err := s.ns.Remove(req.GetPath()); err != nil {
 		return nil, mapNamespaceError(err)
+	}
+	if volumeID != "" {
+		if err := s.extentDeleter.DeleteMap(ctx, volumeID); err != nil {
+			s.logger.Warn("could not delete a volume's extent map on removal; the reaper will reclaim it", "volume", volumeID, "error", err)
+		}
 	}
 	return &namespacev1.RemoveResponse{}, nil
 }

@@ -23,11 +23,18 @@ type fakeNamespaceOps struct {
 	volExtentSize int64       // records the extent size passed to CreateVolume
 	snapSrc       string      // records the source path passed to SnapshotVolume
 	snapDst       string      // records the dest path passed to SnapshotVolume
+	volInodeID    string      // returned by VolumeInodeID ("" => not a volume)
+	volInodeErr   error       // error returned by VolumeInodeID
+	removed       []string    // records the paths passed to Remove
 }
 
 func (f *fakeNamespaceOps) Mkdir(string) (string, error) { return f.id, f.err }
 func (f *fakeNamespaceOps) Touch(string) (string, error) { return f.id, f.err }
-func (f *fakeNamespaceOps) Remove(string) error          { return f.err }
+func (f *fakeNamespaceOps) Remove(path string) error {
+	f.removed = append(f.removed, path)
+	return f.err
+}
+func (f *fakeNamespaceOps) VolumeInodeID(string) (string, error) { return f.volInodeID, f.volInodeErr }
 func (f *fakeNamespaceOps) List(string) ([]namespace.ResolvedEntry, error) {
 	return f.entries, f.err
 }
@@ -50,7 +57,65 @@ func (f *fakeNamespaceOps) SnapshotVolume(src, dst string) (string, error) {
 }
 
 func nsService(ops NamespaceOps) *NamespaceService {
-	return NewNamespaceService(ops, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return NewNamespaceService(ops, discardNSLogger())
+}
+
+func discardNSLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+type fakeExtentDeleter struct {
+	deleted []string
+	err     error
+}
+
+func (f *fakeExtentDeleter) DeleteMap(_ context.Context, volumeID string) error {
+	f.deleted = append(f.deleted, volumeID)
+	return f.err
+}
+
+func TestNamespaceService_RemoveDeletesExtentMap(t *testing.T) {
+	ctx := context.Background()
+
+	// A volume: its inode id is captured before removal and its map deleted.
+	del := &fakeExtentDeleter{}
+	ops := &fakeNamespaceOps{volInodeID: "inode-vol-1"}
+	svc := NewNamespaceService(ops, discardNSLogger(), WithExtentDeleter(del))
+	if _, err := svc.Remove(ctx, &namespacev1.RemoveRequest{Path: "/csi/volumes/v"}); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if len(ops.removed) != 1 || ops.removed[0] != "/csi/volumes/v" {
+		t.Errorf("namespace Remove not called as expected: %v", ops.removed)
+	}
+	if len(del.deleted) != 1 || del.deleted[0] != "inode-vol-1" {
+		t.Errorf("extent map not deleted for the resolved inode: %v", del.deleted)
+	}
+
+	// A non-volume path (VolumeInodeID errors): removed, but no extent delete.
+	del2 := &fakeExtentDeleter{}
+	ops2 := &fakeNamespaceOps{volInodeErr: namespace.ErrNotVolume}
+	svc2 := NewNamespaceService(ops2, discardNSLogger(), WithExtentDeleter(del2))
+	if _, err := svc2.Remove(ctx, &namespacev1.RemoveRequest{Path: "/csi/volumes"}); err != nil {
+		t.Fatalf("Remove dir: %v", err)
+	}
+	if len(del2.deleted) != 0 {
+		t.Errorf("a non-volume removal should not delete an extent map: %v", del2.deleted)
+	}
+
+	// A DeleteMap failure is logged, not returned: removal still succeeds.
+	del3 := &fakeExtentDeleter{err: errors.New("replica down")}
+	svc3 := NewNamespaceService(&fakeNamespaceOps{volInodeID: "inode-vol-3"}, discardNSLogger(), WithExtentDeleter(del3))
+	if _, err := svc3.Remove(ctx, &namespacev1.RemoveRequest{Path: "/csi/volumes/v3"}); err != nil {
+		t.Errorf("a best-effort extent-map delete failure must not fail Remove: %v", err)
+	}
+
+	// A namespace Remove failure maps through and skips the extent delete.
+	del4 := &fakeExtentDeleter{}
+	svc4 := NewNamespaceService(&fakeNamespaceOps{volInodeID: "inode-vol-4", err: namespace.ErrNotExist}, discardNSLogger(), WithExtentDeleter(del4))
+	if _, err := svc4.Remove(ctx, &namespacev1.RemoveRequest{Path: "/csi/volumes/gone"}); status.Code(err) != codes.NotFound {
+		t.Errorf("Remove error code = %v, want NotFound", status.Code(err))
+	}
+	if len(del4.deleted) != 0 {
+		t.Errorf("a failed namespace Remove should not delete the extent map: %v", del4.deleted)
+	}
 }
 
 func TestNamespaceService_HappyPaths(t *testing.T) {
