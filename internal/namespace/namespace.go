@@ -246,7 +246,7 @@ func (n *Namespace) persistLocked() {
 	if n.path == "" {
 		return
 	}
-	b, err := n.snapshotLocked()
+	b, err := n.snapshotLocked(true) // persist the full state, extent maps included
 	if err != nil {
 		n.logger.Warn("namespace: could not serialise state to persist it", "error", err)
 		return
@@ -868,14 +868,29 @@ type wireInode struct {
 	LeaseTS     *hlc.Timestamp `json:"lease_ts,omitempty"`
 }
 
-// Snapshot serializes the whole namespace for an anti-entropy exchange.
+// Snapshot serializes the whole namespace, extent maps included, for local
+// persistence (namespace.json) and backup. Use GossipSnapshot for the gossip
+// exchange — that one omits extent maps, which replicate to a volume's replica
+// set out of band and would otherwise overflow the gossip per-message cap.
 func (n *Namespace) Snapshot() ([]byte, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.snapshotLocked()
+	return n.snapshotLocked(true)
 }
 
-func (n *Namespace) snapshotLocked() ([]byte, error) {
+// GossipSnapshot serializes the namespace for the anti-entropy exchange WITHOUT
+// volume extent maps: a single large map exceeds the gossip per-message cap and
+// stranded a node's whole namespace. Extent maps travel to a volume's replica
+// set via replication.ExtentCoordinator instead; the gossiped snapshot still
+// carries every volume's existence, size, extent size, and lease, so any node
+// can locate and warm a volume's map.
+func (n *Namespace) GossipSnapshot() ([]byte, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.snapshotLocked(false)
+}
+
+func (n *Namespace) snapshotLocked(includeExtents bool) ([]byte, error) {
 	w := wireNamespace{Inodes: make([]wireInode, 0, len(n.inodes))}
 	for _, in := range n.inodes {
 		wi := wireInode{ID: in.ID, Type: in.Type, ACLValue: in.ACL.Value, ACLTS: in.ACL.TS}
@@ -888,7 +903,9 @@ func (n *Namespace) snapshotLocked() ([]byte, error) {
 		if in.extents != nil {
 			wi.ExtentSize = in.ExtentSize
 			wi.Size = in.Size
-			wi.Extents = in.extents.Entries()
+			if includeExtents {
+				wi.Extents = in.extents.Entries()
+			}
 		}
 		if !in.lease.TS.IsZero() {
 			ts := in.lease.TS

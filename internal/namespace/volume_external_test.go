@@ -35,6 +35,56 @@ func TestNamespace_VolumeInodeID(t *testing.T) {
 	}
 }
 
+func TestNamespace_GossipSnapshotOmitsExtentsButKeepsScalars(t *testing.T) {
+	var clk int64 = 100
+	src := nsAt("a", &clk)
+	clk++
+	if _, err := src.CreateVolume("/vol", 4096); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	clk++
+	if _, err := src.AcquireLease("/vol", "w"); err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	clk++
+	if err := src.WriteExtent("/vol", 0, "c0", "w"); err != nil {
+		t.Fatalf("WriteExtent: %v", err)
+	}
+
+	// The gossip snapshot carries the volume's existence and scalars but NOT its
+	// extent map (which replicates to the replica set out of band).
+	gb, err := src.GossipSnapshot()
+	if err != nil {
+		t.Fatalf("GossipSnapshot: %v", err)
+	}
+	dstG := nsAt("b", &clk)
+	if err := dstG.MergeBytes(gb); err != nil {
+		t.Fatalf("MergeBytes(gossip): %v", err)
+	}
+	if got, err := dstG.Extents("/vol"); err != nil || len(got) != 0 {
+		t.Errorf("gossip-merged extents = (%v,%v), want empty", got, err)
+	}
+	if sz, err := dstG.ExtentSize("/vol"); err != nil || sz != 4096 {
+		t.Errorf("gossip should still carry extent size: (%d,%v)", sz, err)
+	}
+	if lease, err := dstG.Lease("/vol"); err != nil || lease.Holder != "w" {
+		t.Errorf("gossip should still carry the lease: (%+v,%v)", lease, err)
+	}
+
+	// The full snapshot (persist/backup) still carries the extent map.
+	sb, err := src.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	dstS := nsAt("c", &clk)
+	if err := dstS.MergeBytes(sb); err != nil {
+		t.Fatalf("MergeBytes(full): %v", err)
+	}
+	if got, err := dstS.Extents("/vol"); err != nil || got[0] != "c0" {
+		t.Errorf("full snapshot should carry extents: (%v,%v)", got, err)
+	}
+}
+
 func TestNamespace_CreateVolumeWriteReadExtents(t *testing.T) {
 	var clk int64 = 100
 	ns := nsAt("a", &clk)

@@ -40,7 +40,7 @@ import (
 // it reconciles across nodes on the existing anti-entropy exchange.
 type namespaceSyncExt struct{ ns *namespace.Namespace }
 
-func (e namespaceSyncExt) LocalState() ([]byte, error) { return e.ns.Snapshot() }
+func (e namespaceSyncExt) LocalState() ([]byte, error) { return e.ns.GossipSnapshot() }
 func (e namespaceSyncExt) MergeRemote(b []byte) error  { return e.ns.MergeBytes(b) }
 
 // shutdownTimeout bounds graceful shutdown of every sub-component. Tuned
