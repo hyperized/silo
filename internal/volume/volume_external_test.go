@@ -298,6 +298,38 @@ func TestVolume_ErrorPaths(t *testing.T) {
 			t.Errorf("partial WriteAt read err = %v, want errBoom", err)
 		}
 	})
+
+	// The cases above stay within one extent (the single-extent fast path). The
+	// ones below span two extents (16B / partial over 8B extents) to drive the
+	// parallel multi-extent path, whose per-worker error handling and coalesced
+	// rebind are separate branches.
+	t.Run("multi-extent put fails", func(t *testing.T) {
+		v, _, chunks := openVol(t, 8)
+		chunks.putErr = errBoom
+		// 16B over extents 0,1: both workers' PutChunk fails, so every result
+		// carries an error and the result walk breaks at the first one.
+		if _, err := v.WriteAt(make([]byte, 16), 0); !errors.Is(err, errBoom) {
+			t.Errorf("multi-extent WriteAt put err = %v, want errBoom", err)
+		}
+	})
+	t.Run("multi-extent RMW read fails", func(t *testing.T) {
+		v, meta, _ := openVol(t, 8)
+		meta.extentErr = errBoom
+		// A partial write straddling two extents forces a read-modify-write in
+		// each worker; the extent lookup error surfaces from inside the worker.
+		if _, err := v.WriteAt(make([]byte, 8), 4); !errors.Is(err, errBoom) {
+			t.Errorf("multi-extent RMW err = %v, want errBoom", err)
+		}
+	})
+	t.Run("multi-extent rebind fails", func(t *testing.T) {
+		v, meta, _ := openVol(t, 8)
+		meta.writeErr = errBoom
+		// All workers' puts succeed, so the run reaches the coalesced
+		// WriteExtents rebind, which then fails.
+		if _, err := v.WriteAt(make([]byte, 16), 0); !errors.Is(err, errBoom) {
+			t.Errorf("multi-extent rebind err = %v, want errBoom", err)
+		}
+	})
 }
 
 func TestVolume_ConcurrentWritesDistinctExtents(t *testing.T) {
