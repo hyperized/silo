@@ -75,7 +75,7 @@ Wire these first; they catch the failures that matter.
 | **Incompatible peer** | `increase(silo_gossip_incompatible_messages_total[10m]) > 0` | A node is on an unsupported protocol — finish or roll back the upgrade. |
 | **Write latency** | `histogram_quantile(0.99, silo_chunk_write_latency_seconds)` high | Coordinator/replication is struggling. |
 
-Full series reference: [operations.md#health--metrics](operations.md#health--metrics).
+Full series reference: [operations.md#health-metrics--profiling](operations.md#health-metrics--profiling).
 
 ---
 
@@ -108,6 +108,30 @@ room — existing chunks keep serving throughout. The fix is the same at either
 tier: **add capacity or drain.** If writes start failing cluster-wide, enough
 nodes are hard-full that quorum can't be met — add nodes. See
 [Disk high-watermarks](operations.md#disk-high-watermarks-diskpressure).
+
+### silod memory looks high / it was OOMKilled
+
+First decide whether it is real. silod writes immutable chunk files, so under
+sustained writes most of its container **RSS / `memory.current` is reclaimable
+page cache** (`inactive_file`), not live heap — a multi-GB RSS is usually
+normal. Judge by the **Go heap** or the cgroup's **`anon`**, not RSS:
+
+```sh
+cat /sys/fs/cgroup/memory.stat | grep -E '^(anon|file|inactive_file) '   # anon = real footprint
+```
+
+If `anon` (or the Go heap) really is large or climbing, enable profiling
+(`SILO_PPROF=1`, restart) and capture a heap profile —
+[operations.md#profiling-pprof](operations.md#profiling-pprof):
+
+```sh
+go tool pprof http://<node>:7080/debug/pprof/heap   # inuse_space = live heap
+```
+
+For an actual OOMKill, the usual trigger is a transient spike during a
+concurrent attach/format storm rather than steady growth: give the container
+enough limit to absorb the peak (a few hundred MiB of `anon` plus headroom),
+and optionally set `GOMEMLIMIT` so the GC defends a soft ceiling.
 
 ### A certificate is compromised
 
