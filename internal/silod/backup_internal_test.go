@@ -40,17 +40,17 @@ func TestNewBackupSubsystem(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// A bad target URL is rejected.
-	if _, err := newBackupSubsystem(&config.Config{BackupTarget: "ftp://nope"}, rawStore{}, fakeSnap{}, logger); err == nil {
+	if _, err := newBackupSubsystem(&config.Config{BackupTarget: "ftp://nope"}, rawStore{}, fakeSnap{}, nil, logger); err == nil {
 		t.Error("a bad target URL should error")
 	}
 
 	// A store without raw reads cannot be backed up.
-	if _, err := newBackupSubsystem(&config.Config{BackupTarget: t.TempDir()}, minimalStore{}, fakeSnap{}, logger); err == nil {
+	if _, err := newBackupSubsystem(&config.Config{BackupTarget: t.TempDir()}, minimalStore{}, fakeSnap{}, nil, logger); err == nil {
 		t.Error("a store without RawChunk should error")
 	}
 
 	// A valid local target + raw-capable store builds the subsystem.
-	sub, err := newBackupSubsystem(&config.Config{BackupTarget: t.TempDir(), NodeID: "n"}, rawStore{}, fakeSnap{}, logger)
+	sub, err := newBackupSubsystem(&config.Config{BackupTarget: t.TempDir(), NodeID: "n"}, rawStore{}, fakeSnap{}, nil, logger)
 	if err != nil {
 		t.Fatalf("newBackupSubsystem: %v", err)
 	}

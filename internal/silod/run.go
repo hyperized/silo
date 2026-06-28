@@ -503,7 +503,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		subs = append(subs, newNBDSubsystem(cfg, ns, coord, extCoord, clock, logger))
 	}
 	if cfg.BackupTarget != "" {
-		backupSub, err := newBackupSubsystem(cfg, store, ns, logger)
+		backupSub, err := newBackupSubsystem(cfg, store, ns, extStore, logger)
 		if err != nil {
 			return err
 		}
