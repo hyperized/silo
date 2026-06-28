@@ -22,6 +22,7 @@ import (
 	"github.com/hyperized/silo/internal/crypto"
 	"github.com/hyperized/silo/internal/diskusage"
 	"github.com/hyperized/silo/internal/exporter"
+	"github.com/hyperized/silo/internal/extentmap"
 	"github.com/hyperized/silo/internal/gossip"
 	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/membership"
@@ -70,9 +71,10 @@ var (
 		}
 		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger, opts...)}
 	}
-	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
+	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, extStore transport.ExtentStore, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
 		opts := []transport.GRPCOption{
 			transport.WithStatusService(transport.NewStatusService(members, store, cfg.DataDir, cfg.NodeID, version, logger)),
+			transport.WithExtentService(transport.NewExtentService(extStore, logger)),
 		}
 		if drainer != nil {
 			opts = append(opts, transport.WithNodeAdminService(transport.NewNodeAdminService(drainer, cfg.NodeID, logger)))
@@ -91,8 +93,8 @@ var (
 	}
 	// newNBDSubsystem builds the NBD block-device listener. Only constructed
 	// when SILO_NBD_ADDR is set, since NBD is unauthenticated block I/O.
-	newNBDSubsystem = func(cfg *config.Config, ns nsVolumes, coord transport.Coordinator, logger *slog.Logger) subsystem {
-		backend := newVolumeBackend(ns, coord, cfg.NodeID, logger)
+	newNBDSubsystem = func(cfg *config.Config, ns nsVolumes, coord transport.Coordinator, extCoord extentCoord, clock *hlc.Clock, logger *slog.Logger) subsystem {
+		backend := newVolumeBackend(ns, coord, cfg.NodeID, logger, extCoord, clock, cfg.ExtentReplication)
 		return newNBDSub(cfg.NBDAddr, nbd.NewServer(backend, logger), logger)
 	}
 	newBootstrapSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokens transport.TokenRedeemer, minter transport.ClientCertMinter, logger *slog.Logger) subsystem {
@@ -427,7 +429,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// counting an alert when a peer runs ahead beyond the threshold — the
 	// early signal of broken time sync, which silently corrupts write order.
 	skew := clockskew.New(cfg.MaxClockSkew, logger)
-	ns, err := newNamespace(hlc.New(cfg.NodeID), filepath.Join(cfg.DataDir, "namespace.json"), logger, namespace.WithPeerClockObserver(skew.Observe))
+	clock := hlc.New(cfg.NodeID)
+	ns, err := newNamespace(clock, filepath.Join(cfg.DataDir, "namespace.json"), logger, namespace.WithPeerClockObserver(skew.Observe))
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not open the namespace state (%w)", err)
 	}
@@ -446,6 +449,19 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	peers := replication.NewGRPCPeers(credentials.NewTLS(peerTLS), logger)
 	defer func() { _ = peers.Close() }()
 	coord := newMeteredCoord(replication.New(router, store, peers, cfg.Replication, logger), cfg.NodeID)
+
+	// The extent-map coordinator replicates each volume's extent map to the
+	// volume's replica set (keyed by inode id, un-steered placement) instead of
+	// gossiping it — so a large map no longer overflows the gossip per-message
+	// cap and a volume can be served on any node. The store is this node's local
+	// replica; extPeers dials the same mTLS data plane as chunks.
+	extStore, err := extentmap.Open(filepath.Join(cfg.DataDir, "extents"), logger)
+	if err != nil {
+		return fmt.Errorf("silod.Run: could not open the extent-map store (%w)", err)
+	}
+	extPeers := replication.NewExtentGRPCPeers(credentials.NewTLS(peerTLS), logger)
+	defer func() { _ = extPeers.Close() }()
+	extCoord := replication.NewExtentCoordinator(router, extStore, extPeers, cfg.Replication, logger)
 
 	// The exporter renders silod's Prometheus exposition at /metrics, which the
 	// observability server hosts on its shared listener. Instrumented
@@ -477,14 +493,14 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger, exp.Handler()),
-		newGRPCSubsystem(cfg, serverTLS, tokenAuth, store, coord, ns, members, gossipDrainer(gossipSubsys), version, logger),
+		newGRPCSubsystem(cfg, serverTLS, tokenAuth, store, coord, ns, extStore, members, gossipDrainer(gossipSubsys), version, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
 		scrubberSubsys,
 		rebalancerSubsys,
 	}
 	if cfg.NBDAddr != "" {
-		subs = append(subs, newNBDSubsystem(cfg, ns, coord, logger))
+		subs = append(subs, newNBDSubsystem(cfg, ns, coord, extCoord, clock, logger))
 	}
 	if cfg.BackupTarget != "" {
 		backupSub, err := newBackupSubsystem(cfg, store, ns, logger)

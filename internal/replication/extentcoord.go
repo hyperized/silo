@@ -130,6 +130,7 @@ func (c *ExtentCoordinator) Warm(ctx context.Context, volumeID string) error {
 	}
 	self := c.place.SelfID()
 	var errs []error
+	unreachable := 0
 	for _, target := range replicas {
 		if target == self {
 			continue // local.Has was already false; cannot fetch from ourselves
@@ -137,11 +138,13 @@ func (c *ExtentCoordinator) Warm(ctx context.Context, volumeID string) error {
 		addr, ok := c.place.DataAddr(target)
 		if !ok {
 			errs = append(errs, fmt.Errorf("node %q has no advertised data address", target))
+			unreachable++
 			continue
 		}
 		has, _, err := c.peers.Stat(ctx, addr, volumeID)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("peer %s: %w", target, err))
+			unreachable++
 			continue
 		}
 		if !has {
@@ -150,12 +153,23 @@ func (c *ExtentCoordinator) Warm(ctx context.Context, volumeID string) error {
 		entries, err := c.peers.Fetch(ctx, addr, volumeID)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("peer %s: %w", target, err))
+			unreachable++
 			continue
 		}
 		c.local.Merge(volumeID, entries)
 		return nil
 	}
-	return fmt.Errorf("replication: could not warm the extent map of volume %q from any of its %d replicas (it may be unprovisioned or those nodes are unreachable): %w", volumeID, len(replicas), errors.Join(errs...))
+	if unreachable == 0 {
+		// Every replica answered and none holds a map for this volume: it has
+		// never been written, so an empty (all-zero) volume is the correct view.
+		// Establish an empty local map so per-extent Lookups return unmapped
+		// (zeros) rather than failing the mount. Safe only because no replica was
+		// unreachable — otherwise a holder might exist and serving zeros would
+		// mask real data, which the error below prevents.
+		c.local.Ensure(volumeID)
+		return nil
+	}
+	return fmt.Errorf("replication: could not warm the extent map of volume %q; %d of its %d replicas were unreachable, so serving it now could mask real data: %w", volumeID, unreachable, len(replicas), errors.Join(errs...))
 }
 
 // quorumFanOut applies the per-peer operation to every replica that is not this

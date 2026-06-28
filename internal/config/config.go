@@ -156,6 +156,14 @@ type Config struct {
 	// the pre-token behaviour.
 	RequireTokens bool
 
+	// ExtentReplication serves a volume's extent map from its replica set
+	// (replicated like chunks) instead of the gossiped namespace. This is the
+	// fix for the gossip per-message cap stranding large extent maps, so a
+	// volume can be served on any node, not just where it was created.
+	// SILO_EXTENT_REPLICATION, default true; set it false only to fall back to
+	// the legacy namespace-served path (single-node correct, multi-node broken).
+	ExtentReplication bool
+
 	// CRLPath points at a CA-signed certificate revocation list
 	// (SILO_TLS_CRL). When set, silod loads it, verifies it against the
 	// cluster CA, and rejects any mTLS handshake whose peer cert serial
@@ -227,6 +235,7 @@ func Load(env EnvFunc) (*Config, error) {
 		KMSKeyID:            env("SILO_KMS_KEY_ID"),
 		KMSVaultURL:         env("SILO_KMS_VAULT_URL"),
 		KMSKeyName:          env("SILO_KMS_KEY_NAME"),
+		ExtentReplication:   envBoolDefault(env, "SILO_EXTENT_REPLICATION", true),
 		LogLevel:            envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
 		LogFormat:           envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
 		CACertPath:          rawCACert,

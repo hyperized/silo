@@ -367,6 +367,24 @@ func TestExtentCoordinator_WarmSkipsNonHolders(t *testing.T) {
 	}
 }
 
+func TestExtentCoordinator_WarmEmptyVolumeIsZeros(t *testing.T) {
+	// All replicas reachable and none holds the map: a never-written volume.
+	// Warm establishes an empty local map (reads as zeros) rather than erroring.
+	place := &fakeMetaPlace{replicas: []string{"a", "b", "c"}, self: "a"}
+	peers := newFakeEpeers() // statHas defaults false for b, c; no stat errors
+	store := newFakeStore()
+	c := NewExtentCoordinator(place, store, peers, 3, quietLog())
+	if err := c.Warm(context.Background(), "vol"); err != nil {
+		t.Fatalf("Warm of a never-written volume should succeed: %v", err)
+	}
+	if !store.Has("vol") {
+		t.Error("Warm should establish an empty local map for a never-written volume")
+	}
+	if _, ok := store.Get("vol", 0); ok {
+		t.Error("a never-written extent should read unmapped (zeros)")
+	}
+}
+
 func TestExtentCoordinator_Lookup(t *testing.T) {
 	store := newFakeStore()
 	_ = store.SetBatch("vol", []uint64{2}, []string{"c2"}, at(1))
