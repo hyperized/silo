@@ -668,6 +668,21 @@ func (n *Namespace) Size(path string) (int64, error) {
 	return vol.Size, nil
 }
 
+// VolumeInodeID returns the stable inode id of the volume at path. The id is
+// assigned at creation (CreateVolume) and gossips with the directory tree, so
+// every node can derive a volume's extent-map replica set from it via
+// placement without holding the (large) extent map itself. Errors if the path
+// is missing or is not a volume.
+func (n *Namespace) VolumeInodeID(path string) (string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return "", err
+	}
+	return vol.ID, nil
+}
+
 // resolveVolumeLocked resolves path to a volume inode, erroring if it is the
 // root, is missing, or is not a volume.
 func (n *Namespace) resolveVolumeLocked(path string) (*Inode, error) {

@@ -10,6 +10,31 @@ import (
 	"github.com/hyperized/silo/internal/namespace"
 )
 
+func TestNamespace_VolumeInodeID(t *testing.T) {
+	var clk int64 = 100
+	ns := nsAt("a", &clk)
+	clk++
+	id, err := ns.CreateVolume("/vol", 4096)
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	got, err := ns.VolumeInodeID("/vol")
+	if err != nil || got != id {
+		t.Fatalf("VolumeInodeID = (%q,%v), want (%q,nil)", got, err, id)
+	}
+
+	clk++
+	if _, err := ns.Mkdir("/dir"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if _, err := ns.VolumeInodeID("/dir"); err == nil {
+		t.Error("VolumeInodeID on a directory should error")
+	}
+	if _, err := ns.VolumeInodeID("/missing"); err == nil {
+		t.Error("VolumeInodeID on a missing path should error")
+	}
+}
+
 func TestNamespace_CreateVolumeWriteReadExtents(t *testing.T) {
 	var clk int64 = 100
 	ns := nsAt("a", &clk)
