@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/hyperized/silo/internal/hlc"
 )
@@ -100,6 +101,76 @@ func TestLoad_UnreadableFileIsSkipped(t *testing.T) {
 	}
 	if len(s.Volumes()) != 0 {
 		t.Errorf("unreadable file should be skipped, got volumes %v", s.Volumes())
+	}
+}
+
+// Delete surfaces a file-removal failure (a read-only data dir).
+func TestDelete_RemoveErrorIsReturned(t *testing.T) {
+	skipIfRoot(t)
+	dir := t.TempDir()
+	s, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.Set("v", 0, "c", hlc.Timestamp{Wall: 1})
+	if err := os.Chmod(dir, 0o500); err != nil { // read+exec, no write -> Remove fails
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o700) }()
+
+	if err := s.Delete("v"); err == nil {
+		t.Error("Delete should surface a file-remove failure")
+	}
+}
+
+// A stat failure while judging a map's age is collected, not fatal, and reaps
+// nothing.
+func TestReap_StatErrorIsCollected(t *testing.T) {
+	skipIfRoot(t)
+	dir := t.TempDir()
+	s, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.Set("v", 0, "c", hlc.Timestamp{Wall: 1})
+	if err := os.Chmod(dir, 0o000); err != nil { // no traverse -> stat fails with EACCES
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o700) }()
+
+	reaped, err := s.Reap(map[string]struct{}{}, time.Now())
+	if err == nil {
+		t.Error("a stat failure should be reported")
+	}
+	if len(reaped) != 0 {
+		t.Errorf("nothing should be reaped on a stat failure, got %v", reaped)
+	}
+}
+
+// A removal failure during a reap is collected, not fatal.
+func TestReap_DeleteErrorIsCollected(t *testing.T) {
+	skipIfRoot(t)
+	dir := t.TempDir()
+	s, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.Set("v", 0, "c", hlc.Timestamp{Wall: 1})
+	past := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(s.filename("v"), past, past); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil { // stat ok (exec), remove fails (no write)
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o700) }()
+
+	reaped, err := s.Reap(map[string]struct{}{}, time.Now().Add(-time.Hour))
+	if err == nil {
+		t.Error("a remove failure during reap should be reported")
+	}
+	if len(reaped) != 0 {
+		t.Errorf("a failed reap should report nothing reaped, got %v", reaped)
 	}
 }
 
