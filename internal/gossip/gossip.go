@@ -147,6 +147,15 @@ type Subsystem struct {
 	// scrape so an operator can watch a rolling upgrade converge.
 	incompatibleMsgs atomic.Int64
 	newerProtoMsgs   atomic.Int64
+
+	// syncSendFailures counts anti-entropy sync messages this node failed to
+	// transmit — most importantly when the sync extension (the namespace
+	// snapshot) exceeds the per-message cap, which silently strands this node's
+	// state on every peer. lastExtBytes records the size of the most recent
+	// extension payload we built, so the cap can be watched approaching before
+	// it is breached. Both feed the metrics scrape.
+	syncSendFailures atomic.Int64
+	lastExtBytes     atomic.Int64
 }
 
 // timeNow is the clock the gossip metrics read; overridable in tests.
@@ -324,6 +333,18 @@ func (s *Subsystem) CollectMetrics() []metrics.Metric {
 			Help:  "Gossip messages received from a peer on a newer protocol than this node (processed best-effort).",
 			Kind:  metrics.Counter,
 			Value: float64(s.newerProtoMsgs.Load()),
+		},
+		metrics.Metric{
+			Name:  "sync_send_failures_total",
+			Help:  "Anti-entropy sync messages this node failed to send (e.g. the sync extension exceeded the per-message cap); peers do not converge with this node's state.",
+			Kind:  metrics.Counter,
+			Value: float64(s.syncSendFailures.Load()),
+		},
+		metrics.Metric{
+			Name:  "sync_extension_bytes",
+			Help:  "Size of the most recent anti-entropy sync extension payload this node built; watch it approaching the per-message cap.",
+			Kind:  metrics.Gauge,
+			Value: float64(s.lastExtBytes.Load()),
 		},
 	)
 	return out
@@ -505,6 +526,7 @@ func (s *Subsystem) extLocalState() []byte {
 		s.logger.Warn("gossip sync extension could not produce local state; skipping this round", "err", err)
 		return nil
 	}
+	s.lastExtBytes.Store(int64(len(b)))
 	return b
 }
 
