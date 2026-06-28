@@ -5,13 +5,59 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/namespace"
 )
 
 func discardLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+// Reaping an orphaned inode flushes the cleaned state to disk, so a reopened
+// namespace does not reload the deleted volume's inode.
+func TestNamespace_PersistAfterInodeReap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "namespace.json")
+	ns, err := namespace.Open(hlc.New("a"), path, discardLogger())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := ns.Mkdir("/vols"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if _, err := ns.CreateVolume("/vols/v", 4096); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if err := ns.Remove("/vols/v"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	// After Remove the persisted file still carries the orphaned volume inode
+	// (Remove only tombstones the link; the inode id also lingers in the parent's
+	// remove-tag, so we assert on the volume inode entry, "type":2). The GC sweep
+	// reaps the inode and persists the cleaned state.
+	before, _ := os.ReadFile(path)
+	if !strings.Contains(string(before), `"type":2`) {
+		t.Fatal("precondition: the volume inode should be persisted before GC")
+	}
+	ns.GC(time.Hour)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after GC: %v", err)
+	}
+	if strings.Contains(string(after), `"type":2`) {
+		t.Error("the reaped volume inode should be gone from the persisted file")
+	}
+
+	// A reopen does not resurrect it: /vols stays empty.
+	reopened, err := namespace.Open(hlc.New("a"), path, discardLogger())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if got := names(mustList(t, reopened, "/vols")); len(got) != 0 {
+		t.Errorf("a reaped volume must not reappear after a reopen: /vols = %v", got)
+	}
+}
 
 func TestNamespace_PersistRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "namespace.json")

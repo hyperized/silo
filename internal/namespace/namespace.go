@@ -744,6 +744,11 @@ func (n *Namespace) pruneUnreachableLocked() {
 	}
 	if reaped > 0 {
 		n.inodesReaped.Add(int64(reaped))
+		// Flush the cleaned state so the on-disk cache (and the snapshot a
+		// restart reloads) stops listing reaped inodes; otherwise namespace.json
+		// keeps a deleted volume's inode until the next unrelated mutation. Cheap
+		// because a steady-state merge reaps nothing and so never reaches here.
+		n.persistLocked()
 	}
 }
 
