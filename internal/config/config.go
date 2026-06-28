@@ -164,6 +164,16 @@ type Config struct {
 	// the legacy namespace-served path (single-node correct, multi-node broken).
 	ExtentReplication bool
 
+	// ExtentReapAfter is how long a volume's extent map must sit untouched after
+	// the volume leaves the namespace before the reaper reclaims its orphaned
+	// replicas — the age guard that keeps a freshly-created volume whose
+	// directory entry has not yet gossiped here from being mistaken for a deleted
+	// one. ExtentReapInterval paces the sweep. Both zero means "use the reaper's
+	// built-in default"; set SILO_EXTENT_REAP_AFTER / SILO_EXTENT_REAP_INTERVAL
+	// (Go durations) to override.
+	ExtentReapAfter    time.Duration
+	ExtentReapInterval time.Duration
+
 	// CRLPath points at a CA-signed certificate revocation list
 	// (SILO_TLS_CRL). When set, silod loads it, verifies it against the
 	// cluster CA, and rejects any mTLS handshake whose peer cert serial
@@ -293,6 +303,18 @@ func Load(env EnvFunc) (*Config, error) {
 		return nil, err
 	}
 	cfg.MaxClockSkew = maxSkew
+
+	reapAfter, err := envDuration(env, "SILO_EXTENT_REAP_AFTER")
+	if err != nil {
+		return nil, err
+	}
+	cfg.ExtentReapAfter = reapAfter
+
+	reapInterval, err := envDuration(env, "SILO_EXTENT_REAP_INTERVAL")
+	if err != nil {
+		return nil, err
+	}
+	cfg.ExtentReapInterval = reapInterval
 
 	if err := loadEncryptionKey(env, cfg); err != nil {
 		return nil, err

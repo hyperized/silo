@@ -128,6 +128,7 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 	prevBoot := newBootstrapSubsystem
 	prevGossip := newGossipSubsystem
 	prevScrub := newScrubberSubsystem
+	prevReaper := newExtentReaperSubsystem
 	prevTLS := loadClusterTLS
 	prevTokens := openTokenStore
 	t.Cleanup(func() {
@@ -136,6 +137,7 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 		newBootstrapSubsystem = prevBoot
 		newGossipSubsystem = prevGossip
 		newScrubberSubsystem = prevScrub
+		newExtentReaperSubsystem = prevReaper
 		loadClusterTLS = prevTLS
 		openTokenStore = prevTokens
 	})
@@ -157,6 +159,9 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 	}
 	newRebalancerSubsystem = func(_ *config.Config, _ *membership.Membership, _ *slog.Logger) subsystem {
 		return newFakeSubsystem("rebalancer", nil, nil, true)
+	}
+	newExtentReaperSubsystem = func(_ *config.Config, _ replication.LiveInodeSource, _ replication.ExtentReapStore, _ *slog.Logger) subsystem {
+		return newFakeSubsystem("extent-reaper", nil, nil, true)
 	}
 	loadClusterTLS = stubLoadClusterTLS
 	openTokenStore = stubOpenTokenStore

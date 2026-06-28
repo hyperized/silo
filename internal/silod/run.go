@@ -87,6 +87,9 @@ var (
 	newScrubberSubsystem = func(cfg *config.Config, place replication.Placement, catalog replication.ChunkCatalog, probe replication.ReplicaProbe, logger *slog.Logger) subsystem {
 		return replication.NewScrubber(place, catalog, probe, cfg.Replication, cfg.ScrubInterval, logger)
 	}
+	newExtentReaperSubsystem = func(cfg *config.Config, live replication.LiveInodeSource, store replication.ExtentReapStore, logger *slog.Logger) subsystem {
+		return replication.NewExtentReaper(live, store, cfg.NodeID, cfg.ExtentReapAfter, cfg.ExtentReapInterval, logger)
+	}
 	newRebalancerSubsystem = func(cfg *config.Config, members *membership.Membership, logger *slog.Logger) subsystem {
 		return replication.NewRebalancer(members, cfg.DataDir, cfg.ScrubInterval, logger,
 			replication.WithDiskThresholds(cfg.DiskThresholds))
@@ -482,10 +485,14 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 
 	scrubberSubsys := newScrubberSubsystem(cfg, router, store, peers, logger)
 	rebalancerSubsys := newRebalancerSubsystem(cfg, members, logger)
-	// The scrubber and rebalancer expose replication/capacity metrics; surface
-	// them to Prometheus when the concrete subsystem implements metrics.Source
-	// (the production ones do; a test fake may not).
-	for _, sub := range []subsystem{scrubberSubsys, rebalancerSubsys, gossipSubsys} {
+	// The reaper reclaims the extent-map replicas of deleted volumes — the GC
+	// backstop for the synchronous delete fan-out, keyed off the namespace's
+	// live inode set so it never drops a map still in use.
+	extReaperSubsys := newExtentReaperSubsystem(cfg, ns, extStore, logger)
+	// The scrubber, rebalancer, and reaper expose replication/capacity metrics;
+	// surface them to Prometheus when the concrete subsystem implements
+	// metrics.Source (the production ones do; a test fake may not).
+	for _, sub := range []subsystem{scrubberSubsys, rebalancerSubsys, extReaperSubsys, gossipSubsys} {
 		if src, ok := sub.(metrics.Source); ok {
 			exp.Register(src)
 		}
@@ -498,6 +505,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		gossipSubsys,
 		scrubberSubsys,
 		rebalancerSubsys,
+		extReaperSubsys,
 	}
 	if cfg.NBDAddr != "" {
 		subs = append(subs, newNBDSubsystem(cfg, ns, coord, extCoord, clock, logger))

@@ -94,6 +94,11 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.ScrubInterval != 0 {
 		t.Errorf("ScrubInterval default: got %v, want 0", cfg.ScrubInterval)
 	}
+	// The reaper's pacing/age likewise default to 0 so the reaper owns the
+	// fallbacks (a single source of truth).
+	if cfg.ExtentReapAfter != 0 || cfg.ExtentReapInterval != 0 {
+		t.Errorf("extent reap defaults: got after=%v interval=%v, want 0/0", cfg.ExtentReapAfter, cfg.ExtentReapInterval)
+	}
 	// Retention, unlike the scrub interval, defaults to a concrete value:
 	// zero would let GC resurrect deleted entries.
 	if cfg.TombstoneRetention != DefaultTombstoneRetention {
@@ -245,6 +250,19 @@ func TestLoad_NegativeScrubInterval(t *testing.T) {
 	}
 }
 
+func TestLoad_BadExtentReapDurations(t *testing.T) {
+	for _, key := range []string{"SILO_EXTENT_REAP_AFTER", "SILO_EXTENT_REAP_INTERVAL"} {
+		_, err := Load(envMap(map[string]string{
+			"SILO_NODE_ID":        "n",
+			"SILO_ENCRYPTION_KEY": validBase64Key(t),
+			key:                   "whenever",
+		}))
+		if err == nil || !strings.Contains(err.Error(), key) {
+			t.Fatalf("%s: got %v, want a parse error mentioning the key", key, err)
+		}
+	}
+}
+
 func TestLoad_OverridesFromEnv(t *testing.T) {
 	cfg, err := Load(envMap(map[string]string{
 		"SILO_NODE_ID":               "alpha",
@@ -271,6 +289,8 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_TLS_CRL":               "/etc/silo/revoked.crl",
 		"SILO_REQUIRE_TOKENS":        "1",
 		"SILO_EXTENT_REPLICATION":    "false",
+		"SILO_EXTENT_REAP_AFTER":     "30m",
+		"SILO_EXTENT_REAP_INTERVAL":  "2m",
 		"SILO_PRINT_BOOTSTRAP_TOKEN": "yes",
 		"SILO_TLS_CA_SEED":           "true",
 	}))
@@ -307,6 +327,8 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		RequireTokens:       true,
 		DiskSteering:        true,
 		ExtentReplication:   false, // overridden from its default of true
+		ExtentReapAfter:     30 * time.Minute,
+		ExtentReapInterval:  2 * time.Minute,
 		DiskThresholds:      diskpressure.DefaultThresholds(),
 		CAExternal:          true,
 		CASeed:              true,

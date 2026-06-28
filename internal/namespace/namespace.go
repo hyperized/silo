@@ -683,6 +683,35 @@ func (n *Namespace) VolumeInodeID(path string) (string, error) {
 	return vol.ID, nil
 }
 
+// ReferencedInodeIDs returns the set of inode ids reachable from the root by
+// walking the directory tree's live (non-tombstoned) entries — every inode the
+// namespace still refers to. The extent-map reaper uses it to tell a deleted
+// volume, whose inode is no longer referenced, from a live one, so it can
+// reclaim orphaned extent-map replicas without dropping a map still in use. The
+// root is always included.
+func (n *Namespace) ReferencedInodeIDs() map[string]struct{} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	live := map[string]struct{}{rootID: {}}
+	queue := []string{rootID}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		in := n.inodes[id]
+		if in == nil || in.children == nil {
+			continue
+		}
+		for _, e := range in.children.Elements() {
+			if _, seen := live[e.Inode]; seen {
+				continue
+			}
+			live[e.Inode] = struct{}{}
+			queue = append(queue, e.Inode)
+		}
+	}
+	return live
+}
+
 // resolveVolumeLocked resolves path to a volume inode, erroring if it is the
 // root, is missing, or is not a volume.
 func (n *Namespace) resolveVolumeLocked(path string) (*Inode, error) {

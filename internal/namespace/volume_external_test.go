@@ -35,6 +35,58 @@ func TestNamespace_VolumeInodeID(t *testing.T) {
 	}
 }
 
+func TestNamespace_ReferencedInodeIDs(t *testing.T) {
+	var clk int64 = 100
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.Mkdir("/vols"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	clk++
+	aID, err := ns.CreateVolume("/vols/a", 4096)
+	if err != nil {
+		t.Fatalf("CreateVolume a: %v", err)
+	}
+	clk++
+	bID, err := ns.CreateVolume("/vols/b", 4096)
+	if err != nil {
+		t.Fatalf("CreateVolume b: %v", err)
+	}
+
+	live := ns.ReferencedInodeIDs()
+	for _, id := range []string{aID, bID} {
+		if _, ok := live[id]; !ok {
+			t.Errorf("volume %s should be referenced", id)
+		}
+	}
+	if len(live) == 0 {
+		t.Error("the referenced set should always include the root")
+	}
+
+	// Removing a volume drops its inode from the referenced set; siblings stay.
+	clk++
+	if err := ns.Remove("/vols/b"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	live = ns.ReferencedInodeIDs()
+	if _, ok := live[bID]; ok {
+		t.Error("a removed volume's inode should not be referenced")
+	}
+	if _, ok := live[aID]; !ok {
+		t.Error("a surviving volume's inode should still be referenced")
+	}
+
+	// Removing the parent directory makes everything beneath it unreachable,
+	// even though the child link still exists under the now-orphaned dir inode.
+	clk++
+	if err := ns.Remove("/vols"); err != nil {
+		t.Fatalf("Remove dir: %v", err)
+	}
+	if _, ok := ns.ReferencedInodeIDs()[aID]; ok {
+		t.Error("a volume under a removed directory should be unreachable")
+	}
+}
+
 func TestNamespace_GossipSnapshotOmitsExtentsButKeepsScalars(t *testing.T) {
 	var clk int64 = 100
 	src := nsAt("a", &clk)
