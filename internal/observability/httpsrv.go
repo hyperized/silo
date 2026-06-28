@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"sync"
 	"time"
 )
@@ -21,6 +22,11 @@ type Server struct {
 	logger  *slog.Logger
 	srv     *http.Server
 	metrics http.Handler // optional; the /metrics route is mounted only when set
+	// debugProfiles, when set, mounts the net/http/pprof handlers under
+	// /debug/pprof/. Opt-in (silod enables it only when SILO_PPROF is set):
+	// the profiles expose runtime internals and carry a small always-on
+	// sampling cost, so they are a leak/latency diagnostic, not a default.
+	debugProfiles bool
 
 	mu sync.Mutex // guards ln; race detector caught a Start/Addr race
 	ln net.Listener
@@ -34,6 +40,14 @@ type Option func(*Server)
 // listener alongside /healthz.
 func WithMetricsHandler(handler http.Handler) Option {
 	return func(s *Server) { s.metrics = handler }
+}
+
+// WithDebugProfiles mounts the net/http/pprof handlers under /debug/pprof/ on
+// the shared listener. It is opt-in because the profiles expose runtime
+// internals; silod enables it only when SILO_PPROF is set, as a tool for
+// chasing heap leaks and latency rather than a default-on endpoint.
+func WithDebugProfiles() Option {
+	return func(s *Server) { s.debugProfiles = true }
 }
 
 // NewServer wires the routes but does not bind the socket; call Start
@@ -52,6 +66,16 @@ func NewServer(addr, nodeID, version string, logger *slog.Logger, opts ...Option
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	if s.metrics != nil {
 		mux.Handle("GET /metrics", s.metrics)
+	}
+	if s.debugProfiles {
+		// Standard net/http/pprof wiring: Index serves the profile list and the
+		// named profiles (heap, goroutine, allocs, …) under /debug/pprof/<name>;
+		// the four explicit routes are the ones Index does not dispatch itself.
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
 	s.srv = &http.Server{
 		Addr:              addr,

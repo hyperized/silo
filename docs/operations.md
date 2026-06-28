@@ -5,7 +5,7 @@ deployment topologies, how credentials and encryption work, and how to diagnose
 the common problems. For the Kubernetes CSI driver specifically, see
 [kubernetes.md](kubernetes.md).
 
-**Jump to:** [Configuration](#configuration) · [Deployment paths](#deployment-paths) · [Operator credentials](#claiming-operator-credentials) · [Capacity rebalancing](#capacity-rebalancing) · [Backups](#backups) · [Draining a node](#draining-a-node) · [Rolling upgrades](#rolling-upgrades) · [Block volumes (NBD)](#block-volumes-over-nbd) · [Health & metrics](#health--metrics) · [Troubleshooting](#troubleshooting)
+**Jump to:** [Configuration](#configuration) · [Deployment paths](#deployment-paths) · [Operator credentials](#claiming-operator-credentials) · [Capacity rebalancing](#capacity-rebalancing) · [Backups](#backups) · [Draining a node](#draining-a-node) · [Rolling upgrades](#rolling-upgrades) · [Block volumes (NBD)](#block-volumes-over-nbd) · [Health, metrics & profiling](#health-metrics--profiling) · [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -27,7 +27,7 @@ is the quick reference.
 | `SILO_BOOTSTRAP_ADVERTISE` | loopback | Bootstrap address operators dial |
 | `SILO_GOSSIP_ADDR` | `0.0.0.0:7100` | SWIM gossip listener |
 | `SILO_GOSSIP_ADVERTISE` | `GOSSIP_ADDR` | Routable gossip address peers dial — **set this** when binding `0.0.0.0` with >1 peer (e.g. the Pod IP) |
-| `SILO_HTTP_ADDR` | `0.0.0.0:7080` | `/healthz` and `/metrics` |
+| `SILO_HTTP_ADDR` | `0.0.0.0:7080` | `/healthz`, `/metrics`, and `/debug/pprof/` when `SILO_PPROF` is set |
 | `SILO_NBD_ADDR` | *(empty = off)* | NBD block-device server, e.g. `0.0.0.0:10809`. **Required to serve volumes.** |
 
 ### Cluster discovery
@@ -153,12 +153,13 @@ corrupt CRL is refused) and logs `certificate revocation list loaded` with the
 count. A CRL past its `NextUpdate` still enforces but logs a staleness warning —
 re-run `siloctl ca revoke` (even with no new serials) to refresh it.
 
-### Logging
+### Logging & diagnostics
 
 | Variable | Default | Values |
 |---|---|---|
 | `SILO_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `SILO_LOG_FORMAT` | `text` | `text`, `json` (use `json` in production) |
+| `SILO_PPROF` | *(empty = off)* | Any non-empty value mounts `net/http/pprof` at `/debug/pprof/` on `SILO_HTTP_ADDR` — see [Health, metrics & profiling](#health-metrics--profiling) |
 
 ---
 
@@ -648,7 +649,7 @@ make nbd-demo-vm   # boots a throwaway aarch64 Linux guest under QEMU with the
 
 ---
 
-## Health & metrics
+## Health, metrics & profiling
 
 - **Liveness:** `GET http://<node>:7080/healthz`
 - **Metrics:** `GET http://<node>:7080/metrics` (Prometheus). The `make up` stack
@@ -701,6 +702,29 @@ unwraps per-chunk keys on demand; the cache is a later optimisation).
   — backup activity (when SILO_BACKUP_TARGET is set).
 
 The same per-node figures are available on demand via `siloctl status`.
+
+### Profiling (pprof)
+
+Set `SILO_PPROF` to any non-empty value to mount the standard `net/http/pprof`
+handlers under `/debug/pprof/` on `SILO_HTTP_ADDR`. It is **off by default** —
+the profiles expose runtime internals and carry a small always-on sampling cost
+— so enable it on demand (e.g. add `SILO_PPROF=1` to the node's env and restart)
+when chasing a heap or latency problem:
+
+```sh
+# live heap profile (objects in use) — the one for memory questions
+go tool pprof http://<node>:7080/debug/pprof/heap
+# 30-second CPU profile
+go tool pprof 'http://<node>:7080/debug/pprof/profile?seconds=30'
+# goroutine dump as text (count + stacks)
+curl -s 'http://<node>:7080/debug/pprof/goroutine?debug=1'
+```
+
+When judging silod's memory, read the **Go heap** (`/debug/pprof/heap`,
+`inuse_space`) or the cgroup's **`anon`** — not RSS / `memory.current`. silod
+writes immutable chunk files, so under sustained writes most of its RSS is
+reclaimable page cache (`inactive_file`), not live heap: a multi-GB RSS with a
+small heap is normal and not a leak.
 
 ---
 

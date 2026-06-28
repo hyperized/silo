@@ -105,6 +105,45 @@ func TestServer_MetricsAbsentWithoutHandler(t *testing.T) {
 	}
 }
 
+func TestServer_DebugProfilesMountedWithOption(t *testing.T) {
+	s := newTestServer(t, WithDebugProfiles())
+	// The index lists the available profiles...
+	resp, err := http.Get("http://" + s.Addr() + "/debug/pprof/")
+	if err != nil {
+		t.Fatalf("GET /debug/pprof/: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status: got %d, want 200 with WithDebugProfiles", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Types of profiles available") {
+		t.Errorf("index body did not look like pprof: %q", body)
+	}
+	// ...and a named profile (heap) is dispatched by the subtree route too.
+	hp, err := http.Get("http://" + s.Addr() + "/debug/pprof/heap?debug=1")
+	if err != nil {
+		t.Fatalf("GET /debug/pprof/heap: %v", err)
+	}
+	defer hp.Body.Close()
+	if hp.StatusCode != http.StatusOK {
+		t.Errorf("heap profile status: got %d, want 200", hp.StatusCode)
+	}
+}
+
+func TestServer_DebugProfilesAbsentByDefault(t *testing.T) {
+	// Opt-in: without WithDebugProfiles the pprof routes are not mounted.
+	s := newTestServer(t)
+	resp, err := http.Get("http://" + s.Addr() + "/debug/pprof/")
+	if err != nil {
+		t.Fatalf("GET /debug/pprof/: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status: got %d, want 404 when debug profiles are not enabled", resp.StatusCode)
+	}
+}
+
 func TestServer_RejectsWrongMethod(t *testing.T) {
 	s := newTestServer(t)
 	resp, err := http.Post("http://"+s.Addr()+"/healthz", "text/plain", strings.NewReader(""))
