@@ -47,6 +47,9 @@ is the quick reference.
 | `SILO_SCRUB_INTERVAL` | internal default | Re-replication scrubber cadence (the local stack sets `5s` for visible healing; production paces slower) |
 | `SILO_TOMBSTONE_RETENTION` | `24h` | How long namespace tombstones are kept before GC |
 | `SILO_MAX_CLOCK_SKEW` | `500ms` | Warn + count an alert when a peer's HLC exceeds this skew |
+| `SILO_EXTENT_REPLICATION` | `true` | Serve each volume's extent map from its replica set (out of band, like chunks) instead of the gossiped namespace — required for a volume to attach on any node, not just where it was created. Leave on. |
+| `SILO_EXTENT_REAP_AFTER` | `1h` | How long a deleted volume's extent map must sit untouched before the reaper reclaims orphaned replicas. The age guard that stops a freshly-created volume whose directory entry has not yet gossiped to a node from being mistaken for a deleted one — keep it well above gossip convergence time. |
+| `SILO_EXTENT_REAP_INTERVAL` | `15m` | Extent-map reaper sweep cadence (the GC backstop for the synchronous delete path). |
 
 ### Encryption (at rest)
 
@@ -690,6 +693,17 @@ Notable series:
 - `silo_namespace_antientropy_merges_total` and
   `silo_namespace_antientropy_last_merge_age_seconds` — namespace convergence
   activity and lag.
+- `silo_gossip_sync_extension_bytes` and `silo_gossip_sync_send_failures_total` —
+  the size of the namespace snapshot carried on each anti-entropy exchange and
+  the count of sends that exceeded the gossip per-message cap. The extension
+  bytes should stay small (the directory tree only — extent maps replicate out of
+  band); a climbing `sync_send_failures_total` means snapshots are overflowing
+  the cap and namespace state is not converging.
+- `silo_extentmap_reaped_total` and `silo_extentmap_last_reap_reclaimed` — extent
+  maps the reaper reclaimed for deleted volumes (cumulative, and last sweep). A
+  steady non-zero `last_reap_reclaimed` means deletes are leaving orphans for the
+  reaper to clean — expected only when a replica was unreachable at delete time;
+  a persistent stream warrants a look at delete-path (`DeleteMap`) health.
 
 The data-key cache hit-rate metric is pending the cache itself (silod currently
 unwraps per-chunk keys on demand; the cache is a later optimisation).
