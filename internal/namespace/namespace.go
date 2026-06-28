@@ -160,9 +160,11 @@ type Namespace struct {
 
 	// antiEntropy metrics: merges counts the peer-state merges this node has
 	// folded in, lastMerge is the unix-nano time of the most recent one (the
-	// anti-entropy lag signal). Read by the metrics scrape.
-	merges    atomic.Int64
-	lastMerge atomic.Int64
+	// anti-entropy lag signal). inodesReaped counts orphaned inodes the pruner
+	// has reclaimed. Read by the metrics scrape.
+	merges       atomic.Int64
+	lastMerge    atomic.Int64
+	inodesReaped atomic.Int64
 }
 
 // nsTimeNow is the clock the namespace metrics read; overridable in tests.
@@ -692,6 +694,14 @@ func (n *Namespace) VolumeInodeID(path string) (string, error) {
 func (n *Namespace) ReferencedInodeIDs() map[string]struct{} {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	return n.reachableInodesLocked()
+}
+
+// reachableInodesLocked returns the set of inode ids reachable from the root by
+// walking the directory tree's live (non-tombstoned) entries. The seen-set
+// guard keeps a cyclic or shared structure (which a corrupt merge could
+// produce) from looping.
+func (n *Namespace) reachableInodesLocked() map[string]struct{} {
 	live := map[string]struct{}{rootID: {}}
 	queue := []string{rootID}
 	for len(queue) > 0 {
@@ -710,6 +720,31 @@ func (n *Namespace) ReferencedInodeIDs() map[string]struct{} {
 		}
 	}
 	return live
+}
+
+// pruneUnreachableLocked deletes every inode no longer reachable from the root,
+// returning the count reaped. Removing a path only tombstones the directory
+// link (so the removal propagates as a CRDT remove-tag); the inode it pointed at
+// lingers in the table until it is reaped here, on every merge and on the GC
+// sweep. Pruning is resurrection-safe within the tombstone-retention window: the
+// remove-tag outlives retention, so a replica that re-gossips the orphan also
+// carries the remove that keeps the link tombstoned, and the merge prunes the
+// inode again rather than reviving it. (A replica partitioned longer than
+// retention is the same unavoidable edge the tombstone GC already accepts.) The
+// count reaped is recorded in the inodes_reaped metric.
+func (n *Namespace) pruneUnreachableLocked() {
+	live := n.reachableInodesLocked()
+	reaped := 0
+	for id := range n.inodes {
+		if _, ok := live[id]; ok {
+			continue
+		}
+		delete(n.inodes, id)
+		reaped++
+	}
+	if reaped > 0 {
+		n.inodesReaped.Add(int64(reaped))
+	}
 }
 
 // resolveVolumeLocked resolves path to a volume inode, erroring if it is the
@@ -846,6 +881,12 @@ func (n *Namespace) mergeInodesLocked(snap map[string]*Inode) {
 			mine.extents.Merge(oi.extents)
 		}
 	}
+	// A merge can apply a peer's removal (its newer remove-tag wins in a
+	// children OR-Set), orphaning an inode; and a lagging peer's snapshot can
+	// re-add an inode this node already reaped. Pruning here reclaims the former
+	// and drops the latter in the same merge, so orphans converge to gone across
+	// the cluster without resurrecting.
+	n.pruneUnreachableLocked()
 }
 
 // snapshot returns a deep copy of every inode, safe to merge into another
@@ -973,6 +1014,11 @@ func (n *Namespace) CollectMetrics() []metrics.Metric {
 		Help:  "Peer-state merges this node has folded in over gossip anti-entropy.",
 		Kind:  metrics.Counter,
 		Value: float64(n.merges.Load()),
+	}, {
+		Name:  "inodes_reaped_total",
+		Help:  "Orphaned (unreachable) namespace inodes this node has reclaimed.",
+		Kind:  metrics.Counter,
+		Value: float64(n.inodesReaped.Load()),
 	}}
 	if last := n.lastMerge.Load(); last > 0 {
 		out = append(out, metrics.Metric{
@@ -1089,6 +1135,10 @@ func (n *Namespace) GC(retention time.Duration) int {
 			reclaimed += in.manifest.GC(cutoff)
 		}
 	}
+	// Reap inodes orphaned by a removal. Gossip merges prune as state converges;
+	// this sweep covers an isolated node that never merges, so a single-node
+	// cluster still reclaims deleted volumes' inodes.
+	n.pruneUnreachableLocked()
 	return reclaimed
 }
 

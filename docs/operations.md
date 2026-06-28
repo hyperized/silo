@@ -693,6 +693,10 @@ Notable series:
 - `silo_namespace_antientropy_merges_total` and
   `silo_namespace_antientropy_last_merge_age_seconds` — namespace convergence
   activity and lag.
+- `silo_namespace_inodes_reaped_total` — orphaned (unreachable) namespace inodes
+  reclaimed after their directory link was removed. Removing a path tombstones
+  the link; the inode it pointed at is reaped on the next gossip merge and on the
+  GC sweep, so a deleted volume leaves no inode residue behind.
 - `silo_gossip_sync_extension_bytes` and `silo_gossip_sync_send_failures_total` —
   the size of the namespace snapshot carried on each anti-entropy exchange and
   the count of sends that exceeded the gossip per-message cap. The extension

@@ -87,6 +87,48 @@ func TestNamespace_ReferencedInodeIDs(t *testing.T) {
 	}
 }
 
+func TestNamespace_MergeDoesNotResurrectReapedInode(t *testing.T) {
+	var clkA int64 = 100
+	a := nsAt("a", &clkA)
+	clkA++
+	if _, err := a.Mkdir("/vols"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	clkA++
+	xID, err := a.CreateVolume("/vols/x", 4096)
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+
+	// B learns the volume over gossip, so B holds it reachable.
+	var clkB int64 = 100
+	b := nsAt("b", &clkB)
+	b.Merge(a)
+	if _, ok := b.ReferencedInodeIDs()[xID]; !ok {
+		t.Fatal("B should have learned the volume")
+	}
+
+	// A removes it with a newer HLC.
+	clkA++
+	if err := a.Remove("/vols/x"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// A merges B's STALE snapshot (B still has the live link). A's newer remove
+	// wins in the children OR-Set and the prune drops the inode again — the stale
+	// peer must not resurrect it.
+	a.Merge(b)
+	if _, ok := a.ReferencedInodeIDs()[xID]; ok {
+		t.Error("a stale peer must not resurrect a removed volume's inode on A")
+	}
+
+	// And B merging A's removal reaps the orphaned inode on B too (convergence).
+	b.Merge(a)
+	if _, ok := b.ReferencedInodeIDs()[xID]; ok {
+		t.Error("merging the removal should reap the orphaned inode on the peer")
+	}
+}
+
 func TestNamespace_GossipSnapshotOmitsExtentsButKeepsScalars(t *testing.T) {
 	var clk int64 = 100
 	src := nsAt("a", &clk)
