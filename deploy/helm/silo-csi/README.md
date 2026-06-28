@@ -44,7 +44,7 @@ kubectl get pvc data        # Bound once the consuming pod is scheduled
 
 | Parameter | Honoured | Meaning |
 |---|---|---|
-| `chunk-size` | yes | Copy-on-write extent size (e.g. `4Mi`) |
+| `chunk-size` | yes | Copy-on-write extent size (default `256Ki`; raise for large-streaming, lower for small-random workloads) |
 | `replicas` | reserved | Per-volume replication factor (placement lands in a later milestone) |
 | `region-affinity` | reserved | Region placement hint |
 | `snapshot-retention` | reserved | Automatic snapshot retention |

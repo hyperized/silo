@@ -71,4 +71,13 @@ storageClass:
     replicas: "3"
     region-affinity: ""
     snapshot-retention: "24h"
-    chunk-size: "4Mi"
+    # chunk-size is the copy-on-write extent: the unit silod rewrites on every
+    # partial write. For a filesystem-formatted block volume (ext4's 4 KiB
+    # metadata writes) an oversized extent means large write amplification — a
+    # 4 KiB write rewrites, re-encrypts and re-replicates a whole extent — and a
+    # correspondingly large transient buffer per in-flight write. The earlier
+    # 4Mi default amplified 4 KiB writes ~1000x. 256Ki is a balance: ~16x less
+    # amplification and per-write memory than 4Mi, while keeping the (currently
+    # un-sharded) chunk directory's file count reasonable. Raise it for
+    # large-streaming workloads, lower it for small-random ones.
+    chunk-size: "256Ki"
