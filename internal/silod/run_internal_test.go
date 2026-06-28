@@ -96,6 +96,27 @@ func (f *fakeSubsystem) Shutdown(_ context.Context) error {
 	return f.shutdownErr
 }
 
+// TestNewHTTPSubsystem_PprofGate drives the real HTTP subsystem factory (not a
+// fake) through both sides of the SILO_PPROF gate: unset omits the pprof
+// endpoint, set appends the debug-profiles option. NewServer only wires routes
+// (it does not bind a socket), so this stays a pure unit test.
+func TestNewHTTPSubsystem_PprofGate(t *testing.T) {
+	cfg := testConfig(t)
+	lg := discardLogger()
+
+	// Default: no SILO_PPROF in the environment.
+	t.Setenv("SILO_PPROF", "")
+	if sub := newHTTPSubsystem(cfg, "v-test", lg, nil); sub == nil {
+		t.Fatal("newHTTPSubsystem returned nil without SILO_PPROF")
+	}
+
+	// Set: exercises the gate's true branch (appends WithDebugProfiles).
+	t.Setenv("SILO_PPROF", "1")
+	if sub := newHTTPSubsystem(cfg, "v-test", lg, nil); sub == nil {
+		t.Fatal("newHTTPSubsystem returned nil with SILO_PPROF set")
+	}
+}
+
 // installFakes swaps the subsystem factories, the TLS loader, and the
 // token-store opener for the duration of a test, restoring the
 // originals on cleanup. All four legs are stubbed at once so Run never

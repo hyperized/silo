@@ -61,7 +61,14 @@ type subsystem interface {
 // fakes without spinning up real listeners.
 var (
 	newHTTPSubsystem = func(cfg *config.Config, version string, logger *slog.Logger, metrics http.Handler) subsystem {
-		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger, observability.WithMetricsHandler(metrics))}
+		opts := []observability.Option{observability.WithMetricsHandler(metrics)}
+		// SILO_PPROF mounts /debug/pprof/ for live heap/goroutine profiling.
+		// Opt-in so the profiling surface is absent unless an operator asks for
+		// it while diagnosing memory or latency.
+		if os.Getenv("SILO_PPROF") != "" {
+			opts = append(opts, observability.WithDebugProfiles())
+		}
+		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger, opts...)}
 	}
 	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
 		opts := []transport.GRPCOption{
