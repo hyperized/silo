@@ -17,14 +17,30 @@ import (
 	"github.com/hyperized/silo/internal/writer"
 )
 
-// writeAtParallelism caps the number of extent puts a single WriteAt
-// can have in flight at once. A 4 MiB streaming write at the default
-// 64 KiB extent already spans 64 extents; without a cap we'd fire 64
-// PutChunk+WriteExtent goroutines, and each one fans out to N replicas
-// — that's NxN replica RPCs from one syscall. The cap is loose, just
-// enough to keep the replication coordinator's per-peer queues from
-// piling up.
+// writeAtParallelism bounds how many extent-sized buffers silod's write path
+// holds in flight AT ONCE ACROSS ALL VOLUMES on a node. Every in-flight extent
+// put allocates a full extent-sized buffer (plus a read-modify-write copy, an
+// encrypted envelope, and fan-out to N replicas), so without a process-wide
+// bound the live Go heap (anon resident memory — the part a cgroup OOM-kills on,
+// as distinct from reclaimable page cache) scales with concurrent-volumes x
+// extents-per-write x extentSize — enough volumes formatting large-extent devices
+// at once OOM-killed silod. A 4 MiB streaming write at the default 64 KiB extent
+// already spans 64 extents; the cap also keeps the replication coordinator's
+// per-peer queues from piling up.
 var writeAtParallelism = max(2*runtime.GOMAXPROCS(0), 16)
+
+// writeSem realises that bound. It is process-wide (one buffered channel shared
+// by every Volume, on both the single- and multi-extent write paths) rather than
+// a fresh semaphore per WriteAt call, so total in-flight extent memory is capped
+// per node instead of per call. A token is held only for one extent buffer's
+// lifetime (allocate -> PutChunk); each acquisition is for a single extent, so a
+// holder always makes progress and the semaphore cannot deadlock while it has at
+// least one slot.
+var writeSem = make(chan struct{}, writeAtParallelism)
+
+// acquireWrite/releaseWrite bracket one extent buffer against the global budget.
+func acquireWrite() { writeSem <- struct{}{} }
+func releaseWrite() { <-writeSem }
 
 // newWriterID is the identity seam. Production derives a fresh writer id;
 // tests override it to exercise the entropy-failure path.
@@ -152,6 +168,11 @@ func (v *Volume) WriteAt(p []byte, off int64) (int, error) {
 	// fast path.
 	if len(jobs) == 1 {
 		j := jobs[0]
+		// Count this extent buffer against the global write budget too: small
+		// single-extent writes (filesystem metadata, the common case) dominate
+		// block I/O, so N volumes doing them at once must stay bounded as well.
+		acquireWrite()
+		defer releaseWrite()
 		extent := make([]byte, v.extentSize)
 		if j.within != 0 || j.nBytes != int(v.extentSize) {
 			cur, err := v.extentBytes(j.idx)
@@ -180,14 +201,13 @@ func (v *Volume) WriteAt(p []byte, off int64) (int, error) {
 		err     error
 	}
 	results := make([]result, len(jobs))
-	sem := make(chan struct{}, writeAtParallelism)
 	var wg sync.WaitGroup
 	for i, j := range jobs {
 		wg.Add(1)
-		sem <- struct{}{} // bound in-flight extent puts
+		acquireWrite() // bound in-flight extent puts across all volumes
 		go func(i int, j job) {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer releaseWrite()
 			extent := make([]byte, v.extentSize)
 			if j.within != 0 || j.nBytes != int(v.extentSize) {
 				cur, err := v.extentBytes(j.idx)
