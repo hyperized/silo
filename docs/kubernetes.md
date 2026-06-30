@@ -77,8 +77,8 @@ How the pieces fit together:
 3. **Images your cluster can pull.** Build and push them:
 
    ```sh
-   make images IMAGE_REGISTRY=registry.example.com/silo IMAGE_TAG=v0.7.0
-   docker push registry.example.com/silo/silo-csi:v0.7.0
+   make images IMAGE_REGISTRY=registry.example.com/silo IMAGE_TAG=v0.10.0
+   docker push registry.example.com/silo/silo-csi:v0.10.0
    ```
 
    The `silo-csi` image bundles `nbd-client`, `mkfs.ext4`/`mkfs.xfs`, and
@@ -93,7 +93,7 @@ How the pieces fit together:
 helm install silo-csi deploy/helm/silo-csi \
   --namespace silo-system --create-namespace \
   --set image.repository=registry.example.com/silo/silo-csi \
-  --set image.tag=v0.7.0 \
+  --set image.tag=v0.10.0 \
   --set silod.address=silo.silo-system.svc.cluster.local:7000 \
   --set silod.nbdAddress=127.0.0.1:10809
 ```
