@@ -3,6 +3,7 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
@@ -86,24 +87,75 @@ jobs:
           path: bin/silod
           retention-days: 7
 
-  docker:
-    name: build (container image)
+  publish:
+    name: publish (container images)
     needs: [test, lint]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # push images to GHCR via GITHUB_TOKEN
+    strategy:
+      matrix:
+        include:
+          - image: silod
+            dockerfile: ./Dockerfile
+          - image: silo-csi
+            dockerfile: ./Dockerfile.csi
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so `git describe` yields a real VERSION
+
+      - name: resolve version
+        id: version
+        # Mirror the Makefile's VERSION so the image-stamped --version matches
+        # what `make build` / `make images` produce.
+        run: echo "version=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3 # arm64 emulation for the apk runtime layers
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: build silod image
+      # Authenticate only when we actually push (main + tags). PRs build-validate
+      # the image but never push, so they need no registry credentials — which
+      # also keeps fork PRs (no access to secrets) working.
+      - name: log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          # main push     -> :edge and :sha-<short>
+          # tag vX.Y.Z    -> :X.Y.Z, :X.Y, and :latest (newest release only)
+          tags: |
+            type=sha,format=short,enable={{is_default_branch}}
+            type=edge,branch=main
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=auto
+
+      - name: build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
-          push: false
-          load: false
-          tags: silo/silod:ci-${{ github.sha }}
+          file: ${{ matrix.dockerfile }}
+          # PRs validate amd64 only (fast); main/tags publish the full manifest.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=ci-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            VERSION=${{ steps.version.outputs.version }}
+          # Keep the published manifest to just the real platforms (no
+          # unknown/unknown attestation entry); flip to true for SLSA provenance.
+          provenance: false
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
