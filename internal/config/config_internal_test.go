@@ -53,6 +53,9 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.Replication != DefaultReplication {
 		t.Errorf("Replication default: got %d, want %d", cfg.Replication, DefaultReplication)
 	}
+	if cfg.MaxConcurrentWrites != DefaultMaxConcurrentWrites {
+		t.Errorf("MaxConcurrentWrites default: got %d, want %d", cfg.MaxConcurrentWrites, DefaultMaxConcurrentWrites)
+	}
 	if cfg.KeySource != DefaultKeySource {
 		t.Errorf("KeySource default: got %q, want %q", cfg.KeySource, DefaultKeySource)
 	}
@@ -290,6 +293,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_DATA_DIR":              "/tmp/silo",
 		"SILO_CHUNK_SIZE":            "1048576",
 		"SILO_REPLICATION":           "5",
+		"SILO_MAX_CONCURRENT_WRITES": "128",
 		"SILO_SCRUB_INTERVAL":        "5s",
 		"SILO_TOMBSTONE_RETENTION":   "12h",
 		"SILO_MAX_CLOCK_SKEW":        "2s",
@@ -330,6 +334,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		DataDir:             "/tmp/silo",
 		ChunkSize:           1 << 20,
 		Replication:         5,
+		MaxConcurrentWrites: 128,
 		ScrubInterval:       5 * time.Second,
 		TombstoneRetention:  12 * time.Hour,
 		MaxClockSkew:        2 * time.Second,
@@ -599,6 +604,17 @@ func TestLoad_BadReplication(t *testing.T) {
 	}))
 	if err == nil || !strings.Contains(err.Error(), "SILO_REPLICATION") {
 		t.Errorf("expected replication parse error, got %v", err)
+	}
+}
+
+func TestLoad_BadMaxConcurrentWrites(t *testing.T) {
+	_, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":               "n1",
+		"SILO_MAX_CONCURRENT_WRITES": "lots",
+		"SILO_ENCRYPTION_KEY":        validBase64Key(t),
+	}))
+	if err == nil || !strings.Contains(err.Error(), "SILO_MAX_CONCURRENT_WRITES") {
+		t.Errorf("expected max-concurrent-writes parse error, got %v", err)
 	}
 }
 

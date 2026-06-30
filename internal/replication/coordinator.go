@@ -61,16 +61,43 @@ type Coordinator struct {
 	peers  Peers
 	rf     int
 	logger *slog.Logger
+	// sem bounds how many peer replica sends run at once; nil leaves it
+	// unbounded. Each send marshals the chunk into a gRPC buffer, so without a
+	// bound a write storm (many NBD volumes writing at once) grows grpc's
+	// sizedBufferPool without limit and OOM-kills silod — observed on the cluster
+	// reaching >11 GiB of replication send buffers, dominated by background
+	// stragglers that outlived their write. See WithMaxConcurrentWrites.
+	sem chan struct{}
+}
+
+// Option configures a Coordinator at construction.
+type Option func(*Coordinator)
+
+// WithMaxConcurrentWrites bounds the number of peer replica sends in flight at
+// once (across all writes, counting background stragglers), applying
+// backpressure to the write path instead of letting grpc's send-buffer pool grow
+// without limit under concurrent load. The in-flight send-buffer footprint is
+// then about n*chunkSize. n <= 0 leaves it unbounded (the pre-fix behaviour).
+func WithMaxConcurrentWrites(n int) Option {
+	return func(c *Coordinator) {
+		if n > 0 {
+			c.sem = make(chan struct{}, n)
+		}
+	}
 }
 
 // New builds a Coordinator. rf is the target replication factor (chunks
 // land on min(rf, live-nodes) replicas). A rf < 1 is clamped to 1 so a
 // misconfiguration degrades to single-copy rather than storing nothing.
-func New(place Placement, local Local, peers Peers, rf int, logger *slog.Logger) *Coordinator {
+func New(place Placement, local Local, peers Peers, rf int, logger *slog.Logger, opts ...Option) *Coordinator {
 	if rf < 1 {
 		rf = 1
 	}
-	return &Coordinator{place: place, local: local, peers: peers, rf: rf, logger: logger}
+	c := &Coordinator{place: place, local: local, peers: peers, rf: rf, logger: logger}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // storeResult carries one replica write's outcome back to the coordinator.
@@ -96,7 +123,27 @@ func (c *Coordinator) Write(ctx context.Context, chunkID string, data []byte) (c
 	fanCtx := context.WithoutCancel(ctx)
 	results := make(chan storeResult, len(targets))
 	for _, target := range targets {
-		go c.storeOne(fanCtx, target, chunkID, data, results)
+		// Bound the number of peer sends running at once. Each send marshals the
+		// chunk into a gRPC buffer, so without a cap a write storm grows grpc's
+		// send-buffer pool without limit and OOM-kills silod. The slot is held for
+		// the send goroutine's whole life — so a background straggler (a replica
+		// that acks after the quorum returns) still counts against the cap, which a
+		// Write-scoped bound released at quorum would miss. Local stores hold no
+		// such buffer and are never gated. Acquired on the caller's context so a
+		// cancelled write is not stuck behind the limit.
+		if c.sem == nil || target == c.place.SelfID() {
+			go c.storeOne(fanCtx, target, chunkID, data, results)
+			continue
+		}
+		select {
+		case c.sem <- struct{}{}:
+			go func(t string) {
+				defer func() { <-c.sem }()
+				c.storeOne(fanCtx, t, chunkID, data, results)
+			}(target)
+		case <-ctx.Done():
+			results <- storeResult{err: fmt.Errorf("replication: replicating chunk %q to %q was cancelled while waiting for a send slot (%w); the node is at its write-concurrency limit", chunkID, target, ctx.Err())}
+		}
 	}
 
 	var (

@@ -63,9 +63,16 @@ const (
 	// suit large-sequential, capacity-heavy volumes — set chunk-size per volume.
 	DefaultChunkSize   = 256 * 1024
 	DefaultReplication = 3
-	DefaultKeySource   = KeySourceStatic
-	DefaultLogLevel    = "info"
-	DefaultLogFormat   = "text"
+	// DefaultMaxConcurrentWrites bounds how many peer replica sends run at once
+	// (across all writes, counting background stragglers). It caps grpc's
+	// replication send-buffer pool (footprint ~= n*chunkSize), which otherwise
+	// grows without limit under a write storm and OOM-kills silod. 64 keeps the
+	// pool well bounded while still allowing high write throughput;
+	// SILO_MAX_CONCURRENT_WRITES=0 restores the unbounded behaviour.
+	DefaultMaxConcurrentWrites = 64
+	DefaultKeySource           = KeySourceStatic
+	DefaultLogLevel            = "info"
+	DefaultLogFormat           = "text"
 )
 
 // DefaultTombstoneRetention is how long deleted-entry tombstones are kept
@@ -99,6 +106,10 @@ type Config struct {
 	DataDir     string
 	ChunkSize   int64
 	Replication int
+	// MaxConcurrentWrites bounds how many peer replica sends run at once, capping
+	// grpc's replication send-buffer pool under load. Set SILO_MAX_CONCURRENT_WRITES;
+	// 0 means unbounded. Defaults to DefaultMaxConcurrentWrites.
+	MaxConcurrentWrites int
 	// ScrubInterval paces the re-replication scrubber. Zero means "use the
 	// scrubber's built-in default"; set SILO_SCRUB_INTERVAL to a Go
 	// duration (e.g. 5s, 1m) to override.
@@ -303,6 +314,12 @@ func Load(env EnvFunc) (*Config, error) {
 		return nil, err
 	}
 	cfg.Replication = repl
+
+	maxWrites, err := envInt(env, "SILO_MAX_CONCURRENT_WRITES", DefaultMaxConcurrentWrites)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxConcurrentWrites = maxWrites
 
 	scrubInterval, err := envDuration(env, "SILO_SCRUB_INTERVAL")
 	if err != nil {
