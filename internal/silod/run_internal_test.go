@@ -37,7 +37,7 @@ func testConfig(t *testing.T) *config.Config {
 		GossipAddr:    "127.0.0.1:0",
 		HTTPAddr:      "127.0.0.1:0",
 		DataDir:       t.TempDir(),
-		ChunkSize:     4 * 1024 * 1024,
+		ChunkSize:     256 * 1024,
 		Replication:   1,
 		KeySource:     config.KeySourceStatic,
 		EncryptionKey: make([]byte, crypto.ClusterKeyBytes),

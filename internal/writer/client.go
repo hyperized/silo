@@ -14,9 +14,10 @@ import (
 
 const (
 	// DefaultChunkSize is the amount of plaintext a writer accumulates before
-	// sealing it into one chunk. 4 MiB matches the chunk store's working size
-	// and stays under gRPC's default message ceiling once framed.
-	DefaultChunkSize = 4 << 20
+	// sealing it into one chunk. 256 KiB matches silod's default chunk size
+	// (config.DefaultChunkSize) — chosen for low copy-on-write amplification on
+	// small writes — and stays well under gRPC's default message ceiling.
+	DefaultChunkSize = 256 << 10
 
 	// putFrameSize bounds a single Put data frame so a large chunk streams in
 	// pieces well under gRPC's 4 MiB receive limit.
