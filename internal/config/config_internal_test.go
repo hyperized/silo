@@ -99,6 +99,11 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.ExtentReapAfter != 0 || cfg.ExtentReapInterval != 0 {
 		t.Errorf("extent reap defaults: got after=%v interval=%v, want 0/0", cfg.ExtentReapAfter, cfg.ExtentReapInterval)
 	}
+	// The scrub interval likewise defaults to 0 so the extent scrubber owns its
+	// fallback (DefaultExtentScrubInterval) — one source of truth, as above.
+	if cfg.ExtentScrubInterval != 0 {
+		t.Errorf("ExtentScrubInterval default: got %v, want 0", cfg.ExtentScrubInterval)
+	}
 	// Retention, unlike the scrub interval, defaults to a concrete value:
 	// zero would let GC resurrect deleted entries.
 	if cfg.TombstoneRetention != DefaultTombstoneRetention {
@@ -251,7 +256,7 @@ func TestLoad_NegativeScrubInterval(t *testing.T) {
 }
 
 func TestLoad_BadExtentReapDurations(t *testing.T) {
-	for _, key := range []string{"SILO_EXTENT_REAP_AFTER", "SILO_EXTENT_REAP_INTERVAL"} {
+	for _, key := range []string{"SILO_EXTENT_REAP_AFTER", "SILO_EXTENT_REAP_INTERVAL", "SILO_EXTENT_SCRUB_INTERVAL"} {
 		_, err := Load(envMap(map[string]string{
 			"SILO_NODE_ID":        "n",
 			"SILO_ENCRYPTION_KEY": validBase64Key(t),
@@ -291,6 +296,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_EXTENT_REPLICATION":    "false",
 		"SILO_EXTENT_REAP_AFTER":     "30m",
 		"SILO_EXTENT_REAP_INTERVAL":  "2m",
+		"SILO_EXTENT_SCRUB_INTERVAL": "90s",
 		"SILO_PRINT_BOOTSTRAP_TOKEN": "yes",
 		"SILO_TLS_CA_SEED":           "true",
 	}))
@@ -329,6 +335,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		ExtentReplication:   false, // overridden from its default of true
 		ExtentReapAfter:     30 * time.Minute,
 		ExtentReapInterval:  2 * time.Minute,
+		ExtentScrubInterval: 90 * time.Second,
 		DiskThresholds:      diskpressure.DefaultThresholds(),
 		CAExternal:          true,
 		CASeed:              true,

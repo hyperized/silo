@@ -50,6 +50,7 @@ is the quick reference.
 | `SILO_EXTENT_REPLICATION` | `true` | Serve each volume's extent map from its replica set (out of band, like chunks) instead of the gossiped namespace — required for a volume to attach on any node, not just where it was created. Leave on. |
 | `SILO_EXTENT_REAP_AFTER` | `1h` | How long a deleted volume's extent map must sit untouched before the reaper reclaims orphaned replicas. The age guard that stops a freshly-created volume whose directory entry has not yet gossiped to a node from being mistaken for a deleted one — keep it well above gossip convergence time. |
 | `SILO_EXTENT_REAP_INTERVAL` | `15m` | Extent-map reaper sweep cadence (the GC backstop for the synchronous delete path). |
+| `SILO_EXTENT_SCRUB_INTERVAL` | `1m` | Extent-map scrubber cadence — re-replicates an idle volume's extent map to its full replica set after a node loss (the metadata analog of `SILO_SCRUB_INTERVAL`, which heals chunks). The synchronous write-path fan-out only keeps replicas in step while writes flow; a volume written once and then left idle would otherwise stay under-replicated after a later node loss. |
 
 ### Encryption (at rest)
 
@@ -708,6 +709,15 @@ Notable series:
   steady non-zero `last_reap_reclaimed` means deletes are leaving orphans for the
   reaper to clean — expected only when a replica was unreachable at delete time;
   a persistent stream warrants a look at delete-path (`DeleteMap`) health.
+- `silo_extentmap_scrub_shortfall_maps` and `silo_extentmap_scrub_repairs_total` —
+  extent maps this node is responsible for that were under-replicated at the last
+  scrub (gauge), and the running count of map replicas it has re-pushed to heal
+  them (counter). Summed across the cluster each map has exactly one responsible
+  healer, so the gauge is the live count of under-replicated extent maps; it
+  should fall to zero within a scrub interval or two after a node rejoins. A
+  shortfall that stays non-zero means a target replica is unreachable or out of
+  disk — pair it with `silo_replication_shortfall_chunks` to see whether chunks
+  are stuck too.
 
 The data-key cache hit-rate metric is pending the cache itself (silod currently
 unwraps per-chunk keys on demand; the cache is a later optimisation).

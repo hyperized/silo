@@ -174,6 +174,13 @@ type Config struct {
 	ExtentReapAfter    time.Duration
 	ExtentReapInterval time.Duration
 
+	// ExtentScrubInterval paces the extent-map scrubber, which re-replicates a
+	// volume's extent map to any of its replica-set nodes that are missing it —
+	// healing idle volumes after a node loss the write path never revisits. Zero
+	// means "use the scrubber's built-in default"; set SILO_EXTENT_SCRUB_INTERVAL
+	// to a Go duration (e.g. 30s, 1m) to override.
+	ExtentScrubInterval time.Duration
+
 	// CRLPath points at a CA-signed certificate revocation list
 	// (SILO_TLS_CRL). When set, silod loads it, verifies it against the
 	// cluster CA, and rejects any mTLS handshake whose peer cert serial
@@ -315,6 +322,12 @@ func Load(env EnvFunc) (*Config, error) {
 		return nil, err
 	}
 	cfg.ExtentReapInterval = reapInterval
+
+	extentScrubInterval, err := envDuration(env, "SILO_EXTENT_SCRUB_INTERVAL")
+	if err != nil {
+		return nil, err
+	}
+	cfg.ExtentScrubInterval = extentScrubInterval
 
 	if err := loadEncryptionKey(env, cfg); err != nil {
 		return nil, err
