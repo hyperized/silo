@@ -153,6 +153,18 @@ func steer(ordered []string, n int, pressured map[string]struct{}) []string {
 	return result
 }
 
+// MetaReplicas resolves volumeID to up to n replica node ids for its extent
+// map, always over the plain capacity-weighted ring — pressure steering is
+// deliberately not applied. A volume's extent map is a small, long-lived
+// metadata object whose replica set must stay stable: shedding it off a
+// near-full node (as steering does for bulk chunks) would migrate the whole
+// map for negligible space relief and churn the set on every pressure change.
+// The same un-steered resolution is used by the extent-map write, serve, and
+// repair paths so they all agree on where a volume's map lives.
+func (r *Router) MetaReplicas(volumeID string, n int) []string {
+	return r.currentRing().Replicas(volumeID, n)
+}
+
 // SelfID returns the local node id.
 func (r *Router) SelfID() string { return r.members.SelfID() }
 

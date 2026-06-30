@@ -41,12 +41,13 @@ func (c *fakeCoord) Stat(context.Context, string) (chunkstore.Info, error) {
 }
 
 type fakeNS struct {
-	size       int64
-	sizeErr    error
-	extentErr  error
-	acquireErr error
-	releaseErr error
-	released   bool
+	size        int64
+	sizeErr     error
+	extentErr   error
+	acquireErr  error
+	releaseErr  error
+	released    bool
+	leaseHolder string
 }
 
 func (n *fakeNS) ExtentSize(string) (int64, error) {
@@ -64,6 +65,16 @@ func (n *fakeNS) AcquireLease(string, string) (namespace.Lease, error) {
 	return namespace.Lease{}, n.acquireErr
 }
 func (n *fakeNS) ReleaseLease(string, string) error { n.released = true; return n.releaseErr }
+func (n *fakeNS) VolumeInodeID(string) (string, error) {
+	if n.extentErr != nil {
+		return "", n.extentErr
+	}
+	return "inode-vol", nil
+}
+
+func (n *fakeNS) Lease(string) (namespace.Lease, error) {
+	return namespace.Lease{Holder: n.leaseHolder}, nil
+}
 
 func TestCoordChunks(t *testing.T) {
 	coord := &fakeCoord{readData: []byte("hi")}
@@ -90,7 +101,7 @@ func TestCoordChunks(t *testing.T) {
 
 func TestVolumeBackend_OpenSuccess(t *testing.T) {
 	ns := &fakeNS{size: 2048}
-	b := newVolumeBackend(ns, &fakeCoord{}, "node-a", discardLogger())
+	b := newVolumeBackend(ns, &fakeCoord{}, "node-a", discardLogger(), nil, nil, false)
 	dev, release, err := b.Open(context.Background(), "/vol")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -116,7 +127,7 @@ func TestVolumeBackend_OpenErrors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			b := newVolumeBackend(tc.ns, &fakeCoord{}, "node-a", discardLogger())
+			b := newVolumeBackend(tc.ns, &fakeCoord{}, "node-a", discardLogger(), nil, nil, false)
 			if _, _, err := b.Open(context.Background(), "/vol"); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("Open err = %v, want containing %q", err, tc.want)
 			}
@@ -128,7 +139,7 @@ func TestVolumeBackend_OpenVolumeFailureReleasesLease(t *testing.T) {
 	// Size + AcquireLease succeed, but volume.Open then fails resolving the
 	// extent size; the backend must release the lease it just took.
 	ns := &fakeNS{size: 1024, extentErr: errBoom}
-	b := newVolumeBackend(ns, &fakeCoord{}, "node-a", discardLogger())
+	b := newVolumeBackend(ns, &fakeCoord{}, "node-a", discardLogger(), nil, nil, false)
 	if _, _, err := b.Open(context.Background(), "/vol"); err == nil {
 		t.Fatal("Open should fail when the volume cannot be opened")
 	}
@@ -140,7 +151,7 @@ func TestVolumeBackend_OpenVolumeFailureReleasesLease(t *testing.T) {
 func TestVolumeBackend_ReleaseErrorIsLogged(t *testing.T) {
 	// A release error is logged, not propagated; just exercise the branch.
 	ns := &fakeNS{size: 1024, releaseErr: errBoom}
-	b := newVolumeBackend(ns, &fakeCoord{}, "node-a", discardLogger())
+	b := newVolumeBackend(ns, &fakeCoord{}, "node-a", discardLogger(), nil, nil, false)
 	_, release, err := b.Open(context.Background(), "/vol")
 	if err != nil {
 		t.Fatalf("Open: %v", err)

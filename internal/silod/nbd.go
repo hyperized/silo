@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/namespace"
 	"github.com/hyperized/silo/internal/nbd"
 	"github.com/hyperized/silo/internal/transport"
@@ -22,6 +23,8 @@ type nsVolumes interface {
 	WriteExtent(path string, index uint64, chunkID, holder string) error
 	WriteExtents(path string, indexes []uint64, chunkIDs []string, holder string) error
 	Size(path string) (int64, error)
+	VolumeInodeID(path string) (string, error)
+	Lease(path string) (namespace.Lease, error)
 	AcquireLease(path, holder string) (namespace.Lease, error)
 	ReleaseLease(path, holder string) error
 }
@@ -52,14 +55,17 @@ func (d volumeDevice) Size() int64 { return d.size }
 // lease for this node (fencing any previous holder), opens the block-I/O SDK,
 // and releases the lease when the client disconnects.
 type volumeBackend struct {
-	ns     nsVolumes
-	chunks volume.Chunks
-	holder string
-	logger *slog.Logger
+	ns       nsVolumes
+	chunks   volume.Chunks
+	holder   string
+	logger   *slog.Logger
+	extCoord extentCoord // extent-map replica-set coordinator; nil disables the path
+	clock    *hlc.Clock  // stamps replicated extent writes
+	extentRf bool        // serve extents from the replica set instead of the namespace
 }
 
-func newVolumeBackend(ns nsVolumes, coord transport.Coordinator, holder string, logger *slog.Logger) *volumeBackend {
-	return &volumeBackend{ns: ns, chunks: coordChunks{coord: coord}, holder: holder, logger: logger}
+func newVolumeBackend(ns nsVolumes, coord transport.Coordinator, holder string, logger *slog.Logger, extCoord extentCoord, clock *hlc.Clock, extentRf bool) *volumeBackend {
+	return &volumeBackend{ns: ns, chunks: coordChunks{coord: coord}, holder: holder, logger: logger, extCoord: extCoord, clock: clock, extentRf: extentRf}
 }
 
 func (b *volumeBackend) Open(ctx context.Context, export string) (nbd.Device, func(), error) {
@@ -73,7 +79,12 @@ func (b *volumeBackend) Open(ctx context.Context, export string) (nbd.Device, fu
 	if _, err := b.ns.AcquireLease(export, b.holder); err != nil {
 		return nil, nil, fmt.Errorf("nbd: could not acquire the lease on %q (%w)", export, err)
 	}
-	vol, err := volume.Open(ctx, b.ns, b.chunks, export, b.holder)
+	meta, err := b.metadata(ctx, export)
+	if err != nil {
+		_ = b.ns.ReleaseLease(export, b.holder)
+		return nil, nil, err
+	}
+	vol, err := volume.Open(ctx, meta, b.chunks, export, b.holder)
 	if err != nil {
 		_ = b.ns.ReleaseLease(export, b.holder)
 		return nil, nil, err
@@ -84,6 +95,25 @@ func (b *volumeBackend) Open(ctx context.Context, export string) (nbd.Device, fu
 		}
 	}
 	return volumeDevice{Volume: vol, size: size}, release, nil
+}
+
+// metadata chooses the volume's block-I/O metadata source. With extent
+// replication on, it resolves the volume's inode id, warms its extent map from
+// the replica set (so this node can serve it even if it did not create it), and
+// returns the replica-set-backed adapter. Otherwise it returns the gossiped
+// namespace (legacy, single-node-correct) path.
+func (b *volumeBackend) metadata(ctx context.Context, export string) (volume.Metadata, error) {
+	if !b.extentRf || b.extCoord == nil {
+		return b.ns, nil
+	}
+	volumeID, err := b.ns.VolumeInodeID(export)
+	if err != nil {
+		return nil, fmt.Errorf("nbd: cannot resolve the volume id for %q (%w)", export, err)
+	}
+	if err := b.extCoord.Warm(ctx, volumeID); err != nil {
+		return nil, fmt.Errorf("nbd: cannot serve %q (%w)", export, err)
+	}
+	return &extentMetadata{ctx: ctx, ns: b.ns, coord: b.extCoord, clock: b.clock, export: export, volumeID: volumeID}, nil
 }
 
 // nbdSub runs the NBD listener as a silod subsystem. Its cancel context is

@@ -92,7 +92,10 @@ func (s *Subsystem) handleConn(c net.Conn) {
 		reply := s.selfEnvelope(KindSyncResp, msg.SenderID)
 		reply.MembershipView = s.viewSnapshot()
 		reply.Extension = s.extLocalState()
-		_ = writeMessage(c, reply)
+		if err := writeMessage(c, reply); err != nil {
+			s.syncSendFailures.Add(1)
+			s.logger.Warn("gossip: could not send the anti-entropy sync reply; the initiator will not converge with our state (if the extension exceeds the per-message cap, our whole namespace is stranded)", "peer", msg.SenderID, "error", err)
+		}
 	case KindAck, KindSyncResp:
 		// Stray ack or sync-resp on an inbound connection — these are
 		// only valid as replies to our own outbound dials. Ignore but

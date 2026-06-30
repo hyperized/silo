@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package silo.extent.v1;
+
+option go_package = "github.com/hyperized/silo/api/proto/silo/extent/v1;extentv1";
+
+// ExtentMap is the silod-side RPC surface for replicating a volume's extent map
+// (extent index -> chunk id) to the volume's replica set, out of band from the
+// gossiped directory namespace. The map is a per-key last-writer-wins CRDT, so
+// every entry carries the HLC at which it was bound and applies convergently.
+service ExtentMap {
+  // Apply folds a batch of extent bindings into the receiving node's local map
+  // for a volume (the coordinator fans this out to the replica set). With no
+  // entries and ensure=true it just creates an empty map (first-attach).
+  rpc Apply(ApplyRequest) returns (ApplyResponse);
+  // Get streams a volume's whole extent map back, in batches, so a serving node
+  // that is not a holder can warm its map and a lagging replica can be repaired.
+  rpc Get(GetRequest) returns (stream GetResponse);
+  // Stat reports whether the receiving node holds a volume's map and how many
+  // extents it has — the existence/health probe the extent scrubber uses.
+  rpc Stat(StatRequest) returns (StatResponse);
+}
+
+// Hlc is silo's hybrid logical clock timestamp on the wire.
+message Hlc {
+  int64 wall = 1;
+  uint32 logical = 2;
+  string node = 3;
+}
+
+// ExtentEntry binds one extent index to the chunk that backs it, stamped with
+// the HLC of the write so replicas resolve it last-writer-wins.
+message ExtentEntry {
+  uint64 index = 1;
+  string chunk_id = 2;
+  Hlc ts = 3;
+}
+
+message ApplyRequest {
+  string volume_id = 1;
+  repeated ExtentEntry entries = 2;
+  // replica marks a peer-to-peer replica write: the receiving node applies to
+  // its local store only and does NOT fan out further. The coordinator sets it
+  // when replicating to the volume's replica set; a coordinator-side apply
+  // leaves it false (it does the fan-out itself).
+  bool replica = 3;
+  // ensure, with no entries, creates an empty map for the volume so a
+  // freshly-created volume is established on its replica set before any write.
+  bool ensure = 4;
+}
+
+message ApplyResponse {}
+
+message GetRequest {
+  string volume_id = 1;
+}
+
+message GetResponse {
+  repeated ExtentEntry entries = 1;
+}
+
+message StatRequest {
+  string volume_id = 1;
+}
+
+message StatResponse {
+  bool has = 1;
+  int64 count = 2;
+}

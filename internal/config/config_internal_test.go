@@ -134,6 +134,26 @@ func TestLoad_DiskThresholds(t *testing.T) {
 	}
 }
 
+func TestLoad_ExtentReplicationDefaultsOnAndOptsOut(t *testing.T) {
+	base := map[string]string{"SILO_NODE_ID": "n", "SILO_ENCRYPTION_KEY": validBase64Key(t)}
+	cfg, err := Load(envMap(base))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.ExtentReplication {
+		t.Error("ExtentReplication should default to true")
+	}
+
+	out := map[string]string{"SILO_NODE_ID": "n", "SILO_ENCRYPTION_KEY": validBase64Key(t), "SILO_EXTENT_REPLICATION": "false"}
+	cfg, err = Load(envMap(out))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ExtentReplication {
+		t.Error("SILO_EXTENT_REPLICATION=false should disable replica-set serving")
+	}
+}
+
 func TestLoad_DiskSteeringDefaultsOnAndOptsOut(t *testing.T) {
 	base := map[string]string{"SILO_NODE_ID": "n", "SILO_ENCRYPTION_KEY": validBase64Key(t)}
 
@@ -250,6 +270,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_TLS_NODE_KEY":          "/etc/silo/node.key",
 		"SILO_TLS_CRL":               "/etc/silo/revoked.crl",
 		"SILO_REQUIRE_TOKENS":        "1",
+		"SILO_EXTENT_REPLICATION":    "false",
 		"SILO_PRINT_BOOTSTRAP_TOKEN": "yes",
 		"SILO_TLS_CA_SEED":           "true",
 	}))
@@ -285,6 +306,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		CRLPath:             "/etc/silo/revoked.crl",
 		RequireTokens:       true,
 		DiskSteering:        true,
+		ExtentReplication:   false, // overridden from its default of true
 		DiskThresholds:      diskpressure.DefaultThresholds(),
 		CAExternal:          true,
 		CASeed:              true,

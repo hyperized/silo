@@ -2,6 +2,8 @@ package backup_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -11,7 +13,24 @@ import (
 
 	"github.com/hyperized/silo/internal/backup"
 	"github.com/hyperized/silo/internal/blobstore"
+	"github.com/hyperized/silo/internal/crdt"
+	"github.com/hyperized/silo/internal/hlc"
 )
+
+type fakeExtents struct {
+	vols map[string][]crdt.MapEntry[uint64, string]
+}
+
+func (f fakeExtents) Volumes() []string {
+	out := make([]string, 0, len(f.vols))
+	for v := range f.vols {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (f fakeExtents) Snapshot(vol string) []crdt.MapEntry[uint64, string] { return f.vols[vol] }
 
 type fakeChunks struct {
 	ids     []string
@@ -86,6 +105,55 @@ func TestExporter_Export(t *testing.T) {
 	}
 	if string(tgt.puts["chunks/c1"]) != "ciphertext-1" || string(tgt.puts["chunks/c2"]) != "ciphertext-22" {
 		t.Errorf("chunks not written: %v", keys(tgt.puts))
+	}
+}
+
+func TestExporter_ExportsExtentMaps(t *testing.T) {
+	vol := "inode-100.0.node/odd:chars" // a node id with filesystem-unsafe runes
+	ext := fakeExtents{vols: map[string][]crdt.MapEntry[uint64, string]{
+		vol: {{Key: 0, Value: "c0", TS: hlc.Timestamp{Wall: 1}}, {Key: 5, Value: "c5", TS: hlc.Timestamp{Wall: 2}}},
+	}}
+	exp := backup.NewExporter(fakeChunks{}, fakeNS{snap: []byte("ns")}, "node-a", backup.WithExtentSource(ext))
+	tgt := newCapture()
+	if _, err := exp.Export(context.Background(), tgt); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	name := "extents/node-a/" + base64.RawURLEncoding.EncodeToString([]byte(vol)) + ".json"
+	raw, ok := tgt.puts[name]
+	if !ok {
+		t.Fatalf("extent map not written; got %v", keys(tgt.puts))
+	}
+	var got struct {
+		VolumeID string                          `json:"volume_id"`
+		Entries  []crdt.MapEntry[uint64, string] `json:"entries"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal extent backup: %v", err)
+	}
+	if got.VolumeID != vol || len(got.Entries) != 2 || got.Entries[1].Value != "c5" {
+		t.Errorf("extent backup wrong: %+v", got)
+	}
+}
+
+func TestExporter_ExtentPutErrorAndCancel(t *testing.T) {
+	vol := "v1"
+	ext := fakeExtents{vols: map[string][]crdt.MapEntry[uint64, string]{vol: {{Key: 0, Value: "c0"}}}}
+	name := "extents/node-a/" + base64.RawURLEncoding.EncodeToString([]byte(vol)) + ".json"
+
+	// Put failure on the extent map aborts the run.
+	tgt := newCapture()
+	tgt.putErr[name] = errors.New("boom")
+	exp := backup.NewExporter(fakeChunks{}, fakeNS{snap: []byte("ns")}, "node-a", backup.WithExtentSource(ext))
+	if _, err := exp.Export(context.Background(), tgt); err == nil {
+		t.Error("a failed extent-map upload should abort the backup")
+	}
+
+	// A cancelled context is observed before writing an extent map.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := exp.Export(ctx, newCapture()); err == nil {
+		t.Error("a cancelled context should stop the export")
 	}
 }
 

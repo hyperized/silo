@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	chunkv1 "github.com/hyperized/silo/api/proto/silo/chunk/v1"
+	extentv1 "github.com/hyperized/silo/api/proto/silo/extent/v1"
 	namespacev1 "github.com/hyperized/silo/api/proto/silo/namespace/v1"
 	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
 	"github.com/hyperized/silo/internal/chunkstore"
@@ -33,6 +34,14 @@ type GRPCOption func(*grpcConfig)
 func WithStatusService(svc statusv1.ClusterStatusServer) GRPCOption {
 	return func(c *grpcConfig) {
 		c.services = append(c.services, func(s *grpc.Server) { statusv1.RegisterClusterStatusServer(s, svc) })
+	}
+}
+
+// WithExtentService registers the extent-map replica service so peers can
+// replicate, fetch, and stat a volume's extent map on this node.
+func WithExtentService(svc extentv1.ExtentMapServer) GRPCOption {
+	return func(c *grpcConfig) {
+		c.services = append(c.services, func(s *grpc.Server) { extentv1.RegisterExtentMapServer(s, svc) })
 	}
 }
 

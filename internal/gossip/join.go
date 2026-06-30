@@ -101,6 +101,8 @@ func (s *Subsystem) syncWith(addr string) bool {
 	req.MembershipView = s.viewSnapshot()
 	req.Extension = s.extLocalState()
 	if err := writeMessage(conn, req); err != nil {
+		s.syncSendFailures.Add(1)
+		s.logger.Warn("gossip: could not send the anti-entropy sync request; this peer will not converge with our state (if the extension exceeds the per-message cap, our whole namespace is stranded)", "peer", addr, "error", err)
 		return false
 	}
 	resp, err := readMessage(conn)
