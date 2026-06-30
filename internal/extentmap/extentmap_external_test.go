@@ -1,17 +1,25 @@
 package extentmap_test
 
 import (
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/hyperized/silo/internal/crdt"
 	"github.com/hyperized/silo/internal/extentmap"
 	"github.com/hyperized/silo/internal/hlc"
 )
+
+// emapFile is the on-disk path of a volume's persisted map under dir, mirroring
+// the store's own base64url-of-id naming.
+func emapFile(dir, volumeID string) string {
+	return filepath.Join(dir, base64.RawURLEncoding.EncodeToString([]byte(volumeID))+".emap.json")
+}
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -154,6 +162,109 @@ func TestStore_OpenSkipsNonMatchingAndCorruptFiles(t *testing.T) {
 	}
 	if id, ok := s.Get("v-good", 0); !ok || id != "c0" {
 		t.Errorf("good map not loaded: (%q,%v)", id, ok)
+	}
+}
+
+func TestStore_Delete(t *testing.T) {
+	dir := t.TempDir()
+	s, err := extentmap.Open(dir, discard())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	vol := "inode-1.0.node/odd:chars" // exercises the encoded filename
+	s.Set(vol, 0, "c0", ts(1))
+	if _, statErr := os.Stat(emapFile(dir, vol)); statErr != nil {
+		t.Fatalf("expected a persisted file before delete: %v", statErr)
+	}
+
+	if err := s.Delete(vol); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if s.Has(vol) {
+		t.Error("Delete should drop the in-memory map")
+	}
+	if _, statErr := os.Stat(emapFile(dir, vol)); !os.IsNotExist(statErr) {
+		t.Errorf("Delete should remove the persisted file, stat err = %v", statErr)
+	}
+
+	// Idempotent: deleting an already-gone volume is a no-op.
+	if err := s.Delete(vol); err != nil {
+		t.Errorf("Delete of an unknown volume should be a no-op, got %v", err)
+	}
+
+	// Delete on an in-memory store drops the map and never touches disk.
+	mem := extentmap.New(discard())
+	mem.Set("v", 0, "c", ts(1))
+	if err := mem.Delete("v"); err != nil || mem.Has("v") {
+		t.Errorf("in-memory Delete failed: err=%v has=%v", err, mem.Has("v"))
+	}
+}
+
+func TestStore_Reap(t *testing.T) {
+	dir := t.TempDir()
+	s, err := extentmap.Open(dir, discard())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.Set("live", 0, "c", ts(1))
+	s.Set("orphan-old", 0, "c", ts(1))
+	s.Set("orphan-young", 0, "c", ts(1))
+
+	past := time.Now().Add(-2 * time.Hour)
+	recent := time.Now()
+	if err := os.Chtimes(emapFile(dir, "orphan-old"), past, past); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if err := os.Chtimes(emapFile(dir, "orphan-young"), recent, recent); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	live := map[string]struct{}{"live": {}}
+	reaped, err := s.Reap(live, time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if !reflect.DeepEqual(reaped, []string{"orphan-old"}) {
+		t.Errorf("reaped = %v, want [orphan-old]", reaped)
+	}
+	// In the live set: kept. Too young: kept. Old orphan: gone (memory + disk).
+	if !s.Has("live") || !s.Has("orphan-young") || s.Has("orphan-old") {
+		t.Errorf("after reap: live=%v young=%v old=%v", s.Has("live"), s.Has("orphan-young"), s.Has("orphan-old"))
+	}
+	if _, statErr := os.Stat(emapFile(dir, "orphan-old")); !os.IsNotExist(statErr) {
+		t.Errorf("a reaped map's file should be removed, stat err = %v", statErr)
+	}
+
+	// An in-memory store has no file age to judge by, so it reaps nothing.
+	mem := extentmap.New(discard())
+	mem.Set("x", 0, "c", ts(1))
+	if got, err := mem.Reap(map[string]struct{}{}, time.Now()); err != nil || got != nil {
+		t.Errorf("in-memory Reap should be a no-op: reaped=%v err=%v", got, err)
+	}
+	if !mem.Has("x") {
+		t.Error("in-memory Reap must not drop maps")
+	}
+}
+
+func TestStore_ReapDropsEntryWhoseFileVanished(t *testing.T) {
+	dir := t.TempDir()
+	s, err := extentmap.Open(dir, discard())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.Set("gone", 0, "c", ts(1))
+	if err := os.Remove(emapFile(dir, "gone")); err != nil { // file vanishes out of band
+		t.Fatalf("remove: %v", err)
+	}
+	reaped, err := s.Reap(map[string]struct{}{}, time.Now())
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if !reflect.DeepEqual(reaped, []string{"gone"}) {
+		t.Errorf("reaped = %v, want [gone]", reaped)
+	}
+	if s.Has("gone") {
+		t.Error("a stale in-memory entry whose file vanished should be dropped")
 	}
 }
 

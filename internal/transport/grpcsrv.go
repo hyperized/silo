@@ -24,6 +24,7 @@ import (
 type grpcConfig struct {
 	services   []func(*grpc.Server)
 	serverOpts []grpc.ServerOption
+	nsOpts     []NamespaceOption
 }
 
 // GRPCOption configures the gRPC server at construction — registering an extra
@@ -43,6 +44,12 @@ func WithExtentService(svc extentv1.ExtentMapServer) GRPCOption {
 	return func(c *grpcConfig) {
 		c.services = append(c.services, func(s *grpc.Server) { extentv1.RegisterExtentMapServer(s, svc) })
 	}
+}
+
+// WithNamespaceExtentDeleter wires an extent deleter into the namespace service
+// so removing a volume also deletes its extent map from the replica set.
+func WithNamespaceExtentDeleter(d ExtentDeleter) GRPCOption {
+	return func(c *grpcConfig) { c.nsOpts = append(c.nsOpts, WithExtentDeleter(d)) }
 }
 
 // WithTokenAuth installs the capability-token interceptors (unary + stream) so
@@ -82,7 +89,7 @@ func NewGRPCServer(addr string, tlsCfg *tls.Config, store chunkstore.Store, coor
 	serverOpts := append([]grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsCfg))}, cfg.serverOpts...)
 	s := grpc.NewServer(serverOpts...)
 	chunkv1.RegisterChunkStoreServer(s, NewChunkService(store, coord, logger))
-	namespacev1.RegisterNamespaceStoreServer(s, NewNamespaceService(ns, logger))
+	namespacev1.RegisterNamespaceStoreServer(s, NewNamespaceService(ns, logger, cfg.nsOpts...))
 	for _, register := range cfg.services {
 		register(s)
 	}

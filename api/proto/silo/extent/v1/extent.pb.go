@@ -438,6 +438,86 @@ func (x *StatResponse) GetCount() int64 {
 	return 0
 }
 
+type DeleteRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	VolumeId      string                 `protobuf:"bytes,1,opt,name=volume_id,json=volumeId,proto3" json:"volume_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteRequest) Reset() {
+	*x = DeleteRequest{}
+	mi := &file_silo_extent_v1_extent_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteRequest) ProtoMessage() {}
+
+func (x *DeleteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_silo_extent_v1_extent_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteRequest.ProtoReflect.Descriptor instead.
+func (*DeleteRequest) Descriptor() ([]byte, []int) {
+	return file_silo_extent_v1_extent_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *DeleteRequest) GetVolumeId() string {
+	if x != nil {
+		return x.VolumeId
+	}
+	return ""
+}
+
+type DeleteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeleteResponse) Reset() {
+	*x = DeleteResponse{}
+	mi := &file_silo_extent_v1_extent_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeleteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeleteResponse) ProtoMessage() {}
+
+func (x *DeleteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_silo_extent_v1_extent_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeleteResponse.ProtoReflect.Descriptor instead.
+func (*DeleteResponse) Descriptor() ([]byte, []int) {
+	return file_silo_extent_v1_extent_proto_rawDescGZIP(), []int{9}
+}
+
 var File_silo_extent_v1_extent_proto protoreflect.FileDescriptor
 
 const file_silo_extent_v1_extent_proto_rawDesc = "" +
@@ -466,11 +546,15 @@ const file_silo_extent_v1_extent_proto_rawDesc = "" +
 	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\"6\n" +
 	"\fStatResponse\x12\x10\n" +
 	"\x03has\x18\x01 \x01(\bR\x03has\x12\x14\n" +
-	"\x05count\x18\x02 \x01(\x03R\x05count2\xd6\x01\n" +
+	"\x05count\x18\x02 \x01(\x03R\x05count\",\n" +
+	"\rDeleteRequest\x12\x1b\n" +
+	"\tvolume_id\x18\x01 \x01(\tR\bvolumeId\"\x10\n" +
+	"\x0eDeleteResponse2\x9f\x02\n" +
 	"\tExtentMap\x12D\n" +
 	"\x05Apply\x12\x1c.silo.extent.v1.ApplyRequest\x1a\x1d.silo.extent.v1.ApplyResponse\x12@\n" +
 	"\x03Get\x12\x1a.silo.extent.v1.GetRequest\x1a\x1b.silo.extent.v1.GetResponse0\x01\x12A\n" +
-	"\x04Stat\x12\x1b.silo.extent.v1.StatRequest\x1a\x1c.silo.extent.v1.StatResponseB=Z;github.com/hyperized/silo/api/proto/silo/extent/v1;extentv1b\x06proto3"
+	"\x04Stat\x12\x1b.silo.extent.v1.StatRequest\x1a\x1c.silo.extent.v1.StatResponse\x12G\n" +
+	"\x06Delete\x12\x1d.silo.extent.v1.DeleteRequest\x1a\x1e.silo.extent.v1.DeleteResponseB=Z;github.com/hyperized/silo/api/proto/silo/extent/v1;extentv1b\x06proto3"
 
 var (
 	file_silo_extent_v1_extent_proto_rawDescOnce sync.Once
@@ -484,16 +568,18 @@ func file_silo_extent_v1_extent_proto_rawDescGZIP() []byte {
 	return file_silo_extent_v1_extent_proto_rawDescData
 }
 
-var file_silo_extent_v1_extent_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_silo_extent_v1_extent_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_silo_extent_v1_extent_proto_goTypes = []any{
-	(*Hlc)(nil),           // 0: silo.extent.v1.Hlc
-	(*ExtentEntry)(nil),   // 1: silo.extent.v1.ExtentEntry
-	(*ApplyRequest)(nil),  // 2: silo.extent.v1.ApplyRequest
-	(*ApplyResponse)(nil), // 3: silo.extent.v1.ApplyResponse
-	(*GetRequest)(nil),    // 4: silo.extent.v1.GetRequest
-	(*GetResponse)(nil),   // 5: silo.extent.v1.GetResponse
-	(*StatRequest)(nil),   // 6: silo.extent.v1.StatRequest
-	(*StatResponse)(nil),  // 7: silo.extent.v1.StatResponse
+	(*Hlc)(nil),            // 0: silo.extent.v1.Hlc
+	(*ExtentEntry)(nil),    // 1: silo.extent.v1.ExtentEntry
+	(*ApplyRequest)(nil),   // 2: silo.extent.v1.ApplyRequest
+	(*ApplyResponse)(nil),  // 3: silo.extent.v1.ApplyResponse
+	(*GetRequest)(nil),     // 4: silo.extent.v1.GetRequest
+	(*GetResponse)(nil),    // 5: silo.extent.v1.GetResponse
+	(*StatRequest)(nil),    // 6: silo.extent.v1.StatRequest
+	(*StatResponse)(nil),   // 7: silo.extent.v1.StatResponse
+	(*DeleteRequest)(nil),  // 8: silo.extent.v1.DeleteRequest
+	(*DeleteResponse)(nil), // 9: silo.extent.v1.DeleteResponse
 }
 var file_silo_extent_v1_extent_proto_depIdxs = []int32{
 	0, // 0: silo.extent.v1.ExtentEntry.ts:type_name -> silo.extent.v1.Hlc
@@ -502,11 +588,13 @@ var file_silo_extent_v1_extent_proto_depIdxs = []int32{
 	2, // 3: silo.extent.v1.ExtentMap.Apply:input_type -> silo.extent.v1.ApplyRequest
 	4, // 4: silo.extent.v1.ExtentMap.Get:input_type -> silo.extent.v1.GetRequest
 	6, // 5: silo.extent.v1.ExtentMap.Stat:input_type -> silo.extent.v1.StatRequest
-	3, // 6: silo.extent.v1.ExtentMap.Apply:output_type -> silo.extent.v1.ApplyResponse
-	5, // 7: silo.extent.v1.ExtentMap.Get:output_type -> silo.extent.v1.GetResponse
-	7, // 8: silo.extent.v1.ExtentMap.Stat:output_type -> silo.extent.v1.StatResponse
-	6, // [6:9] is the sub-list for method output_type
-	3, // [3:6] is the sub-list for method input_type
+	8, // 6: silo.extent.v1.ExtentMap.Delete:input_type -> silo.extent.v1.DeleteRequest
+	3, // 7: silo.extent.v1.ExtentMap.Apply:output_type -> silo.extent.v1.ApplyResponse
+	5, // 8: silo.extent.v1.ExtentMap.Get:output_type -> silo.extent.v1.GetResponse
+	7, // 9: silo.extent.v1.ExtentMap.Stat:output_type -> silo.extent.v1.StatResponse
+	9, // 10: silo.extent.v1.ExtentMap.Delete:output_type -> silo.extent.v1.DeleteResponse
+	7, // [7:11] is the sub-list for method output_type
+	3, // [3:7] is the sub-list for method input_type
 	3, // [3:3] is the sub-list for extension type_name
 	3, // [3:3] is the sub-list for extension extendee
 	0, // [0:3] is the sub-list for field type_name
@@ -523,7 +611,7 @@ func file_silo_extent_v1_extent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_silo_extent_v1_extent_proto_rawDesc), len(file_silo_extent_v1_extent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

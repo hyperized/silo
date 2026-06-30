@@ -30,4 +30,7 @@ func TestExtentGRPCPeers_DialError(t *testing.T) {
 	if _, _, err := p.Stat(ctx, "x:1", "vol"); err == nil {
 		t.Error("Stat should fail when the peer client cannot be created")
 	}
+	if err := p.Delete(ctx, "x:1", "vol"); err == nil {
+		t.Error("Delete should fail when the peer client cannot be created")
+	}
 }

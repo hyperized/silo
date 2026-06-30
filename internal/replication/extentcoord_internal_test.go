@@ -50,7 +50,9 @@ type fakeStore struct {
 	data        map[string]map[uint64]string
 	has         map[string]bool
 	setBatchErr error
+	deleteErr   error
 	ensured     []string
+	deleted     []string
 	merges      map[string]int
 }
 
@@ -109,6 +111,18 @@ func (s *fakeStore) Ensure(vol string) {
 	s.ensured = append(s.ensured, vol)
 }
 
+func (s *fakeStore) Delete(vol string) error {
+	if s.deleteErr != nil {
+		return s.deleteErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.data, vol)
+	delete(s.has, vol)
+	s.deleted = append(s.deleted, vol)
+	return nil
+}
+
 type appliedRec struct {
 	addr, vol string
 	entries   []crdt.MapEntry[uint64, string]
@@ -116,18 +130,34 @@ type appliedRec struct {
 }
 
 type fakeEpeers struct {
-	mu       sync.Mutex
-	applyErr map[string]error
-	statHas  map[string]bool
-	statErr  map[string]error
-	fetchRes map[string][]crdt.MapEntry[uint64, string]
-	fetchErr map[string]error
-	applied  []appliedRec
-	applyCh  chan struct{} // one signal per Apply call so tests can await fan-out
+	mu        sync.Mutex
+	applyErr  map[string]error
+	statHas   map[string]bool
+	statErr   map[string]error
+	fetchRes  map[string][]crdt.MapEntry[uint64, string]
+	fetchErr  map[string]error
+	deleteErr map[string]error
+	applied   []appliedRec
+	deleted   []appliedRec
+	applyCh   chan struct{} // one signal per Apply call so tests can await fan-out
 }
 
 func newFakeEpeers() *fakeEpeers {
-	return &fakeEpeers{applyErr: map[string]error{}, statHas: map[string]bool{}, statErr: map[string]error{}, fetchRes: map[string][]crdt.MapEntry[uint64, string]{}, fetchErr: map[string]error{}, applyCh: make(chan struct{}, 64)}
+	return &fakeEpeers{applyErr: map[string]error{}, statHas: map[string]bool{}, statErr: map[string]error{}, fetchRes: map[string][]crdt.MapEntry[uint64, string]{}, fetchErr: map[string]error{}, deleteErr: map[string]error{}, applyCh: make(chan struct{}, 64)}
+}
+
+func (p *fakeEpeers) Delete(_ context.Context, addr, vol string) error {
+	p.mu.Lock()
+	p.deleted = append(p.deleted, appliedRec{addr: addr, vol: vol})
+	err := p.deleteErr[addr]
+	p.mu.Unlock()
+	return err
+}
+
+func (p *fakeEpeers) snapDeleted() []appliedRec {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]appliedRec(nil), p.deleted...)
 }
 
 func (p *fakeEpeers) Apply(_ context.Context, addr, vol string, entries []crdt.MapEntry[uint64, string], ensure bool) error {
@@ -382,6 +412,63 @@ func TestExtentCoordinator_WarmEmptyVolumeIsZeros(t *testing.T) {
 	}
 	if _, ok := store.Get("vol", 0); ok {
 		t.Error("a never-written extent should read unmapped (zeros)")
+	}
+}
+
+func TestExtentCoordinator_DeleteMap(t *testing.T) {
+	// self is a replica; both peers ack: local map gone, both peers told to delete.
+	place := &fakeMetaPlace{replicas: []string{"a", "b", "c"}, self: "a"}
+	store := newFakeStore()
+	store.has["vol"] = true
+	peers := newFakeEpeers()
+	c := NewExtentCoordinator(place, store, peers, 3, quietLog())
+	if err := c.DeleteMap(context.Background(), "vol"); err != nil {
+		t.Fatalf("DeleteMap: %v", err)
+	}
+	if store.Has("vol") {
+		t.Error("the local map should be deleted")
+	}
+	if del := peers.snapDeleted(); len(del) != 2 {
+		t.Errorf("want 2 peer deletes, got %d (%v)", len(del), del)
+	}
+}
+
+func TestExtentCoordinator_DeleteMapCollectsErrors(t *testing.T) {
+	// Local delete fails, one replica has no advertised address, one peer errors:
+	// all three are surfaced, joined, and none aborts the others.
+	place := &fakeMetaPlace{replicas: []string{"a", "b", "c"}, self: "a", noAddr: map[string]bool{"b": true}}
+	store := newFakeStore()
+	store.deleteErr = errors.New("read-only fs")
+	peers := newFakeEpeers()
+	peers.deleteErr["c:7000"] = errors.New("peer down")
+	c := NewExtentCoordinator(place, store, peers, 3, quietLog())
+
+	err := c.DeleteMap(context.Background(), "vol")
+	if err == nil {
+		t.Fatal("DeleteMap should report the joined failures")
+	}
+	for _, want := range []string{"read-only fs", "has not advertised a data address", "peer down"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("joined error %q is missing %q", err, want)
+		}
+	}
+}
+
+func TestExtentCoordinator_DeleteMapNoPeers(t *testing.T) {
+	// Self is the only replica: a local delete, no fan-out, no error.
+	place := &fakeMetaPlace{replicas: []string{"a"}, self: "a"}
+	store := newFakeStore()
+	store.has["vol"] = true
+	peers := newFakeEpeers()
+	c := NewExtentCoordinator(place, store, peers, 1, quietLog())
+	if err := c.DeleteMap(context.Background(), "vol"); err != nil {
+		t.Fatalf("DeleteMap: %v", err)
+	}
+	if store.Has("vol") {
+		t.Error("the local map should be deleted")
+	}
+	if del := peers.snapDeleted(); len(del) != 0 {
+		t.Errorf("no peer deletes expected when self is the only replica, got %v", del)
 	}
 }
 

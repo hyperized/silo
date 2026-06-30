@@ -19,6 +19,10 @@ service ExtentMap {
   // Stat reports whether the receiving node holds a volume's map and how many
   // extents it has — the existence/health probe the extent scrubber uses.
   rpc Stat(StatRequest) returns (StatResponse);
+  // Delete removes a volume's map from the receiving node (the coordinator fans
+  // this out to the replica set when a volume is deleted). Removing an unknown
+  // map is success, so the call is idempotent under CSI's at-least-once retries.
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
 }
 
 // Hlc is silo's hybrid logical clock timestamp on the wire.
@@ -67,3 +71,9 @@ message StatResponse {
   bool has = 1;
   int64 count = 2;
 }
+
+message DeleteRequest {
+  string volume_id = 1;
+}
+
+message DeleteResponse {}

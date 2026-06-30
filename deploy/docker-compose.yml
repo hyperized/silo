@@ -37,6 +37,9 @@ x-silod: &silod
     # Scrub often in the local stack so re-replication after a node loss is
     # observable within seconds; production paces this much slower.
     SILO_SCRUB_INTERVAL: ${SILO_SCRUB_INTERVAL:-5s}
+    # The extent-map scrubber heals idle volumes' metadata after a node loss;
+    # pace it fast locally for the same reason as the chunk scrubber above.
+    SILO_EXTENT_SCRUB_INTERVAL: ${SILO_EXTENT_SCRUB_INTERVAL:-5s}
   healthcheck:
     test: ["CMD", "wget", "-qO-", "http://localhost:7080/healthz"]
     interval: 5s

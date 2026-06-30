@@ -19,9 +19,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ExtentMap_Apply_FullMethodName = "/silo.extent.v1.ExtentMap/Apply"
-	ExtentMap_Get_FullMethodName   = "/silo.extent.v1.ExtentMap/Get"
-	ExtentMap_Stat_FullMethodName  = "/silo.extent.v1.ExtentMap/Stat"
+	ExtentMap_Apply_FullMethodName  = "/silo.extent.v1.ExtentMap/Apply"
+	ExtentMap_Get_FullMethodName    = "/silo.extent.v1.ExtentMap/Get"
+	ExtentMap_Stat_FullMethodName   = "/silo.extent.v1.ExtentMap/Stat"
+	ExtentMap_Delete_FullMethodName = "/silo.extent.v1.ExtentMap/Delete"
 )
 
 // ExtentMapClient is the client API for ExtentMap service.
@@ -43,6 +44,10 @@ type ExtentMapClient interface {
 	// Stat reports whether the receiving node holds a volume's map and how many
 	// extents it has — the existence/health probe the extent scrubber uses.
 	Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error)
+	// Delete removes a volume's map from the receiving node (the coordinator fans
+	// this out to the replica set when a volume is deleted). Removing an unknown
+	// map is success, so the call is idempotent under CSI's at-least-once retries.
+	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
 }
 
 type extentMapClient struct {
@@ -92,6 +97,16 @@ func (c *extentMapClient) Stat(ctx context.Context, in *StatRequest, opts ...grp
 	return out, nil
 }
 
+func (c *extentMapClient) Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteResponse)
+	err := c.cc.Invoke(ctx, ExtentMap_Delete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExtentMapServer is the server API for ExtentMap service.
 // All implementations should embed UnimplementedExtentMapServer
 // for forward compatibility.
@@ -111,6 +126,10 @@ type ExtentMapServer interface {
 	// Stat reports whether the receiving node holds a volume's map and how many
 	// extents it has — the existence/health probe the extent scrubber uses.
 	Stat(context.Context, *StatRequest) (*StatResponse, error)
+	// Delete removes a volume's map from the receiving node (the coordinator fans
+	// this out to the replica set when a volume is deleted). Removing an unknown
+	// map is success, so the call is idempotent under CSI's at-least-once retries.
+	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
 }
 
 // UnimplementedExtentMapServer should be embedded to have
@@ -128,6 +147,9 @@ func (UnimplementedExtentMapServer) Get(*GetRequest, grpc.ServerStreamingServer[
 }
 func (UnimplementedExtentMapServer) Stat(context.Context, *StatRequest) (*StatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Stat not implemented")
+}
+func (UnimplementedExtentMapServer) Delete(context.Context, *DeleteRequest) (*DeleteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Delete not implemented")
 }
 func (UnimplementedExtentMapServer) testEmbeddedByValue() {}
 
@@ -196,6 +218,24 @@ func _ExtentMap_Stat_Handler(srv interface{}, ctx context.Context, dec func(inte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExtentMap_Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExtentMapServer).Delete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExtentMap_Delete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExtentMapServer).Delete(ctx, req.(*DeleteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExtentMap_ServiceDesc is the grpc.ServiceDesc for ExtentMap service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -210,6 +250,10 @@ var ExtentMap_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Stat",
 			Handler:    _ExtentMap_Stat_Handler,
+		},
+		{
+			MethodName: "Delete",
+			Handler:    _ExtentMap_Delete_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -71,10 +71,11 @@ var (
 		}
 		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger, opts...)}
 	}
-	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, extStore transport.ExtentStore, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
+	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, extStore transport.ExtentStore, extDeleter transport.ExtentDeleter, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
 		opts := []transport.GRPCOption{
 			transport.WithStatusService(transport.NewStatusService(members, store, cfg.DataDir, cfg.NodeID, version, logger)),
 			transport.WithExtentService(transport.NewExtentService(extStore, logger)),
+			transport.WithNamespaceExtentDeleter(extDeleter),
 		}
 		if drainer != nil {
 			opts = append(opts, transport.WithNodeAdminService(transport.NewNodeAdminService(drainer, cfg.NodeID, logger)))
@@ -86,6 +87,12 @@ var (
 	}
 	newScrubberSubsystem = func(cfg *config.Config, place replication.Placement, catalog replication.ChunkCatalog, probe replication.ReplicaProbe, logger *slog.Logger) subsystem {
 		return replication.NewScrubber(place, catalog, probe, cfg.Replication, cfg.ScrubInterval, logger)
+	}
+	newExtentReaperSubsystem = func(cfg *config.Config, live replication.LiveInodeSource, store replication.ExtentReapStore, logger *slog.Logger) subsystem {
+		return replication.NewExtentReaper(live, store, cfg.NodeID, cfg.ExtentReapAfter, cfg.ExtentReapInterval, logger)
+	}
+	newExtentScrubberSubsystem = func(cfg *config.Config, place replication.MetaPlacement, catalog replication.ExtentCatalog, probe replication.ExtentReplicaProbe, logger *slog.Logger) subsystem {
+		return replication.NewExtentScrubber(place, catalog, probe, cfg.Replication, cfg.ExtentScrubInterval, logger)
 	}
 	newRebalancerSubsystem = func(cfg *config.Config, members *membership.Membership, logger *slog.Logger) subsystem {
 		return replication.NewRebalancer(members, cfg.DataDir, cfg.ScrubInterval, logger,
@@ -482,10 +489,19 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 
 	scrubberSubsys := newScrubberSubsystem(cfg, router, store, peers, logger)
 	rebalancerSubsys := newRebalancerSubsystem(cfg, members, logger)
-	// The scrubber and rebalancer expose replication/capacity metrics; surface
-	// them to Prometheus when the concrete subsystem implements metrics.Source
-	// (the production ones do; a test fake may not).
-	for _, sub := range []subsystem{scrubberSubsys, rebalancerSubsys, gossipSubsys} {
+	// The reaper reclaims the extent-map replicas of deleted volumes — the GC
+	// backstop for the synchronous delete fan-out, keyed off the namespace's
+	// live inode set so it never drops a map still in use.
+	extReaperSubsys := newExtentReaperSubsystem(cfg, ns, extStore, logger)
+	// The extent scrubber is the metadata analog of the chunk scrubber: it
+	// re-replicates a volume's extent map to its full MetaReplica set after a
+	// node loss, healing idle volumes the synchronous write-path fan-out can't
+	// reach. It shares the router's ring view and the extent peer/store clients.
+	extScrubberSubsys := newExtentScrubberSubsystem(cfg, router, extStore, extPeers, logger)
+	// The scrubber, rebalancer, and reaper expose replication/capacity metrics;
+	// surface them to Prometheus when the concrete subsystem implements
+	// metrics.Source (the production ones do; a test fake may not).
+	for _, sub := range []subsystem{scrubberSubsys, rebalancerSubsys, extReaperSubsys, extScrubberSubsys, gossipSubsys} {
 		if src, ok := sub.(metrics.Source); ok {
 			exp.Register(src)
 		}
@@ -493,11 +509,13 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger, exp.Handler()),
-		newGRPCSubsystem(cfg, serverTLS, tokenAuth, store, coord, ns, extStore, members, gossipDrainer(gossipSubsys), version, logger),
+		newGRPCSubsystem(cfg, serverTLS, tokenAuth, store, coord, ns, extStore, extCoord, members, gossipDrainer(gossipSubsys), version, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
 		scrubberSubsys,
 		rebalancerSubsys,
+		extReaperSubsys,
+		extScrubberSubsys,
 	}
 	if cfg.NBDAddr != "" {
 		subs = append(subs, newNBDSubsystem(cfg, ns, coord, extCoord, clock, logger))

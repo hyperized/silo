@@ -47,6 +47,10 @@ is the quick reference.
 | `SILO_SCRUB_INTERVAL` | internal default | Re-replication scrubber cadence (the local stack sets `5s` for visible healing; production paces slower) |
 | `SILO_TOMBSTONE_RETENTION` | `24h` | How long namespace tombstones are kept before GC |
 | `SILO_MAX_CLOCK_SKEW` | `500ms` | Warn + count an alert when a peer's HLC exceeds this skew |
+| `SILO_EXTENT_REPLICATION` | `true` | Serve each volume's extent map from its replica set (out of band, like chunks) instead of the gossiped namespace — required for a volume to attach on any node, not just where it was created. Leave on. |
+| `SILO_EXTENT_REAP_AFTER` | `1h` | How long a deleted volume's extent map must sit untouched before the reaper reclaims orphaned replicas. The age guard that stops a freshly-created volume whose directory entry has not yet gossiped to a node from being mistaken for a deleted one — keep it well above gossip convergence time. |
+| `SILO_EXTENT_REAP_INTERVAL` | `15m` | Extent-map reaper sweep cadence (the GC backstop for the synchronous delete path). |
+| `SILO_EXTENT_SCRUB_INTERVAL` | `1m` | Extent-map scrubber cadence — re-replicates an idle volume's extent map to its full replica set after a node loss (the metadata analog of `SILO_SCRUB_INTERVAL`, which heals chunks). The synchronous write-path fan-out only keeps replicas in step while writes flow; a volume written once and then left idle would otherwise stay under-replicated after a later node loss. |
 
 ### Encryption (at rest)
 
@@ -690,6 +694,30 @@ Notable series:
 - `silo_namespace_antientropy_merges_total` and
   `silo_namespace_antientropy_last_merge_age_seconds` — namespace convergence
   activity and lag.
+- `silo_namespace_inodes_reaped_total` — orphaned (unreachable) namespace inodes
+  reclaimed after their directory link was removed. Removing a path tombstones
+  the link; the inode it pointed at is reaped on the next gossip merge and on the
+  GC sweep, so a deleted volume leaves no inode residue behind.
+- `silo_gossip_sync_extension_bytes` and `silo_gossip_sync_send_failures_total` —
+  the size of the namespace snapshot carried on each anti-entropy exchange and
+  the count of sends that exceeded the gossip per-message cap. The extension
+  bytes should stay small (the directory tree only — extent maps replicate out of
+  band); a climbing `sync_send_failures_total` means snapshots are overflowing
+  the cap and namespace state is not converging.
+- `silo_extentmap_reaped_total` and `silo_extentmap_last_reap_reclaimed` — extent
+  maps the reaper reclaimed for deleted volumes (cumulative, and last sweep). A
+  steady non-zero `last_reap_reclaimed` means deletes are leaving orphans for the
+  reaper to clean — expected only when a replica was unreachable at delete time;
+  a persistent stream warrants a look at delete-path (`DeleteMap`) health.
+- `silo_extentmap_scrub_shortfall_maps` and `silo_extentmap_scrub_repairs_total` —
+  extent maps this node is responsible for that were under-replicated at the last
+  scrub (gauge), and the running count of map replicas it has re-pushed to heal
+  them (counter). Summed across the cluster each map has exactly one responsible
+  healer, so the gauge is the live count of under-replicated extent maps; it
+  should fall to zero within a scrub interval or two after a node rejoins. A
+  shortfall that stays non-zero means a target replica is unreachable or out of
+  disk — pair it with `silo_replication_shortfall_chunks` to see whether chunks
+  are stuck too.
 
 The data-key cache hit-rate metric is pending the cache itself (silod currently
 unwraps per-chunk keys on demand; the cache is a later optimisation).

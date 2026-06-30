@@ -35,6 +35,100 @@ func TestNamespace_VolumeInodeID(t *testing.T) {
 	}
 }
 
+func TestNamespace_ReferencedInodeIDs(t *testing.T) {
+	var clk int64 = 100
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.Mkdir("/vols"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	clk++
+	aID, err := ns.CreateVolume("/vols/a", 4096)
+	if err != nil {
+		t.Fatalf("CreateVolume a: %v", err)
+	}
+	clk++
+	bID, err := ns.CreateVolume("/vols/b", 4096)
+	if err != nil {
+		t.Fatalf("CreateVolume b: %v", err)
+	}
+
+	live := ns.ReferencedInodeIDs()
+	for _, id := range []string{aID, bID} {
+		if _, ok := live[id]; !ok {
+			t.Errorf("volume %s should be referenced", id)
+		}
+	}
+	if len(live) == 0 {
+		t.Error("the referenced set should always include the root")
+	}
+
+	// Removing a volume drops its inode from the referenced set; siblings stay.
+	clk++
+	if err := ns.Remove("/vols/b"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	live = ns.ReferencedInodeIDs()
+	if _, ok := live[bID]; ok {
+		t.Error("a removed volume's inode should not be referenced")
+	}
+	if _, ok := live[aID]; !ok {
+		t.Error("a surviving volume's inode should still be referenced")
+	}
+
+	// Removing the parent directory makes everything beneath it unreachable,
+	// even though the child link still exists under the now-orphaned dir inode.
+	clk++
+	if err := ns.Remove("/vols"); err != nil {
+		t.Fatalf("Remove dir: %v", err)
+	}
+	if _, ok := ns.ReferencedInodeIDs()[aID]; ok {
+		t.Error("a volume under a removed directory should be unreachable")
+	}
+}
+
+func TestNamespace_MergeDoesNotResurrectReapedInode(t *testing.T) {
+	var clkA int64 = 100
+	a := nsAt("a", &clkA)
+	clkA++
+	if _, err := a.Mkdir("/vols"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	clkA++
+	xID, err := a.CreateVolume("/vols/x", 4096)
+	if err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+
+	// B learns the volume over gossip, so B holds it reachable.
+	var clkB int64 = 100
+	b := nsAt("b", &clkB)
+	b.Merge(a)
+	if _, ok := b.ReferencedInodeIDs()[xID]; !ok {
+		t.Fatal("B should have learned the volume")
+	}
+
+	// A removes it with a newer HLC.
+	clkA++
+	if err := a.Remove("/vols/x"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// A merges B's STALE snapshot (B still has the live link). A's newer remove
+	// wins in the children OR-Set and the prune drops the inode again — the stale
+	// peer must not resurrect it.
+	a.Merge(b)
+	if _, ok := a.ReferencedInodeIDs()[xID]; ok {
+		t.Error("a stale peer must not resurrect a removed volume's inode on A")
+	}
+
+	// And B merging A's removal reaps the orphaned inode on B too (convergence).
+	b.Merge(a)
+	if _, ok := b.ReferencedInodeIDs()[xID]; ok {
+		t.Error("merging the removal should reap the orphaned inode on the peer")
+	}
+}
+
 func TestNamespace_GossipSnapshotOmitsExtentsButKeepsScalars(t *testing.T) {
 	var clk int64 = 100
 	src := nsAt("a", &clk)

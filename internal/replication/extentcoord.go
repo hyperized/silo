@@ -27,6 +27,7 @@ type ExtentStore interface {
 	Has(volumeID string) bool
 	Merge(volumeID string, entries []crdt.MapEntry[uint64, string])
 	Ensure(volumeID string)
+	Delete(volumeID string) error
 }
 
 // ExtentPeers replicates extent-map operations to other nodes over the data
@@ -37,6 +38,7 @@ type ExtentPeers interface {
 	Apply(ctx context.Context, addr, volumeID string, entries []crdt.MapEntry[uint64, string], ensure bool) error
 	Fetch(ctx context.Context, addr, volumeID string) ([]crdt.MapEntry[uint64, string], error)
 	Stat(ctx context.Context, addr, volumeID string) (has bool, count int64, err error)
+	Delete(ctx context.Context, addr, volumeID string) error
 }
 
 // ExtentCoordinator replicates a volume's extent map to the volume's replica
@@ -170,6 +172,51 @@ func (c *ExtentCoordinator) Warm(ctx context.Context, volumeID string) error {
 		return nil
 	}
 	return fmt.Errorf("replication: could not warm the extent map of volume %q; %d of its %d replicas were unreachable, so serving it now could mask real data: %w", volumeID, unreachable, len(replicas), errors.Join(errs...))
+}
+
+// DeleteMap removes volume's extent map from its replica set — the synchronous
+// half of the delete path. It deletes the local copy unconditionally (this node
+// may hold a warmed serving copy even when it is not a placement replica) and
+// fans the delete out to the replica set concurrently, joining any failures so
+// the caller can log them. It is best-effort by design: the reaper reclaims any
+// copy this misses (an unreachable replica, or a serving node that warmed the
+// map but is not a replica). A single down replica can delay the call up to the
+// peer client's per-call timeout.
+func (c *ExtentCoordinator) DeleteMap(ctx context.Context, volumeID string) error {
+	var errs []error
+	if err := c.local.Delete(volumeID); err != nil {
+		errs = append(errs, fmt.Errorf("replication: could not delete the local extent map of volume %q (%w)", volumeID, err))
+	}
+
+	self := c.place.SelfID()
+	var peerTargets []string
+	for _, t := range c.place.MetaReplicas(volumeID, c.rf) {
+		if t != self {
+			peerTargets = append(peerTargets, t)
+		}
+	}
+	if len(peerTargets) == 0 {
+		return errors.Join(errs...)
+	}
+
+	fanCtx := context.WithoutCancel(ctx)
+	results := make(chan error, len(peerTargets))
+	for _, t := range peerTargets {
+		go func(target string) {
+			addr, ok := c.place.DataAddr(target)
+			if !ok {
+				results <- fmt.Errorf("replication: node %q has not advertised a data address; cannot delete the extent map of volume %q from it", target, volumeID)
+				return
+			}
+			results <- c.peers.Delete(fanCtx, addr, volumeID)
+		}(t)
+	}
+	for range peerTargets {
+		if err := <-results; err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // quorumFanOut applies the per-peer operation to every replica that is not this

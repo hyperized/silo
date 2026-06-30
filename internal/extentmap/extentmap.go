@@ -15,12 +15,14 @@ package extentmap
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/hyperized/silo/internal/crdt"
 	"github.com/hyperized/silo/internal/hlc"
@@ -175,6 +177,87 @@ func (s *Store) Ensure(volumeID string) {
 	}
 	s.getOrCreateLocked(volumeID)
 	s.persistLocked(volumeID)
+}
+
+// Delete drops volume's map from memory and removes its persisted file, so a
+// removed volume's extent map does not outlive it on this node. It is
+// idempotent: deleting an unknown volume, or one with no file on disk, is a
+// no-op. The delete path calls it directly on a volume's replica set; the GC
+// reaper calls it via Reap for any copy the direct delete missed.
+func (s *Store) Delete(volumeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteLocked(volumeID)
+}
+
+// Reap deletes every map this node holds whose volume id is NOT in live and
+// whose persisted file was last modified before reapBefore, returning the ids
+// it reaped (sorted). It is the GC backstop for the delete path: a volume
+// removed from the namespace is absent from live, so its orphaned extent-map
+// copies are reclaimed here once they are old enough that the removal has surely
+// propagated. The age guard is what keeps a freshly-created volume whose
+// directory entry has not yet gossiped to this node — present on disk but not
+// yet in live — from being mistaken for a deleted one. An in-memory store (no
+// data dir) has no file age to judge by and reaps nothing.
+func (s *Store) Reap(live map[string]struct{}, reapBefore time.Time) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dir == "" {
+		return nil, nil
+	}
+	var (
+		reaped []string
+		errs   []error
+	)
+	for id := range s.maps {
+		if _, ok := live[id]; ok {
+			continue
+		}
+		fi, err := os.Stat(s.filename(id))
+		if errors.Is(err, os.ErrNotExist) {
+			// The file is already gone; drop the stale in-memory entry too.
+			delete(s.maps, id)
+			reaped = append(reaped, id)
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("extentmap: could not stat the map of volume %q to judge its age (%w)", id, err))
+			continue
+		}
+		if !fi.ModTime().Before(reapBefore) {
+			continue // too young: the removal may not have propagated to us yet
+		}
+		if err := s.deleteLocked(id); err != nil {
+			errs = append(errs, fmt.Errorf("extentmap: could not reap the map of volume %q (%w)", id, err))
+			continue
+		}
+		reaped = append(reaped, id)
+	}
+	sort.Strings(reaped)
+	return reaped, errors.Join(errs...)
+}
+
+// deleteLocked removes volume from the in-memory set and, for a disk-backed
+// store, deletes its persisted file and any stale temp file left by an
+// interrupted write. A missing file is not an error, so the operation is
+// idempotent.
+func (s *Store) deleteLocked(volumeID string) error {
+	delete(s.maps, volumeID)
+	if s.dir == "" {
+		return nil
+	}
+	if err := removeIfExists(s.filename(volumeID)); err != nil {
+		return err
+	}
+	return removeIfExists(s.filename(volumeID) + ".tmp")
+}
+
+// removeIfExists deletes path, treating an already-absent path as success.
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // Volumes returns the ids of the volumes this node holds a map for, sorted.
