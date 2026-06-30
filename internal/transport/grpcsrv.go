@@ -52,6 +52,13 @@ func WithNamespaceExtentDeleter(d ExtentDeleter) GRPCOption {
 	return func(c *grpcConfig) { c.nsOpts = append(c.nsOpts, WithExtentDeleter(d)) }
 }
 
+// WithNamespaceExtentSnapshotter wires an extent snapshotter into the namespace
+// service so snapshotting a volume also clones its out-of-band extent map onto
+// the snapshot's replica set. Wire it only under extent replication.
+func WithNamespaceExtentSnapshotter(s ExtentSnapshotter) GRPCOption {
+	return func(c *grpcConfig) { c.nsOpts = append(c.nsOpts, WithExtentSnapshotter(s)) }
+}
+
 // WithTokenAuth installs the capability-token interceptors (unary + stream) so
 // client-cert callers must present a token scoped to each operation. Node-cert
 // peers are exempt; see TokenAuthenticator.

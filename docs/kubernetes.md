@@ -154,9 +154,14 @@ placement and retention ship.
 ## Snapshots
 
 silo snapshots are instant and copy-on-write (freeze the extent map; immutable
-chunks are shared until either side is written). To use them through Kubernetes
-you need the cluster-wide snapshot machinery (installed once per cluster, not by
-this chart):
+chunks are shared until either side is written). Under extent replication (the
+default) a volume's extent map lives on its replica set, so a snapshot clones
+that map onto the snapshot's own replica set as part of the operation: the
+source's replica set must be reachable, and if the clone can't replicate the
+snapshot is rolled back and the request fails (gRPC `Unavailable`) rather than
+returning a silently-empty snapshot — retry once the replica set is healthy. To
+use snapshots through Kubernetes you need the cluster-wide snapshot machinery
+(installed once per cluster, not by this chart):
 
 1. Install the snapshot CRDs and controller from
    [kubernetes-csi/external-snapshotter](https://github.com/kubernetes-csi/external-snapshotter)

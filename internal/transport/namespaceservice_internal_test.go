@@ -26,12 +26,16 @@ type fakeNamespaceOps struct {
 	volInodeID    string      // returned by VolumeInodeID ("" => not a volume)
 	volInodeErr   error       // error returned by VolumeInodeID
 	removed       []string    // records the paths passed to Remove
+	removeErr     error       // error returned by Remove, falling back to err when nil
 }
 
 func (f *fakeNamespaceOps) Mkdir(string) (string, error) { return f.id, f.err }
 func (f *fakeNamespaceOps) Touch(string) (string, error) { return f.id, f.err }
 func (f *fakeNamespaceOps) Remove(path string) error {
 	f.removed = append(f.removed, path)
+	if f.removeErr != nil {
+		return f.removeErr
+	}
 	return f.err
 }
 func (f *fakeNamespaceOps) VolumeInodeID(string) (string, error) { return f.volInodeID, f.volInodeErr }
@@ -228,6 +232,114 @@ func TestNamespaceService_SnapshotVolume(t *testing.T) {
 	bad := nsService(&fakeNamespaceOps{err: namespace.ErrNotVolume})
 	if _, err := bad.SnapshotVolume(ctx, &namespacev1.SnapshotVolumeRequest{SourcePath: "/file", DestPath: "/snap"}); status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("SnapshotVolume of a non-volume = %v, want FailedPrecondition", status.Code(err))
+	}
+}
+
+type fakeExtentSnapshotter struct {
+	calls [][2]string // records (srcVolumeID, dstVolumeID)
+	err   error
+}
+
+func (f *fakeExtentSnapshotter) SnapshotMap(_ context.Context, src, dst string) error {
+	f.calls = append(f.calls, [2]string{src, dst})
+	return f.err
+}
+
+func TestNamespaceService_SnapshotVolumeClonesExtentMap(t *testing.T) {
+	ctx := context.Background()
+
+	// Snapshotter wired and the clone succeeds: the source id is resolved before
+	// the snapshot, the out-of-band map is cloned src->dst, and the snapshot is
+	// reported with no rollback.
+	ops := &fakeNamespaceOps{id: "inode-snap", volInodeID: "inode-src"}
+	snap := &fakeExtentSnapshotter{}
+	del := &fakeExtentDeleter{}
+	svc := NewNamespaceService(ops, discardNSLogger(), WithExtentDeleter(del), WithExtentSnapshotter(snap))
+	resp, err := svc.SnapshotVolume(ctx, &namespacev1.SnapshotVolumeRequest{SourcePath: "/vol", DestPath: "/snap"})
+	if err != nil || resp.GetInode() != "inode-snap" {
+		t.Fatalf("SnapshotVolume = (%v, %v), want inode-snap", resp, err)
+	}
+	if len(snap.calls) != 1 || snap.calls[0] != [2]string{"inode-src", "inode-snap"} {
+		t.Errorf("SnapshotMap calls = %v, want one (inode-src, inode-snap)", snap.calls)
+	}
+	if len(ops.removed) != 0 || len(del.deleted) != 0 {
+		t.Errorf("a successful snapshot must not roll back: removed=%v deleted=%v", ops.removed, del.deleted)
+	}
+}
+
+func TestNamespaceService_SnapshotVolumeRollsBackOnCloneFailure(t *testing.T) {
+	ctx := context.Background()
+
+	// The clone cannot replicate: the snapshot is rolled back (namespace entry
+	// removed, partial map deleted) and the call fails with Unavailable, so a
+	// silently-empty snapshot is never reported ready.
+	ops := &fakeNamespaceOps{id: "inode-snap", volInodeID: "inode-src"}
+	snap := &fakeExtentSnapshotter{err: errors.New("quorum not reached")}
+	del := &fakeExtentDeleter{}
+	svc := NewNamespaceService(ops, discardNSLogger(), WithExtentDeleter(del), WithExtentSnapshotter(snap))
+	if _, err := svc.SnapshotVolume(ctx, &namespacev1.SnapshotVolumeRequest{SourcePath: "/vol", DestPath: "/snap"}); status.Code(err) != codes.Unavailable {
+		t.Errorf("clone failure code = %v, want Unavailable", status.Code(err))
+	}
+	if len(ops.removed) != 1 || ops.removed[0] != "/snap" {
+		t.Errorf("rollback should remove the snapshot path, got %v", ops.removed)
+	}
+	if len(del.deleted) != 1 || del.deleted[0] != "inode-snap" {
+		t.Errorf("rollback should delete the partial extent map, got %v", del.deleted)
+	}
+}
+
+func TestNamespaceService_SnapshotVolumeRollsBackWhenSourceUnresolved(t *testing.T) {
+	ctx := context.Background()
+
+	// The namespace accepted the snapshot but the source volume id could not be
+	// resolved (VolumeInodeID errors): the snapshot would be silently empty, so
+	// it is rolled back and fails Internal without ever calling the snapshotter.
+	ops := &fakeNamespaceOps{id: "inode-snap", volInodeErr: errors.New("gone")}
+	snap := &fakeExtentSnapshotter{}
+	del := &fakeExtentDeleter{}
+	svc := NewNamespaceService(ops, discardNSLogger(), WithExtentDeleter(del), WithExtentSnapshotter(snap))
+	if _, err := svc.SnapshotVolume(ctx, &namespacev1.SnapshotVolumeRequest{SourcePath: "/vol", DestPath: "/snap"}); status.Code(err) != codes.Internal {
+		t.Errorf("unresolved source code = %v, want Internal", status.Code(err))
+	}
+	if len(snap.calls) != 0 {
+		t.Errorf("the snapshotter must not be called when the source is unresolved: %v", snap.calls)
+	}
+	if len(ops.removed) != 1 || len(del.deleted) != 1 {
+		t.Errorf("the empty snapshot should be rolled back: removed=%v deleted=%v", ops.removed, del.deleted)
+	}
+}
+
+func TestNamespaceService_SnapshotRollbackToleratesFailures(t *testing.T) {
+	ctx := context.Background()
+
+	// Rollback is best-effort: even when the namespace removal AND the partial-map
+	// delete both fail, the original clone error is still surfaced (Unavailable).
+	ops := &fakeNamespaceOps{id: "inode-snap", volInodeID: "inode-src", removeErr: errors.New("remove boom")}
+	snap := &fakeExtentSnapshotter{err: errors.New("quorum not reached")}
+	del := &fakeExtentDeleter{err: errors.New("delete boom")}
+	svc := NewNamespaceService(ops, discardNSLogger(), WithExtentDeleter(del), WithExtentSnapshotter(snap))
+	if _, err := svc.SnapshotVolume(ctx, &namespacev1.SnapshotVolumeRequest{SourcePath: "/vol", DestPath: "/snap"}); status.Code(err) != codes.Unavailable {
+		t.Errorf("clone failure code = %v, want Unavailable even when rollback fails", status.Code(err))
+	}
+	if len(ops.removed) != 1 || len(del.deleted) != 1 {
+		t.Errorf("rollback should still attempt both steps: removed=%v deleted=%v", ops.removed, del.deleted)
+	}
+}
+
+func TestNamespaceService_SnapshotRollbackWithoutDeleter(t *testing.T) {
+	ctx := context.Background()
+
+	// A snapshotter wired without an extent deleter: a clone failure still rolls
+	// the namespace entry back and fails, and the missing deleter is skipped
+	// (the reaper reclaims any partial map instead).
+	ops := &fakeNamespaceOps{id: "inode-snap", volInodeID: "inode-src"}
+	snap := &fakeExtentSnapshotter{err: errors.New("quorum not reached")}
+	svc := NewNamespaceService(ops, discardNSLogger(), WithExtentSnapshotter(snap))
+	if _, err := svc.SnapshotVolume(ctx, &namespacev1.SnapshotVolumeRequest{SourcePath: "/vol", DestPath: "/snap"}); status.Code(err) != codes.Unavailable {
+		t.Errorf("clone failure code = %v, want Unavailable", status.Code(err))
+	}
+	if len(ops.removed) != 1 || ops.removed[0] != "/snap" {
+		t.Errorf("rollback should remove the snapshot path even without a deleter, got %v", ops.removed)
 	}
 }
 
