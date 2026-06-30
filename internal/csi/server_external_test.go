@@ -16,7 +16,16 @@ import (
 )
 
 func TestServer_ServesIdentityOverSocket(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "csi.sock")
+	// Keep the socket path short. macOS caps unix paths (sun_path) near 104
+	// bytes, and t.TempDir() embeds the long test name, which overflows it and
+	// makes net.Listen fail with "invalid argument" — so use a short temp dir
+	// and filename to keep this runnable on macOS and robust everywhere.
+	dir, err := os.MkdirTemp("", "csi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	socket := filepath.Join(dir, "s.sock")
 	endpoint := "unix://" + socket
 
 	srv := csi.NewServer(endpoint, nil,
@@ -32,7 +41,12 @@ func TestServer_ServesIdentityOverSocket(t *testing.T) {
 	conn := dialUnix(t, socket)
 	defer func() { _ = conn.Close() }()
 
-	resp, err := csiv1.NewIdentityClient(conn).GetPluginInfo(context.Background(), &csiv1.GetPluginInfoRequest{})
+	// Serve binds the listener from a goroutine, so the first RPC can still race
+	// the listener accepting. WaitForReady makes gRPC wait for the connection up
+	// to the context deadline instead of failing fast on a not-yet-ready server.
+	rpcCtx, rpcCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer rpcCancel()
+	resp, err := csiv1.NewIdentityClient(conn).GetPluginInfo(rpcCtx, &csiv1.GetPluginInfoRequest{}, grpc.WaitForReady(true))
 	if err != nil {
 		t.Fatalf("GetPluginInfo over socket: %v", err)
 	}
@@ -101,23 +115,31 @@ func TestServer_TCPEndpoint(t *testing.T) {
 
 func dialUnix(t *testing.T, socket string) *grpc.ClientConn {
 	t.Helper()
-	// Retry briefly: Serve binds the socket in a goroutine.
-	var lastErr error
-	for range 50 {
-		conn, err := grpc.NewClient(
-			"unix://"+socket,
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-			}),
-		)
-		if err != nil {
-			lastErr = err
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		return conn
+	// grpc.NewClient is lazy — it does not dial here (the connection opens on the
+	// first RPC), so the old retry-on-NewClient loop never actually waited for
+	// anything. Wait for Serve's goroutine to create the socket so the first RPC
+	// has a listener to reach; readiness past that is handled by WaitForReady.
+	waitForSocket(t, socket)
+	conn, err := grpc.NewClient(
+		"unix://"+socket,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}),
+	)
+	if err != nil {
+		t.Fatalf("create CSI client: %v", err)
 	}
-	t.Fatalf("could not dial CSI socket: %v", lastErr)
-	return nil
+	return conn
+}
+
+func waitForSocket(t *testing.T, socket string) {
+	t.Helper()
+	for range 200 { // up to ~2s for Serve to bind the listener
+		if _, err := os.Stat(socket); err == nil {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("CSI socket %s never appeared", socket)
 }
