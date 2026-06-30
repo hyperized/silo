@@ -72,3 +72,37 @@ func TestReferencedInodeIDs_CycleAndDanglingSafe(t *testing.T) {
 		t.Errorf("a cycle/dangling structure must resolve each id once, got %d: %v", len(live), live)
 	}
 }
+
+// LiveChunkRefs must survive the same corrupt shapes a bad merge can produce: a
+// link to a missing inode (nil-inode guard) and File/Volume inodes whose CRDT
+// payloads are nil (nil-manifest / nil-extents guards). It must collect what it
+// can without panicking.
+func TestLiveChunkRefs_CorruptShapesSafe(t *testing.T) {
+	n := New(hlc.New("a"))
+	tag := hlc.Timestamp{Wall: 100, Node: "x"}
+
+	// A File with a normal manifest contributes its chunks.
+	good := &Inode{ID: "good", Type: File, manifest: crdt.NewORSet[string]()}
+	good.manifest.Add("c-good", tag)
+	n.inodes["good"] = good
+	n.inodes[rootID].children.Add(Entry{Name: "good", Inode: "good"}, tag)
+
+	// A File with a nil manifest (corrupt) is skipped, not dereferenced.
+	n.inodes["nilman"] = &Inode{ID: "nilman", Type: File}
+	n.inodes[rootID].children.Add(Entry{Name: "nilman", Inode: "nilman"}, tag)
+
+	// A Volume with nil extents (corrupt) still reports its id but adds no chunks.
+	n.inodes["nilext"] = &Inode{ID: "nilext", Type: Volume}
+	n.inodes[rootID].children.Add(Entry{Name: "nilext", Inode: "nilext"}, tag)
+
+	// A dangling link to a missing inode is skipped by the nil-inode guard.
+	n.inodes[rootID].children.Add(Entry{Name: "ghost", Inode: "ghost"}, tag)
+
+	chunks, volumes := n.LiveChunkRefs()
+	if _, ok := chunks["c-good"]; !ok || len(chunks) != 1 {
+		t.Errorf("chunks = %v, want only {c-good}", chunks)
+	}
+	if _, ok := volumes["nilext"]; !ok || len(volumes) != 1 {
+		t.Errorf("volumes = %v, want only {nilext}", volumes)
+	}
+}

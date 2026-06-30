@@ -101,6 +101,9 @@ var (
 	newExtentScrubberSubsystem = func(cfg *config.Config, place replication.MetaPlacement, catalog replication.ExtentCatalog, probe replication.ExtentReplicaProbe, logger *slog.Logger) subsystem {
 		return replication.NewExtentScrubber(place, catalog, probe, cfg.Replication, cfg.ExtentScrubInterval, logger)
 	}
+	newChunkGCSubsystem = func(cfg *config.Config, lister replication.ChunkLister, ns replication.NamespaceRefSource, ext replication.ExtentRefSource, logger *slog.Logger) subsystem {
+		return replication.NewChunkGC(lister, ns, ext, cfg.NodeID, cfg.ChunkGCGrace, cfg.ChunkGCInterval, cfg.ChunkGCEnable, logger)
+	}
 	newRebalancerSubsystem = func(cfg *config.Config, members *membership.Membership, logger *slog.Logger) subsystem {
 		return replication.NewRebalancer(members, cfg.DataDir, cfg.ScrubInterval, logger,
 			replication.WithDiskThresholds(cfg.DiskThresholds))
@@ -505,10 +508,16 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// node loss, healing idle volumes the synchronous write-path fan-out can't
 	// reach. It shares the router's ring view and the extent peer/store clients.
 	extScrubberSubsys := newExtentScrubberSubsystem(cfg, router, extStore, extPeers, logger)
-	// The scrubber, rebalancer, and reaper expose replication/capacity metrics;
-	// surface them to Prometheus when the concrete subsystem implements
+	// The chunk GC reclaims orphaned chunks by mark-and-sweep: it builds the live
+	// (keep) set from the namespace's global refs (manifests + in-namespace
+	// extents) and the locally-held out-of-band extent maps, then prunes the local
+	// chunk store of what neither references. It defaults to a dry run (reporting
+	// reclaimable orphans via metrics) until SILO_CHUNK_GC_ENABLE is set.
+	chunkGCSubsys := newChunkGCSubsystem(cfg, store, ns, extStore, logger)
+	// The scrubber, rebalancer, reaper, and GC expose replication/capacity
+	// metrics; surface them to Prometheus when the concrete subsystem implements
 	// metrics.Source (the production ones do; a test fake may not).
-	for _, sub := range []subsystem{scrubberSubsys, rebalancerSubsys, extReaperSubsys, extScrubberSubsys, gossipSubsys} {
+	for _, sub := range []subsystem{scrubberSubsys, rebalancerSubsys, extReaperSubsys, extScrubberSubsys, chunkGCSubsys, gossipSubsys} {
 		if src, ok := sub.(metrics.Source); ok {
 			exp.Register(src)
 		}
@@ -523,6 +532,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		rebalancerSubsys,
 		extReaperSubsys,
 		extScrubberSubsys,
+		chunkGCSubsys,
 	}
 	if cfg.NBDAddr != "" {
 		subs = append(subs, newNBDSubsystem(cfg, ns, coord, extCoord, clock, logger))

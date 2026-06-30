@@ -104,6 +104,15 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.ExtentScrubInterval != 0 {
 		t.Errorf("ExtentScrubInterval default: got %v, want 0", cfg.ExtentScrubInterval)
 	}
+	// The chunk GC's pacing/grace default to 0 (the GC owns the fallbacks) and it
+	// defaults to a dry run: SILO_CHUNK_GC_ENABLE off so nothing is deleted until
+	// the operator opts in.
+	if cfg.ChunkGCInterval != 0 || cfg.ChunkGCGrace != 0 {
+		t.Errorf("chunk GC defaults: got interval=%v grace=%v, want 0/0", cfg.ChunkGCInterval, cfg.ChunkGCGrace)
+	}
+	if cfg.ChunkGCEnable {
+		t.Error("ChunkGCEnable default: got true, want false (dry run)")
+	}
 	// Retention, unlike the scrub interval, defaults to a concrete value:
 	// zero would let GC resurrect deleted entries.
 	if cfg.TombstoneRetention != DefaultTombstoneRetention {
@@ -256,7 +265,7 @@ func TestLoad_NegativeScrubInterval(t *testing.T) {
 }
 
 func TestLoad_BadExtentReapDurations(t *testing.T) {
-	for _, key := range []string{"SILO_EXTENT_REAP_AFTER", "SILO_EXTENT_REAP_INTERVAL", "SILO_EXTENT_SCRUB_INTERVAL"} {
+	for _, key := range []string{"SILO_EXTENT_REAP_AFTER", "SILO_EXTENT_REAP_INTERVAL", "SILO_EXTENT_SCRUB_INTERVAL", "SILO_CHUNK_GC_INTERVAL", "SILO_CHUNK_GC_GRACE"} {
 		_, err := Load(envMap(map[string]string{
 			"SILO_NODE_ID":        "n",
 			"SILO_ENCRYPTION_KEY": validBase64Key(t),
@@ -297,6 +306,9 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_EXTENT_REAP_AFTER":     "30m",
 		"SILO_EXTENT_REAP_INTERVAL":  "2m",
 		"SILO_EXTENT_SCRUB_INTERVAL": "90s",
+		"SILO_CHUNK_GC_INTERVAL":     "10m",
+		"SILO_CHUNK_GC_GRACE":        "2h",
+		"SILO_CHUNK_GC_ENABLE":       "1",
 		"SILO_PRINT_BOOTSTRAP_TOKEN": "yes",
 		"SILO_TLS_CA_SEED":           "true",
 	}))
@@ -336,6 +348,9 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		ExtentReapAfter:     30 * time.Minute,
 		ExtentReapInterval:  2 * time.Minute,
 		ExtentScrubInterval: 90 * time.Second,
+		ChunkGCInterval:     10 * time.Minute,
+		ChunkGCGrace:        2 * time.Hour,
+		ChunkGCEnable:       true,
 		DiskThresholds:      diskpressure.DefaultThresholds(),
 		CAExternal:          true,
 		CASeed:              true,

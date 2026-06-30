@@ -697,6 +697,50 @@ func (n *Namespace) ReferencedInodeIDs() map[string]struct{} {
 	return n.reachableInodesLocked()
 }
 
+// LiveChunkRefs walks the live directory tree once and returns both the chunk
+// ids the namespace still references and the set of live volume inode ids. The
+// chunk set is every reachable file's manifest plus every reachable volume's
+// in-namespace extent bindings; the namespace is fully replicated, so every node
+// computes the same set. It is the global half of the chunk garbage collector's
+// live (keep) set, and the volume id set is the GC's completeness oracle for the
+// sharded out-of-band extent maps — it says exactly which volumes' maps must be
+// accounted for before any chunk is swept.
+//
+// Under extent replication a volume's bindings live out of band, so its
+// in-namespace extents are empty here and contribute nothing (the out-of-band
+// store supplies them); in the legacy mode the in-namespace extents are the
+// authoritative bindings. Either way the volume id set is complete. The returned
+// maps are fresh and owned by the caller. The root is walked but contributes no
+// chunks.
+func (n *Namespace) LiveChunkRefs() (chunks map[string]struct{}, volumes map[string]struct{}) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	chunks = map[string]struct{}{}
+	volumes = map[string]struct{}{}
+	for id := range n.reachableInodesLocked() {
+		in := n.inodes[id]
+		if in == nil {
+			continue
+		}
+		switch in.Type {
+		case File:
+			if in.manifest != nil {
+				for _, c := range in.manifest.Elements() {
+					chunks[c] = struct{}{}
+				}
+			}
+		case Volume:
+			volumes[in.ID] = struct{}{}
+			if in.extents != nil {
+				for _, e := range in.extents.Entries() {
+					chunks[e.Value] = struct{}{}
+				}
+			}
+		}
+	}
+	return chunks, volumes
+}
+
 // reachableInodesLocked returns the set of inode ids reachable from the root by
 // walking the directory tree's live (non-tombstoned) entries. The seen-set
 // guard keeps a cyclic or shared structure (which a corrupt merge could

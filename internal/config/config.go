@@ -181,6 +181,17 @@ type Config struct {
 	// to a Go duration (e.g. 30s, 1m) to override.
 	ExtentScrubInterval time.Duration
 
+	// ChunkGCInterval paces the chunk garbage collector and ChunkGCGrace is how
+	// old an unreferenced chunk must be before it is reclaimed (the safety margin
+	// for the write-then-record gap). Both zero means "use the GC's built-in
+	// defaults"; set SILO_CHUNK_GC_INTERVAL / SILO_CHUNK_GC_GRACE (Go durations).
+	// ChunkGCEnable (SILO_CHUNK_GC_ENABLE) actually deletes; left off (the
+	// default) the GC runs as a dry run, reporting reclaimable orphans via metrics
+	// without removing anything so the live-set computation can be validated first.
+	ChunkGCInterval time.Duration
+	ChunkGCGrace    time.Duration
+	ChunkGCEnable   bool
+
 	// CRLPath points at a CA-signed certificate revocation list
 	// (SILO_TLS_CRL). When set, silod loads it, verifies it against the
 	// cluster CA, and rejects any mTLS handshake whose peer cert serial
@@ -253,6 +264,7 @@ func Load(env EnvFunc) (*Config, error) {
 		KMSVaultURL:         env("SILO_KMS_VAULT_URL"),
 		KMSKeyName:          env("SILO_KMS_KEY_NAME"),
 		ExtentReplication:   envBoolDefault(env, "SILO_EXTENT_REPLICATION", true),
+		ChunkGCEnable:       envBool(env, "SILO_CHUNK_GC_ENABLE"),
 		LogLevel:            envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
 		LogFormat:           envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
 		CACertPath:          rawCACert,
@@ -328,6 +340,18 @@ func Load(env EnvFunc) (*Config, error) {
 		return nil, err
 	}
 	cfg.ExtentScrubInterval = extentScrubInterval
+
+	chunkGCInterval, err := envDuration(env, "SILO_CHUNK_GC_INTERVAL")
+	if err != nil {
+		return nil, err
+	}
+	cfg.ChunkGCInterval = chunkGCInterval
+
+	chunkGCGrace, err := envDuration(env, "SILO_CHUNK_GC_GRACE")
+	if err != nil {
+		return nil, err
+	}
+	cfg.ChunkGCGrace = chunkGCGrace
 
 	if err := loadEncryptionKey(env, cfg); err != nil {
 		return nil, err
