@@ -25,6 +25,9 @@ type ExtentStore interface {
 	SetBatch(volumeID string, indexes []uint64, chunkIDs []string, ts hlc.Timestamp) error
 	Get(volumeID string, index uint64) (chunkID string, mapped bool)
 	Has(volumeID string) bool
+	// Snapshot returns volume's bindings (each carrying its own HLC), the payload
+	// SnapshotMap clones onto a new snapshot volume's replica set.
+	Snapshot(volumeID string) []crdt.MapEntry[uint64, string]
 	Merge(volumeID string, entries []crdt.MapEntry[uint64, string])
 	Ensure(volumeID string)
 	Delete(volumeID string) error
@@ -107,6 +110,38 @@ func (c *ExtentCoordinator) EnsureMap(ctx context.Context, volumeID string) erro
 	}
 	return c.quorumFanOut(ctx, volumeID, replicas, initial, func(ctx context.Context, addr string) error {
 		return c.peers.Apply(ctx, addr, volumeID, nil, true)
+	})
+}
+
+// SnapshotMap clones the source volume's extent map onto the destination
+// (snapshot) volume's replica set, returning once a majority are durable. It is
+// the out-of-band counterpart to namespace.SnapshotVolume's in-namespace extents
+// clone: under extent replication a volume's bindings live here, not in the
+// gossiped namespace, so without this a snapshot would capture an empty map and
+// read as zeros. The source map is warmed locally first, so a node that does not
+// hold the source can still snapshot it. The clone is a faithful point-in-time
+// copy — each binding keeps its source HLC — and because chunks are immutable the
+// two volumes share them safely until a copy-on-write write diverges one. The
+// destination is established even when the source map is empty (a never-written
+// source snapshots to a valid empty volume), via ensure=true on the fan-out.
+func (c *ExtentCoordinator) SnapshotMap(ctx context.Context, srcVolumeID, dstVolumeID string) error {
+	if err := c.Warm(ctx, srcVolumeID); err != nil {
+		return fmt.Errorf("replication: cannot snapshot volume %q: could not warm its source extent map (%w)", srcVolumeID, err)
+	}
+	entries := c.local.Snapshot(srcVolumeID)
+
+	replicas := c.place.MetaReplicas(dstVolumeID, c.rf)
+	if len(replicas) == 0 {
+		return c.errNoReplicas(dstVolumeID)
+	}
+	initial := 0
+	if containsNode(replicas, c.place.SelfID()) {
+		c.local.Ensure(dstVolumeID)         // establish the dst map even if the source was empty
+		c.local.Merge(dstVolumeID, entries) // fold the cloned bindings (a no-op when empty)
+		initial = 1
+	}
+	return c.quorumFanOut(ctx, dstVolumeID, replicas, initial, func(ctx context.Context, addr string) error {
+		return c.peers.Apply(ctx, addr, dstVolumeID, entries, true)
 	})
 }
 

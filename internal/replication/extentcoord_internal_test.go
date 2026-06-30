@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -92,6 +93,21 @@ func (s *fakeStore) Has(vol string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.has[vol]
+}
+
+func (s *fakeStore) Snapshot(vol string) []crdt.MapEntry[uint64, string] {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.data[vol]
+	if m == nil {
+		return nil
+	}
+	entries := make([]crdt.MapEntry[uint64, string], 0, len(m))
+	for k, v := range m {
+		entries = append(entries, crdt.MapEntry[uint64, string]{Key: k, Value: v})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
+	return entries
 }
 
 func (s *fakeStore) Merge(vol string, entries []crdt.MapEntry[uint64, string]) {
@@ -412,6 +428,133 @@ func TestExtentCoordinator_WarmEmptyVolumeIsZeros(t *testing.T) {
 	}
 	if _, ok := store.Get("vol", 0); ok {
 		t.Error("a never-written extent should read unmapped (zeros)")
+	}
+}
+
+func TestExtentCoordinator_SnapshotMapClonesLocalSource(t *testing.T) {
+	// Source map is already local and self is a dst replica: the source bindings
+	// are cloned into the dst map locally and fanned out to peers with ensure=true.
+	place := &fakeMetaPlace{replicas: []string{"a", "b", "c"}, self: "a"}
+	store := newFakeStore()
+	if err := store.SetBatch("src", []uint64{0, 1}, []string{"c0", "c1"}, at(1)); err != nil {
+		t.Fatalf("seed src: %v", err)
+	}
+	peers := newFakeEpeers()
+	c := NewExtentCoordinator(place, store, peers, 3, quietLog())
+	if err := c.SnapshotMap(context.Background(), "src", "dst"); err != nil {
+		t.Fatalf("SnapshotMap: %v", err)
+	}
+	if v, ok := store.Get("dst", 0); !ok || v != "c0" {
+		t.Errorf("dst extent 0 = (%q,%v), want c0", v, ok)
+	}
+	if v, ok := store.Get("dst", 1); !ok || v != "c1" {
+		t.Errorf("dst extent 1 = (%q,%v), want c1", v, ok)
+	}
+	peers.waitApplies(t, 2)
+	for _, rec := range peers.snapApplied() {
+		if rec.vol != "dst" || !rec.ensure || len(rec.entries) != 2 {
+			t.Errorf("peer apply = %+v, want vol=dst ensure=true 2 entries", rec)
+		}
+	}
+}
+
+func TestExtentCoordinator_SnapshotMapWarmsRemoteSource(t *testing.T) {
+	// Source map is not local: it is warmed from a holder before being cloned.
+	place := &fakeMetaPlace{replicas: []string{"a", "b", "c"}, self: "a"}
+	store := newFakeStore()
+	peers := newFakeEpeers()
+	peers.statHas["b:7000"] = true
+	peers.fetchRes["b:7000"] = []crdt.MapEntry[uint64, string]{{Key: 7, Value: "c7", TS: at(1)}}
+	c := NewExtentCoordinator(place, store, peers, 3, quietLog())
+	if err := c.SnapshotMap(context.Background(), "src", "dst"); err != nil {
+		t.Fatalf("SnapshotMap: %v", err)
+	}
+	if v, ok := store.Get("dst", 7); !ok || v != "c7" {
+		t.Errorf("dst extent 7 = (%q,%v), want c7 (warmed then cloned)", v, ok)
+	}
+}
+
+func TestExtentCoordinator_SnapshotMapEmptySourceEstablishesEmptyDst(t *testing.T) {
+	// A never-written source (all replicas reachable, none holds a map) snapshots
+	// to a valid empty dst: Warm establishes an empty src, the clone establishes
+	// an empty dst, and peers receive an ensure=true apply with no entries.
+	place := &fakeMetaPlace{replicas: []string{"a", "b", "c"}, self: "a"}
+	store := newFakeStore()
+	peers := newFakeEpeers() // statHas defaults false; no stat errors → never-written
+	c := NewExtentCoordinator(place, store, peers, 3, quietLog())
+	if err := c.SnapshotMap(context.Background(), "src", "dst"); err != nil {
+		t.Fatalf("SnapshotMap: %v", err)
+	}
+	if !store.Has("dst") {
+		t.Error("dst map should be established even when the source was empty")
+	}
+	peers.waitApplies(t, 2)
+	for _, rec := range peers.snapApplied() {
+		if rec.vol != "dst" || !rec.ensure || len(rec.entries) != 0 {
+			t.Errorf("peer apply = %+v, want vol=dst ensure=true 0 entries", rec)
+		}
+	}
+}
+
+func TestExtentCoordinator_SnapshotMapSelfNotDstReplica(t *testing.T) {
+	// Self is not a dst replica: no local dst map is written; the clone reaches
+	// the dst replica set purely by peer fan-out. The source is pre-seeded local
+	// so Warm is a no-op.
+	place := &fakeMetaPlace{replicas: []string{"b", "c", "d"}, self: "a"}
+	store := newFakeStore()
+	if err := store.SetBatch("src", []uint64{0}, []string{"c0"}, at(1)); err != nil {
+		t.Fatalf("seed src: %v", err)
+	}
+	peers := newFakeEpeers()
+	c := NewExtentCoordinator(place, store, peers, 3, quietLog())
+	if err := c.SnapshotMap(context.Background(), "src", "dst"); err != nil {
+		t.Fatalf("SnapshotMap: %v", err)
+	}
+	if store.Has("dst") {
+		t.Error("local dst map must not be written when self is not a dst replica")
+	}
+	peers.waitApplies(t, 3)
+}
+
+func TestExtentCoordinator_SnapshotMapWarmSourceError(t *testing.T) {
+	// The source cannot be warmed (a replica unreachable): SnapshotMap fails
+	// rather than cloning a partial or empty map.
+	place := &fakeMetaPlace{replicas: []string{"a", "b", "c"}, self: "a"}
+	peers := newFakeEpeers()
+	peers.statErr["b:7000"] = errors.New("stat boom")
+	peers.statErr["c:7000"] = errors.New("stat boom")
+	c := NewExtentCoordinator(place, newFakeStore(), peers, 3, quietLog())
+	if err := c.SnapshotMap(context.Background(), "src", "dst"); err == nil {
+		t.Error("SnapshotMap should fail when the source map cannot be warmed")
+	}
+}
+
+func TestExtentCoordinator_SnapshotMapNoDstReplicas(t *testing.T) {
+	// Source warms trivially (already local), but the dst has no replicas: the
+	// clone errors instead of silently dropping the snapshot's map.
+	store := newFakeStore()
+	store.Ensure("src") // local already holds src → Warm short-circuits
+	c := NewExtentCoordinator(&fakeMetaPlace{replicas: nil, self: "a"}, store, newFakeEpeers(), 3, quietLog())
+	if err := c.SnapshotMap(context.Background(), "src", "dst"); err == nil {
+		t.Error("SnapshotMap with no dst replicas should error")
+	}
+}
+
+func TestExtentCoordinator_SnapshotMapQuorumNotReached(t *testing.T) {
+	// Self is not a dst replica and the peers fail: the clone cannot reach quorum
+	// and errors, so the caller can roll the snapshot back.
+	place := &fakeMetaPlace{replicas: []string{"b", "c", "d"}, self: "a"}
+	store := newFakeStore()
+	if err := store.SetBatch("src", []uint64{0}, []string{"c0"}, at(1)); err != nil {
+		t.Fatalf("seed src: %v", err)
+	}
+	peers := newFakeEpeers()
+	peers.applyErr["b:7000"] = errors.New("down")
+	peers.applyErr["c:7000"] = errors.New("down")
+	peers.applyErr["d:7000"] = errors.New("down")
+	c := NewExtentCoordinator(place, store, peers, 3, quietLog())
+	if err := c.SnapshotMap(context.Background(), "src", "dst"); err == nil {
+		t.Error("a sub-quorum clone should error")
 	}
 }
 

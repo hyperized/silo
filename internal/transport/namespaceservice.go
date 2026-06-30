@@ -37,15 +37,29 @@ type ExtentDeleter interface {
 	DeleteMap(ctx context.Context, volumeID string) error
 }
 
+// ExtentSnapshotter clones a source volume's out-of-band extent map onto a new
+// snapshot volume's replica set. *replication.ExtentCoordinator satisfies it via
+// SnapshotMap. It is wired (see WithExtentSnapshotter) only under extent
+// replication, where a volume's chunk bindings live in the replicated extent
+// store rather than the gossiped namespace: there the namespace's own
+// in-namespace extents clone is empty, so without this a snapshot would capture
+// no chunks and read as zeros. When wired, SnapshotVolume clones the map as part
+// of the snapshot and rolls the snapshot back if the clone cannot be replicated,
+// so a snapshot is never reported ready while silently empty.
+type ExtentSnapshotter interface {
+	SnapshotMap(ctx context.Context, srcVolumeID, dstVolumeID string) error
+}
+
 // NamespaceService exposes the node's namespace replica over gRPC. Writes
 // mutate the local replica and converge to peers over gossip; reads resolve
 // the local replica's current view.
 type NamespaceService struct {
 	namespacev1.UnimplementedNamespaceStoreServer
 
-	ns            NamespaceOps
-	extentDeleter ExtentDeleter
-	logger        *slog.Logger
+	ns                NamespaceOps
+	extentDeleter     ExtentDeleter
+	extentSnapshotter ExtentSnapshotter
+	logger            *slog.Logger
 }
 
 // NamespaceOption configures a NamespaceService at construction.
@@ -55,6 +69,13 @@ type NamespaceOption func(*NamespaceService)
 // its replica set, so a deleted volume's map does not outlive it.
 func WithExtentDeleter(d ExtentDeleter) NamespaceOption {
 	return func(s *NamespaceService) { s.extentDeleter = d }
+}
+
+// WithExtentSnapshotter makes SnapshotVolume also clone the source's out-of-band
+// extent map onto the snapshot's replica set, so a snapshot taken under extent
+// replication captures the source's chunk bindings instead of an empty map.
+func WithExtentSnapshotter(s ExtentSnapshotter) NamespaceOption {
+	return func(svc *NamespaceService) { svc.extentSnapshotter = s }
 }
 
 // NewNamespaceService wires a namespace replica onto the gRPC surface.
@@ -159,13 +180,56 @@ func (s *NamespaceService) CreateVolume(_ context.Context, req *namespacev1.Crea
 }
 
 // SnapshotVolume freezes the source volume's extent map into a new volume at
-// the destination path — a point-in-time, copy-on-write copy.
-func (s *NamespaceService) SnapshotVolume(_ context.Context, req *namespacev1.SnapshotVolumeRequest) (*namespacev1.SnapshotVolumeResponse, error) {
-	id, err := s.ns.SnapshotVolume(req.GetSourcePath(), req.GetDestPath())
+// the destination path — a point-in-time, copy-on-write copy. Under extent
+// replication (when a snapshotter is wired) the source's bindings live out of
+// band, so the namespace's own clone is empty; here we additionally clone the
+// out-of-band map onto the snapshot's replica set. The source id is captured
+// before the snapshot is created, and if the clone cannot be replicated the
+// snapshot is rolled back and an error returned — a snapshot is never reported
+// successful while silently holding no chunks.
+func (s *NamespaceService) SnapshotVolume(ctx context.Context, req *namespacev1.SnapshotVolumeRequest) (*namespacev1.SnapshotVolumeResponse, error) {
+	var srcID string
+	if s.extentSnapshotter != nil {
+		if id, err := s.ns.VolumeInodeID(req.GetSourcePath()); err == nil {
+			srcID = id // resolved before the snapshot exists; validated authoritatively by the snapshot below
+		}
+	}
+	dstID, err := s.ns.SnapshotVolume(req.GetSourcePath(), req.GetDestPath())
 	if err != nil {
 		return nil, mapNamespaceError(err)
 	}
-	return &namespacev1.SnapshotVolumeResponse{Inode: id}, nil
+	if s.extentSnapshotter != nil {
+		if srcID == "" {
+			// The namespace accepted the snapshot but we could not identify the
+			// source volume to clone its out-of-band map. Shipping this would be a
+			// silently-empty snapshot; roll back and fail instead of misleading.
+			s.rollbackSnapshot(ctx, req.GetDestPath(), dstID)
+			return nil, status.Errorf(codes.Internal, "could not resolve the source volume id to clone the snapshot's extent map; the snapshot at %q was rolled back", req.GetDestPath())
+		}
+		if err := s.extentSnapshotter.SnapshotMap(ctx, srcID, dstID); err != nil {
+			s.rollbackSnapshot(ctx, req.GetDestPath(), dstID)
+			return nil, status.Errorf(codes.Unavailable, "could not replicate the snapshot's extent map (%v); the snapshot at %q was rolled back — retry when the volume's replica set is reachable", err, req.GetDestPath())
+		}
+	}
+	return &namespacev1.SnapshotVolumeResponse{Inode: dstID}, nil
+}
+
+// rollbackSnapshot undoes a snapshot whose out-of-band extent-map clone failed,
+// so the destination is not left as a silently-empty snapshot. It removes the
+// namespace entry and, when an extent deleter is wired, drops any partial map
+// the failed clone replicated. Both steps are best-effort: a removed namespace
+// entry already excludes the snapshot from the live set, so the extent reaper
+// reclaims any map this misses; only a namespace-removal failure can leave a
+// stray entry, which is logged loudly for the operator.
+func (s *NamespaceService) rollbackSnapshot(ctx context.Context, destPath, dstID string) {
+	if err := s.ns.Remove(destPath); err != nil {
+		s.logger.Error("snapshot rollback: could not remove the namespace entry of a snapshot whose extent-map clone failed; a possibly-empty snapshot remains at the destination — remove it manually", "dest", destPath, "snapshot_volume", dstID, "error", err)
+	}
+	if s.extentDeleter != nil {
+		if err := s.extentDeleter.DeleteMap(ctx, dstID); err != nil {
+			s.logger.Warn("snapshot rollback: could not delete the partial extent map of a rolled-back snapshot; the reaper will reclaim it", "snapshot_volume", dstID, "error", err)
+		}
+	}
 }
 
 func protoEntryType(t namespace.InodeType) namespacev1.EntryType {

@@ -71,11 +71,18 @@ var (
 		}
 		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger, opts...)}
 	}
-	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, extStore transport.ExtentStore, extDeleter transport.ExtentDeleter, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
+	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, extStore transport.ExtentStore, extDeleter transport.ExtentDeleter, extSnapshotter transport.ExtentSnapshotter, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
 		opts := []transport.GRPCOption{
 			transport.WithStatusService(transport.NewStatusService(members, store, cfg.DataDir, cfg.NodeID, version, logger)),
 			transport.WithExtentService(transport.NewExtentService(extStore, logger)),
 			transport.WithNamespaceExtentDeleter(extDeleter),
+		}
+		// Cloning a snapshot's out-of-band map only matters under extent
+		// replication; in the legacy mode the namespace's in-namespace clone is
+		// the real one and the out-of-band store is empty, so wiring the
+		// snapshotter there would make a good legacy snapshot fail on Warm.
+		if cfg.ExtentReplication && extSnapshotter != nil {
+			opts = append(opts, transport.WithNamespaceExtentSnapshotter(extSnapshotter))
 		}
 		if drainer != nil {
 			opts = append(opts, transport.WithNodeAdminService(transport.NewNodeAdminService(drainer, cfg.NodeID, logger)))
@@ -509,7 +516,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 
 	subs := []subsystem{
 		newHTTPSubsystem(cfg, version, logger, exp.Handler()),
-		newGRPCSubsystem(cfg, serverTLS, tokenAuth, store, coord, ns, extStore, extCoord, members, gossipDrainer(gossipSubsys), version, logger),
+		newGRPCSubsystem(cfg, serverTLS, tokenAuth, store, coord, ns, extStore, extCoord, extCoord, members, gossipDrainer(gossipSubsys), version, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
 		scrubberSubsys,
