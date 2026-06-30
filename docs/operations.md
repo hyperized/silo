@@ -51,6 +51,9 @@ is the quick reference.
 | `SILO_EXTENT_REAP_AFTER` | `1h` | How long a deleted volume's extent map must sit untouched before the reaper reclaims orphaned replicas. The age guard that stops a freshly-created volume whose directory entry has not yet gossiped to a node from being mistaken for a deleted one — keep it well above gossip convergence time. |
 | `SILO_EXTENT_REAP_INTERVAL` | `15m` | Extent-map reaper sweep cadence (the GC backstop for the synchronous delete path). |
 | `SILO_EXTENT_SCRUB_INTERVAL` | `1m` | Extent-map scrubber cadence — re-replicates an idle volume's extent map to its full replica set after a node loss (the metadata analog of `SILO_SCRUB_INTERVAL`, which heals chunks). The synchronous write-path fan-out only keeps replicas in step while writes flow; a volume written once and then left idle would otherwise stay under-replicated after a later node loss. |
+| `SILO_CHUNK_GC_INTERVAL` | `10m` | Chunk garbage-collector sweep cadence. The GC reclaims chunks no live volume or file references anymore (whole-volume deletes and copy-on-write overwrite orphans) by mark-and-sweep over the cluster's live reference set. |
+| `SILO_CHUNK_GC_GRACE` | `1h` | How old an unreferenced chunk must be before the GC reclaims it — the safety margin for the write-then-record gap (a chunk is stored just before its reference is recorded). Keep it well above write latency plus gossip/HLC skew. |
+| `SILO_CHUNK_GC_ENABLE` | `false` | Actually delete. Left off (the default) the GC is a **dry run**: it computes the live set and reports the reclaimable orphan count (`silo_chunkgc_orphan_chunks`) without removing anything, so you can validate the computation against real data before enabling deletion. |
 
 ### Encryption (at rest)
 
@@ -709,6 +712,18 @@ Notable series:
   steady non-zero `last_reap_reclaimed` means deletes are leaving orphans for the
   reaper to clean — expected only when a replica was unreachable at delete time;
   a persistent stream warrants a look at delete-path (`DeleteMap`) health.
+- `silo_chunkgc_orphan_chunks`, `silo_chunkgc_reclaimed_total` and
+  `silo_chunkgc_last_reclaimed` — chunks the garbage collector found reclaimable
+  at the last sweep (unreferenced and past the grace window — what a dry run
+  *would* delete), the cumulative count it has actually deleted, and the last
+  sweep's deletions. In dry-run mode (`SILO_CHUNK_GC_ENABLE` off) `orphan_chunks`
+  tracks the leak while `reclaimed_total` stays zero; after enabling, a steadily
+  climbing `reclaimed_total` then a flat `orphan_chunks` near zero means the leak
+  is being kept in check. `silo_chunkgc_incomplete_view` (1 when a node skipped a
+  sweep because it does not hold every live volume's extent map) and
+  `silo_chunkgc_unaccounted_volumes` (how many it could not see) should both be 0
+  on a cluster whose replication factor covers every node; a persistent non-zero
+  means the GC is abstaining and not reclaiming on that node.
 - `silo_extentmap_scrub_shortfall_maps` and `silo_extentmap_scrub_repairs_total` —
   extent maps this node is responsible for that were under-replicated at the last
   scrub (gauge), and the running count of map replicas it has re-pushed to heal

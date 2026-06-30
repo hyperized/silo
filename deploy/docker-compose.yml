@@ -40,6 +40,12 @@ x-silod: &silod
     # The extent-map scrubber heals idle volumes' metadata after a node loss;
     # pace it fast locally for the same reason as the chunk scrubber above.
     SILO_EXTENT_SCRUB_INTERVAL: ${SILO_EXTENT_SCRUB_INTERVAL:-5s}
+    # Chunk GC: sweep often with a short grace locally so orphaned-chunk
+    # reclamation is observable within an integration test. Enabled here (it is a
+    # dry run by default in production until the live-set computation is trusted).
+    SILO_CHUNK_GC_INTERVAL: ${SILO_CHUNK_GC_INTERVAL:-5s}
+    SILO_CHUNK_GC_GRACE: ${SILO_CHUNK_GC_GRACE:-10s}
+    SILO_CHUNK_GC_ENABLE: ${SILO_CHUNK_GC_ENABLE:-true}
   healthcheck:
     test: ["CMD", "wget", "-qO-", "http://localhost:7080/healthz"]
     interval: 5s
