@@ -56,11 +56,23 @@ const (
 	DefaultGossipAddr    = "0.0.0.0:7100"
 	DefaultHTTPAddr      = "0.0.0.0:7080"
 	DefaultDataDir       = "/var/lib/silo"
-	DefaultChunkSize     = 4 * 1024 * 1024
-	DefaultReplication   = 3
-	DefaultKeySource     = KeySourceStatic
-	DefaultLogLevel      = "info"
-	DefaultLogFormat     = "text"
+	// DefaultChunkSize is 256 KiB: it gives ~16x less copy-on-write
+	// amplification than 4 MiB on small/random block writes (a 4 KiB write
+	// rewrites a whole chunk), which on the cluster was the difference between
+	// silod OOM-killing under a write storm and staying bounded. Larger chunks
+	// suit large-sequential, capacity-heavy volumes — set chunk-size per volume.
+	DefaultChunkSize   = 256 * 1024
+	DefaultReplication = 3
+	// DefaultMaxConcurrentWrites bounds how many peer replica sends run at once
+	// (across all writes, counting background stragglers). It caps grpc's
+	// replication send-buffer pool (footprint ~= n*chunkSize), which otherwise
+	// grows without limit under a write storm and OOM-kills silod. 64 keeps the
+	// pool well bounded while still allowing high write throughput;
+	// SILO_MAX_CONCURRENT_WRITES=0 restores the unbounded behaviour.
+	DefaultMaxConcurrentWrites = 64
+	DefaultKeySource           = KeySourceStatic
+	DefaultLogLevel            = "info"
+	DefaultLogFormat           = "text"
 )
 
 // DefaultTombstoneRetention is how long deleted-entry tombstones are kept
@@ -94,6 +106,10 @@ type Config struct {
 	DataDir     string
 	ChunkSize   int64
 	Replication int
+	// MaxConcurrentWrites bounds how many peer replica sends run at once, capping
+	// grpc's replication send-buffer pool under load. Set SILO_MAX_CONCURRENT_WRITES;
+	// 0 means unbounded. Defaults to DefaultMaxConcurrentWrites.
+	MaxConcurrentWrites int
 	// ScrubInterval paces the re-replication scrubber. Zero means "use the
 	// scrubber's built-in default"; set SILO_SCRUB_INTERVAL to a Go
 	// duration (e.g. 5s, 1m) to override.
@@ -299,6 +315,12 @@ func Load(env EnvFunc) (*Config, error) {
 	}
 	cfg.Replication = repl
 
+	maxWrites, err := envInt(env, "SILO_MAX_CONCURRENT_WRITES", DefaultMaxConcurrentWrites)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MaxConcurrentWrites = maxWrites
+
 	scrubInterval, err := envDuration(env, "SILO_SCRUB_INTERVAL")
 	if err != nil {
 		return nil, err
@@ -446,7 +468,7 @@ func (c *Config) Validate() error {
 		return errors.New("SILO_DATA_DIR is required; set it to a directory silod can read and write, e.g. /var/lib/silo (the default)")
 	}
 	if c.ChunkSize <= 0 {
-		return fmt.Errorf("SILO_CHUNK_SIZE must be a positive number of bytes (got %d); use 4194304 for 4 MiB (the default) or unset the variable to fall back", c.ChunkSize)
+		return fmt.Errorf("SILO_CHUNK_SIZE must be a positive number of bytes (got %d); use 262144 for 256 KiB (the default) or unset the variable to fall back", c.ChunkSize)
 	}
 	if c.Replication < 1 {
 		return fmt.Errorf("SILO_REPLICATION must be at least 1 (got %d); use 3 for production, 2 for two-node test setups, 1 for single-node-only", c.Replication)

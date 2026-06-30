@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hyperized/silo/internal/chunkstore"
 	"github.com/hyperized/silo/internal/replication"
@@ -414,4 +415,120 @@ func TestRead_AllReplicasUnreachable(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "could not be read") {
 		t.Fatalf("got %v, want an all-replicas-unreachable error", err)
 	}
+}
+
+// blockingPeers is a Peers whose Store blocks on release after announcing its
+// entry (by addr) on entered, so a test can hold a replica send in flight and
+// observe whether a second send is admitted under the concurrency bound.
+type blockingPeers struct {
+	entered chan string
+	release chan struct{}
+	info    chunkstore.Info
+}
+
+func (p *blockingPeers) Store(_ context.Context, addr, _ string, _ []byte) (chunkstore.Info, error) {
+	p.entered <- addr
+	<-p.release
+	return p.info, nil
+}
+
+func (p *blockingPeers) Fetch(context.Context, string, string) ([]byte, chunkstore.Info, error) {
+	return nil, chunkstore.Info{}, nil
+}
+func (p *blockingPeers) Delete(context.Context, string, string) error { return nil }
+func (p *blockingPeers) Stat(context.Context, string, string) (chunkstore.Info, error) {
+	return chunkstore.Info{}, nil
+}
+
+// With WithMaxConcurrentWrites(1) only one peer send runs at a time: the second
+// replica's send must wait for the first to release its slot. This is the cap
+// that stops grpc's send-buffer pool growing without limit under a write storm.
+func TestCoordinator_BoundsConcurrentPeerSends(t *testing.T) {
+	place := &recordingPlace{
+		self:     "self",
+		replicas: []string{"self", "b", "c"},
+		addrs:    map[string]string{"b": "b:7000", "c": "c:7000"},
+	}
+	peers := &blockingPeers{entered: make(chan string, 2), release: make(chan struct{})}
+	c := replication.New(place, &fakeLocal{}, peers, 3, discardLogger(), replication.WithMaxConcurrentWrites(1))
+
+	done := make(chan error, 1)
+	go func() { _, err := c.Write(context.Background(), "c1", []byte("x")); done <- err }()
+
+	var first string
+	select {
+	case first = <-peers.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no peer send started")
+	}
+	select {
+	case s := <-peers.entered:
+		t.Fatalf("a second peer send (%s) started while the one-slot limit was held by %s", s, first)
+	case <-time.After(150 * time.Millisecond):
+		// good: the second send is parked on the semaphore
+	}
+
+	close(peers.release) // first send finishes and frees its slot
+	select {
+	case second := <-peers.entered:
+		if second == first {
+			t.Errorf("second send went to the same addr %q", second)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second peer send never started after the slot was freed")
+	}
+	if err := <-done; err != nil {
+		t.Errorf("Write: %v", err)
+	}
+}
+
+// A send that cannot get a slot fails on its own context (here it sinks the
+// write below quorum), rather than parking forever.
+func TestCoordinator_PeerSendSlotContextCancel(t *testing.T) {
+	place := &recordingPlace{
+		self:     "self",
+		replicas: []string{"b", "c"}, // self is not a replica, so both acks must come from peers
+		addrs:    map[string]string{"b": "b:7000", "c": "c:7000"},
+	}
+	peers := &blockingPeers{entered: make(chan string, 2), release: make(chan struct{})}
+	c := replication.New(place, &fakeLocal{}, peers, 2, discardLogger(), replication.WithMaxConcurrentWrites(1))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { _, err := c.Write(ctx, "c1", nil); errc <- err }()
+
+	<-peers.entered // one send holds the only slot
+	cancel()        // the other send is parked on the slot -> its context fires
+	close(peers.release)
+
+	select {
+	case err := <-errc:
+		if err == nil || !strings.Contains(err.Error(), "cancelled") {
+			t.Errorf("got %v, want a quorum error mentioning the cancelled send", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Write did not return after the parked send was cancelled")
+	}
+}
+
+// WithMaxConcurrentWrites(0) leaves peer sends unbounded: both replicas send at
+// once, neither waiting on the other.
+func TestCoordinator_UnboundedPeerSendsWhenZero(t *testing.T) {
+	place := &recordingPlace{
+		self:     "self",
+		replicas: []string{"self", "b", "c"},
+		addrs:    map[string]string{"b": "b:7000", "c": "c:7000"},
+	}
+	peers := &blockingPeers{entered: make(chan string, 2), release: make(chan struct{})}
+	c := replication.New(place, &fakeLocal{}, peers, 3, discardLogger(), replication.WithMaxConcurrentWrites(0))
+
+	go func() { _, _ = c.Write(context.Background(), "c1", nil) }()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-peers.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("not all peer sends started concurrently — unexpected bound at n=0")
+		}
+	}
+	close(peers.release)
 }

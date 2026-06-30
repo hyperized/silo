@@ -23,7 +23,7 @@ func FuzzConfigLoad(f *testing.F) {
 				return "fuzz-node"
 			case "SILO_GRPC_ADDR":
 				return addr
-			case "SILO_REPLICATION":
+			case "SILO_REPLICATION", "SILO_MAX_CONCURRENT_WRITES":
 				return repl
 			case "SILO_SCRUB_INTERVAL", "SILO_TOMBSTONE_RETENTION", "SILO_MAX_CLOCK_SKEW",
 				"SILO_EXTENT_REAP_AFTER", "SILO_EXTENT_REAP_INTERVAL", "SILO_EXTENT_SCRUB_INTERVAL",

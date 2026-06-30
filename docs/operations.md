@@ -42,8 +42,9 @@ is the quick reference.
 | Variable | Default | Purpose |
 |---|---|---|
 | `SILO_DATA_DIR` | `/var/lib/silo` | Where chunks are stored on this node |
-| `SILO_CHUNK_SIZE` | `4194304` (4 MiB) | Default chunk size (overridable per-inode) |
+| `SILO_CHUNK_SIZE` | `262144` (256 KiB) | Default chunk size (overridable per-inode/StorageClass). 256 KiB minimises copy-on-write amplification on small writes; raise it for large-sequential, capacity-heavy volumes |
 | `SILO_REPLICATION` | `3` | Default replication factor |
+| `SILO_MAX_CONCURRENT_WRITES` | `64` | Max peer replica sends in flight at once (across all writes, counting background stragglers). Caps grpc's replication send-buffer pool (≈ n·chunk-size); without it a write storm across many volumes grows the pool without limit and OOM-kills silod. `0` = unbounded. Raise it for more write parallelism if you have memory headroom |
 | `SILO_SCRUB_INTERVAL` | internal default | Re-replication scrubber cadence (the local stack sets `5s` for visible healing; production paces slower) |
 | `SILO_TOMBSTONE_RETENTION` | `24h` | How long namespace tombstones are kept before GC |
 | `SILO_MAX_CLOCK_SKEW` | `500ms` | Warn + count an alert when a peer's HLC exceeds this skew |

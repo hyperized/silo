@@ -465,7 +465,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	router := replication.NewRouter(members, replication.WithPressureSteering(cfg.DiskSteering))
 	peers := replication.NewGRPCPeers(credentials.NewTLS(peerTLS), logger)
 	defer func() { _ = peers.Close() }()
-	coord := newMeteredCoord(replication.New(router, store, peers, cfg.Replication, logger), cfg.NodeID)
+	coord := newMeteredCoord(replication.New(router, store, peers, cfg.Replication, logger, replication.WithMaxConcurrentWrites(cfg.MaxConcurrentWrites)), cfg.NodeID)
 
 	// The extent-map coordinator replicates each volume's extent map to the
 	// volume's replica set (keyed by inode id, un-steered placement) instead of
