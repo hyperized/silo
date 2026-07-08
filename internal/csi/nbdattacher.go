@@ -56,6 +56,10 @@ type NBDAttacher struct {
 	// from "gone entirely" (e.g. after a node reboot), where a stale record
 	// must be dropped rather than adopted.
 	configured func(index uint32) bool
+	// probe reports whether a device currently answers reads. Adopted
+	// attachments need it: their link may have died while no supervisor was
+	// running, and only an actual read can tell.
+	probe func(device string, timeout time.Duration) bool
 
 	mu       sync.Mutex
 	sessions map[string]nbdSession
@@ -105,6 +109,7 @@ func withNBDBackend(
 	attach func(context.Context, nbdclient.Config) (nbdSession, error),
 	adopt func(context.Context, nbdclient.Config, uint32, uint64) (nbdSession, error),
 	configured func(uint32) bool,
+	probe func(string, time.Duration) bool,
 ) NBDAttacherOption {
 	return func(a *NBDAttacher) {
 		a.kernel = kernel
@@ -112,6 +117,7 @@ func withNBDBackend(
 		a.attach = attach
 		a.adopt = adopt
 		a.configured = configured
+		a.probe = probe
 	}
 }
 
@@ -148,6 +154,7 @@ func NewNBDAttacher(nbdAddr string, opts ...NBDAttacherOption) (*NBDAttacher, er
 			return nbdclient.Adopt(ctx, cfg, index, size)
 		}
 		a.configured = deviceConfigured
+		a.probe = probeDeviceLiveness
 	}
 	a.store = newAttachmentStore(a.stateDir)
 	a.resume()
@@ -183,6 +190,7 @@ func (a *NBDAttacher) resume() {
 			a.records[rec.Volume] = rec
 			continue
 		}
+		a.repairIfDead(s)
 		a.sessions[rec.Volume] = s
 		a.records[rec.Volume] = rec
 		kept = append(kept, rec)
@@ -223,6 +231,22 @@ func (a *NBDAttacher) startWatcher() {
 	}()
 }
 
+// probeTimeout bounds the adopted-device read probe: long enough for a slow
+// but healthy silod, far shorter than the reconnect window a dead link queues
+// I/O for.
+const probeTimeout = 3 * time.Second
+
+// repairIfDead probes an adopted device and kicks its session when the link
+// is down — the one death the supervisor cannot observe, because it happened
+// before this process existed.
+func (a *NBDAttacher) repairIfDead(s nbdSession) {
+	if a.probe(s.Device(), probeTimeout) {
+		return
+	}
+	a.logger.Warn("an adopted volume's connection is dead; reconnecting", "device", s.Device())
+	s.Kick()
+}
+
 func (a *NBDAttacher) sessionConfig(volumePath string) nbdclient.Config {
 	return nbdclient.Config{
 		Addr:            a.addr,
@@ -249,6 +273,7 @@ func (a *NBDAttacher) Attach(ctx context.Context, volumePath string) (string, er
 			if err != nil {
 				return "", fmt.Errorf("volume %q is already attached as %s but cannot be supervised (%w); restart silod on this node if this persists", volumePath, nbdnl.DevicePath(rec.Index), err)
 			}
+			a.repairIfDead(s)
 			a.sessions[volumePath] = s
 			return s.Device(), nil
 		}

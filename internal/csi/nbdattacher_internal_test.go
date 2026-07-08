@@ -82,6 +82,7 @@ type fakeBackend struct {
 	attachErr   error
 	adoptErr    error
 	configured  map[uint32]bool
+	dead        map[string]bool // devices whose probe should report a dead link
 	deadLinks   chan uint32
 	disconnects []uint32
 }
@@ -90,6 +91,7 @@ func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
 		sessions:   map[string]*fakeSession{},
 		configured: map[uint32]bool{},
+		dead:       map[string]bool{},
 		deadLinks:  make(chan uint32),
 	}
 }
@@ -127,7 +129,12 @@ func (b *fakeBackend) option() NBDAttacherOption {
 		defer b.mu.Unlock()
 		return b.configured[index]
 	}
-	return withNBDBackend(&fakeKernelNBD{b: b}, watcher, attach, adopt, configured)
+	probe := func(device string, _ time.Duration) bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return !b.dead[device]
+	}
+	return withNBDBackend(&fakeKernelNBD{b: b}, watcher, attach, adopt, configured, probe)
 }
 
 func (b *fakeBackend) session(volume string) *fakeSession {
@@ -245,6 +252,10 @@ func TestNBDAttacherResumesRecordedAttachments(t *testing.T) {
 	if len(backend.adopts) != 1 || backend.adopts[0] != 3 {
 		t.Fatalf("adopts = %v, want [3]", backend.adopts)
 	}
+	// A healthy adopted device must not be kicked into reconnecting.
+	if got := backend.session("/vol/live").kicked(); got != 0 {
+		t.Fatalf("healthy adopted session kicks = %d, want 0", got)
+	}
 	if h, ok := a.Health("/vol/live"); !ok || h.Device != "/dev/nbd3" {
 		t.Fatalf("Health(/vol/live) = (%+v, %v)", h, ok)
 	}
@@ -263,6 +274,23 @@ func TestNBDAttacherResumesRecordedAttachments(t *testing.T) {
 	}
 	if len(backend.attaches) != 0 {
 		t.Fatalf("attaches = %v, want none", backend.attaches)
+	}
+}
+
+func TestNBDAttacherResumeRepairsDeadAdoptedLink(t *testing.T) {
+	dir := t.TempDir()
+	backend := newFakeBackend()
+	backend.configured[4] = true
+	backend.dead["/dev/nbd4"] = true // the link died while no plugin was running
+	if err := newAttachmentStore(dir).save([]attachmentRecord{{Volume: "/vol/db", Index: 4, Size: 1 << 20}}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	a := newTestAttacher(t, backend, dir)
+	_ = a
+
+	if got := backend.session("/vol/db").kicked(); got != 1 {
+		t.Fatalf("dead adopted session kicks = %d, want 1 (the probe must trigger the repair)", got)
 	}
 }
 

@@ -20,7 +20,6 @@ type KernelNBD interface {
 	Connect(cfg nbdnl.ConnectConfig) (uint32, error)
 	Reconfigure(index uint32, socketFD int, ioTimeout, deadConnTimeout time.Duration) error
 	Disconnect(index uint32) error
-	Connected(index uint32) (bool, error)
 }
 
 // State is a session's health as the volume-condition surface reports it.
@@ -42,9 +41,6 @@ const (
 	// while silod is away before failing it — long enough to cover a rolling
 	// restart including an image pull.
 	DefaultReconnectWindow = 5 * time.Minute
-	// defaultHealthInterval paces the status-poll fallback that catches a
-	// dead link whose netlink notification was dropped or missed.
-	defaultHealthInterval = 30 * time.Second
 	// defaultDialTimeout bounds one dial+handshake attempt.
 	defaultDialTimeout = 15 * time.Second
 )
@@ -68,12 +64,14 @@ type Config struct {
 	IOTimeout time.Duration
 	// BlockSize is the device's logical block size (0 = kernel default).
 	BlockSize uint64
-	// HealthInterval paces the connectivity poll (0 = a 30s default).
-	HealthInterval time.Duration
 	// Kernel talks to the NBD driver; required.
 	Kernel KernelNBD
 	// Dial opens the TCP connection to Addr (nil = a plain TCP dialer).
 	Dial func(ctx context.Context, addr string) (net.Conn, error)
+	// WatchSocket watches a connection's fd for the peer dying and calls the
+	// kick (nil = the platform default; tests inject a fake since their fake
+	// conns have no real fd).
+	WatchSocket func(fd int, kick func()) (stop func(), err error)
 	// Logger records reconnect activity (nil = slog.Default).
 	Logger *slog.Logger
 }
@@ -88,8 +86,8 @@ func (cfg *Config) applyDefaults() error {
 	if cfg.ReconnectWindow <= 0 {
 		cfg.ReconnectWindow = DefaultReconnectWindow
 	}
-	if cfg.HealthInterval <= 0 {
-		cfg.HealthInterval = defaultHealthInterval
+	if cfg.WatchSocket == nil {
+		cfg.WatchSocket = watchSocket
 	}
 	if cfg.Dial == nil {
 		cfg.Dial = func(ctx context.Context, addr string) (net.Conn, error) {
@@ -136,6 +134,7 @@ type Session struct {
 	mu         sync.Mutex
 	state      State
 	size       uint64
+	stopWatch  func()
 	reconnects atomic.Uint64
 }
 
@@ -162,6 +161,7 @@ func Attach(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, err
 	}
 	s := newSession(cfg, index, export.Size, StateHealthy)
+	s.watch(fd)
 	s.cfg.Logger.Info("nbd volume attached", "export", cfg.Export, "device", s.device, "size", export.Size)
 	return s, nil
 }
@@ -169,24 +169,14 @@ func Attach(ctx context.Context, cfg Config) (*Session, error) {
 // Adopt resumes supervising a device this process (or a predecessor) attached
 // earlier — the node plugin restarting must not orphan live attachments. size
 // is the expected export size from the attachment record (0 skips the check).
-// A dead connection is repaired immediately.
+// The old connection's fd is gone with the old process, so death detection
+// relies on the dead-link watcher and the caller probing the device once.
 func Adopt(_ context.Context, cfg Config, index uint32, size uint64) (*Session, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	connected, err := cfg.Kernel.Connected(index)
-	if err != nil {
-		return nil, fmt.Errorf("nbdclient: cannot adopt device %d (%w)", index, err)
-	}
-	state := StateHealthy
-	if !connected {
-		state = StateReconnecting
-	}
-	s := newSession(cfg, index, size, state)
-	if !connected {
-		s.Kick()
-	}
-	s.cfg.Logger.Info("nbd volume adopted", "export", cfg.Export, "device", s.device, "connected", connected)
+	s := newSession(cfg, index, size, StateHealthy)
+	s.cfg.Logger.Info("nbd volume adopted", "export", cfg.Export, "device", s.device)
 	return s, nil
 }
 
@@ -239,24 +229,43 @@ func (s *Session) Kick() {
 	}
 }
 
-// supervise waits for kicks and paces the poll fallback, reconnecting as
-// needed until the session is detached.
+// supervise waits for kicks — from the socket watch, the dead-link watcher,
+// or a device probe — reconnecting until the session is detached.
 func (s *Session) supervise() {
 	defer s.wg.Done()
-	ticker := time.NewTicker(s.cfg.HealthInterval)
-	defer ticker.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-s.kicks:
 			s.reconnect()
-		case <-ticker.C:
-			connected, err := s.cfg.Kernel.Connected(s.index)
-			if err == nil && !connected {
-				s.reconnect()
-			}
 		}
+	}
+}
+
+// watch points the socket watcher at the connection's fd; failure only costs
+// the fastest detection path, so it is logged, not fatal.
+func (s *Session) watch(fd int) {
+	stop, err := s.cfg.WatchSocket(fd, s.Kick)
+	if err != nil {
+		s.cfg.Logger.Warn("cannot watch the nbd socket; relying on the kernel's dead-link notifications", "export", s.cfg.Export, "error", err)
+		return
+	}
+	s.mu.Lock()
+	if s.stopWatch != nil {
+		s.stopWatch()
+	}
+	s.stopWatch = stop
+	s.mu.Unlock()
+}
+
+func (s *Session) unwatch() {
+	s.mu.Lock()
+	stop := s.stopWatch
+	s.stopWatch = nil
+	s.mu.Unlock()
+	if stop != nil {
+		stop()
 	}
 }
 
@@ -274,6 +283,13 @@ func (s *Session) reconnect() {
 		}
 		err := s.reconnectOnce()
 		if err == nil {
+			// Kicks that queued while we were reconnecting describe the death
+			// we just repaired; acting on them would tear down the connection
+			// we just handed the kernel.
+			select {
+			case <-s.kicks:
+			default:
+			}
 			s.setState(StateHealthy)
 			s.reconnects.Add(1)
 			s.cfg.Logger.Info("nbd connection re-established", "export", s.cfg.Export, "device", s.device, "attempts", attempt)
@@ -308,6 +324,7 @@ func (s *Session) reconnectOnce() error {
 	if err := s.cfg.Kernel.Reconfigure(s.index, fd, s.cfg.IOTimeout, s.cfg.ReconnectWindow); err != nil {
 		return err
 	}
+	s.watch(fd)
 	if expected == 0 {
 		s.mu.Lock()
 		s.size = export.Size
@@ -320,6 +337,7 @@ func (s *Session) reconnectOnce() error {
 func (s *Session) Detach(context.Context) error {
 	s.cancel()
 	s.wg.Wait()
+	s.unwatch()
 	s.mu.Lock()
 	alreadyDetached := s.state == StateDetached
 	s.state = StateDetached
@@ -339,6 +357,7 @@ func (s *Session) Detach(context.Context) error {
 func (s *Session) Stop() {
 	s.cancel()
 	s.wg.Wait()
+	s.unwatch()
 }
 
 // Device returns the attached device node, e.g. /dev/nbd3.

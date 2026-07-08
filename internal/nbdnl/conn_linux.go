@@ -93,6 +93,16 @@ func Dial() (*Conn, error) {
 // Close releases the netlink socket.
 func (c *Conn) Close() error { return c.f.Close() }
 
+// trace dumps netlink datagrams when SILO_NBD_NETLINK_TRACE=1 — the kernel
+// side of an attach is otherwise invisible when a reply goes missing.
+var trace = os.Getenv("SILO_NBD_NETLINK_TRACE") == "1"
+
+func tracef(format string, args ...any) {
+	if trace {
+		fmt.Fprintf(os.Stderr, "nbdnl-trace: "+format+"\n", args...)
+	}
+}
+
 // roundTrip sends one request and reads messages until its ack, returning the
 // command's payload reply if one arrived. build receives the sequence number
 // so requests are constructed under the same lock that serialises the wire.
@@ -101,23 +111,30 @@ func (c *Conn) roundTrip(build func(seq uint32) []byte, wantReply bool) (message
 	defer c.mu.Unlock()
 	c.seq++
 	seq := c.seq
-	if _, err := c.f.Write(build(seq)); err != nil {
+	req := build(seq)
+	tracef("send seq=%d % x", seq, req)
+	if _, err := c.f.Write(req); err != nil {
 		return message{}, fmt.Errorf("nbdnl: netlink send failed (%w)", err)
 	}
 	var reply message
 	var haveReply bool
-	buf := make([]byte, receiveBufSize)
 	for {
+		// A fresh buffer per datagram: a parsed reply aliases it, and reading
+		// the ack into the same backing array would corrupt the reply's
+		// attributes before the caller sees them.
+		buf := make([]byte, receiveBufSize)
 		n, err := c.f.Read(buf)
 		if err != nil {
 			return message{}, fmt.Errorf("nbdnl: netlink receive failed (%w)", err)
 		}
+		tracef("recv % x", buf[:n])
 		msgs, err := parseMessages(buf[:n])
 		if err != nil {
 			return message{}, err
 		}
 		for _, m := range msgs {
 			if m.Seq != seq {
+				tracef("skip message type=%#x seq=%d (want %d)", m.Type, m.Seq, seq)
 				continue // a stray notification or an earlier command's residue
 			}
 			switch {

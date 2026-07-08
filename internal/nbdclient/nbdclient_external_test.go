@@ -189,14 +189,48 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// watchRecorder captures the socket-watch wiring: which fds were watched and
+// the kick that a real watcher would fire on peer death.
+type watchRecorder struct {
+	mu      sync.Mutex
+	fds     []int
+	kicks   []func()
+	stopped int
+}
+
+func (w *watchRecorder) watch(fd int, kick func()) (func(), error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.fds = append(w.fds, fd)
+	w.kicks = append(w.kicks, kick)
+	return func() {
+		w.mu.Lock()
+		w.stopped++
+		w.mu.Unlock()
+	}, nil
+}
+
+func (w *watchRecorder) fireLatest() {
+	w.mu.Lock()
+	kick := w.kicks[len(w.kicks)-1]
+	w.mu.Unlock()
+	kick()
+}
+
+func (w *watchRecorder) counts() (watched, stopped int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.fds), w.stopped
+}
+
 func testConfig(t *testing.T, kernel *fakeKernel, backend nbd.Backend) nbdclient.Config {
 	return nbdclient.Config{
-		Addr:           "127.0.0.1:10809",
-		Export:         "/vol/db",
-		Kernel:         kernel,
-		Dial:           pipeDialer(t, backend),
-		Logger:         discardLogger(),
-		HealthInterval: time.Hour, // out of the way unless a test exercises the poll
+		Addr:        "127.0.0.1:10809",
+		Export:      "/vol/db",
+		Kernel:      kernel,
+		Dial:        pipeDialer(t, backend),
+		Logger:      discardLogger(),
+		WatchSocket: (&watchRecorder{}).watch, // fake conns have no real fd to watch
 	}
 }
 
@@ -282,7 +316,7 @@ func TestReconnectRefusesChangedVolume(t *testing.T) {
 	cfg := nbdclient.Config{
 		Addr: "127.0.0.1:10809", Export: "/vol/db",
 		Kernel: kernel, Dial: dial, Logger: discardLogger(),
-		HealthInterval: time.Hour,
+		WatchSocket: (&watchRecorder{}).watch,
 	}
 	s, err := nbdclient.Attach(context.Background(), cfg)
 	if err != nil {
@@ -310,15 +344,16 @@ func TestReconnectRefusesChangedVolume(t *testing.T) {
 	}
 }
 
-func TestPollFallbackDetectsDeadLink(t *testing.T) {
+func TestSocketWatchDrivesReconnect(t *testing.T) {
 	restoreFD := nbdclient.SetSocketFDForTest(func(net.Conn) (int, error) { return 42, nil })
 	defer restoreFD()
 	restoreBackoff := nbdclient.SetBackoffForTest(time.Millisecond, 5*time.Millisecond)
 	defer restoreBackoff()
 
 	kernel := &fakeKernel{index: 3}
+	watches := &watchRecorder{}
 	cfg := testConfig(t, kernel, memBackend{size: 1 << 20})
-	cfg.HealthInterval = 10 * time.Millisecond
+	cfg.WatchSocket = watches.watch
 
 	s, err := nbdclient.Attach(context.Background(), cfg)
 	if err != nil {
@@ -326,18 +361,26 @@ func TestPollFallbackDetectsDeadLink(t *testing.T) {
 	}
 	defer func() { _ = s.Detach(context.Background()) }()
 
-	// No Kick: only the poll can notice the dead link.
-	kernel.setConnected(false)
-	waitFor(t, "poll-driven reconnect", func() bool { return s.Reconnects() >= 1 })
+	if watched, _ := watches.counts(); watched != 1 {
+		t.Fatalf("watched fds = %d, want the attach connection watched", watched)
+	}
+	// The watcher noticing the peer die is what drives the reconnect; the
+	// fresh connection must be watched in turn.
+	watches.fireLatest()
+	waitFor(t, "watch-driven reconnect", func() bool { return s.Reconnects() >= 1 })
+	waitFor(t, "new connection watched", func() bool {
+		watched, _ := watches.counts()
+		return watched == 2
+	})
 }
 
-func TestAdoptHealthyAndDead(t *testing.T) {
+func TestAdoptResumesSupervision(t *testing.T) {
 	restoreFD := nbdclient.SetSocketFDForTest(func(net.Conn) (int, error) { return 42, nil })
 	defer restoreFD()
 	restoreBackoff := nbdclient.SetBackoffForTest(time.Millisecond, 5*time.Millisecond)
 	defer restoreBackoff()
 
-	kernel := &fakeKernel{index: 5, connected: true}
+	kernel := &fakeKernel{index: 5}
 	cfg := testConfig(t, kernel, memBackend{size: 1 << 20})
 
 	s, err := nbdclient.Adopt(context.Background(), cfg, 5, 1<<20)
@@ -347,19 +390,15 @@ func TestAdoptHealthyAndDead(t *testing.T) {
 	if s.State() != nbdclient.StateHealthy || s.Device() != "/dev/nbd5" {
 		t.Fatalf("adopted session: state=%s device=%s", s.State(), s.Device())
 	}
+	// An adopted device found dead (the caller probes it) is repaired via Kick.
+	s.Kick()
+	waitFor(t, "adoption repair", func() bool { return s.Reconnects() == 1 })
+	if got := kernel.snapshot().reconfigures; got != 1 {
+		t.Fatalf("reconfigures = %d, want 1", got)
+	}
 	if err := s.Detach(context.Background()); err != nil {
 		t.Fatalf("Detach: %v", err)
 	}
-
-	// Adopting a device whose link already died must repair it immediately.
-	kernel2 := &fakeKernel{index: 6, connected: false}
-	cfg2 := testConfig(t, kernel2, memBackend{size: 1 << 20})
-	s2, err := nbdclient.Adopt(context.Background(), cfg2, 6, 1<<20)
-	if err != nil {
-		t.Fatalf("Adopt (dead): %v", err)
-	}
-	defer func() { _ = s2.Detach(context.Background()) }()
-	waitFor(t, "adoption repair", func() bool { return s2.Reconnects() == 1 })
 }
 
 func TestStopLeavesDeviceAttached(t *testing.T) {

@@ -878,6 +878,27 @@ func (n *Namespace) ReleaseLease(path, holder string) error {
 	return nil
 }
 
+// ReleaseLeaseAt relinquishes holder's claim only if it is still the exact
+// acquisition stamped at — the compare-and-release a disconnecting writer
+// needs. When a volume's connection is re-established, the new connection
+// re-acquires the lease (same holder, newer HLC); the old connection's
+// teardown then must not vacate the claim the live connection depends on.
+// A non-matching lease is therefore success with no change, not an error.
+func (n *Namespace) ReleaseLeaseAt(path, holder string, at hlc.Timestamp) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	vol, err := n.resolveVolumeLocked(path)
+	if err != nil {
+		return err
+	}
+	if vol.lease.Value != holder || vol.lease.TS.Compare(at) != 0 {
+		return nil // a newer claim exists; releasing it is not ours to do
+	}
+	vol.lease = crdt.Set("", n.clock.Now())
+	n.persistLocked()
+	return nil
+}
+
 // Lease returns the volume's current single-writer claim; a zero Holder means
 // the volume is vacant.
 func (n *Namespace) Lease(path string) (Lease, error) {
