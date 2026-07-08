@@ -622,6 +622,18 @@ Upgrade order: drain is **not** required for an in-place binary swap (a restart
 re-reads the data dir and rejoins), but for a node you are also moving or
 reprovisioning, drain it first as above.
 
+**Volumes attached through the CSI driver survive the restart.** The node
+plugin watches every attachment and reconnects it the moment silod is back,
+while the kernel holds the volume's I/O — workloads see a short pause (a
+couple of seconds in practice), not an error. On shutdown silod also finishes
+answering the block requests it already accepted before closing, so an
+acknowledged write is never in doubt. The pause is bounded by the node
+plugin's `SILO_CSI_NBD_RECONNECT_TIMEOUT` (default `5m`,
+`silod.nbdReconnectTimeout` in the Helm chart); if silod stays away longer,
+the volume's I/O fails and the pod sees errors, so keep the window above your
+worst-case restart. Volumes attached manually with `nbd-client` do **not**
+get this — see [Block volumes over NBD](#block-volumes-over-nbd).
+
 ## Block volumes over NBD
 
 A silo volume is an extent map over immutable chunks. To serve it as a block
@@ -629,9 +641,19 @@ device, enable the NBD server (`SILO_NBD_ADDR`). A client attaches with the
 volume's path as the export name:
 
 ```sh
-nbd-client <silod-host> 10809 /dev/nbd0 -name /db -persist
+nbd-client <silod-host> 10809 /dev/nbd0 -name /db
 mkfs.ext4 /dev/nbd0 && mount /dev/nbd0 /mnt/db     # first use only; chunks are immutable
 ```
+
+> **A manual nbd-client attachment does not survive a silod restart.** Its
+> `-persist` flag looks like it should reconnect, but on modern kernels
+> nbd-client configures the device and exits, so nothing is left to
+> reconnect — the device fails its I/O instead, and the filesystem on top
+> usually shuts down until you unmount, re-attach, and fsck. The CSI node
+> plugin has its own supervised attach path that reconnects automatically and
+> is the recommended way to keep a volume mounted across restarts; a
+> `siloctl volume attach` with the same behaviour for bare-metal hosts is
+> roadmapped.
 
 Attaching takes the volume's **single-writer lease** and fences any stale
 holder, so moving a volume between hosts is safe — the old writer's writes are

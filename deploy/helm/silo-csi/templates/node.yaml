@@ -48,6 +48,8 @@ spec:
               value: unix:///csi/csi.sock
             - name: SILO_CSI_NBD_ADDR
               value: {{ .Values.silod.nbdAddress | quote }}
+            - name: SILO_CSI_NBD_RECONNECT_TIMEOUT
+              value: {{ .Values.silod.nbdReconnectTimeout | quote }}
             - name: SILO_CSI_NODE_ID
               valueFrom:
                 fieldRef:

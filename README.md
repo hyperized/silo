@@ -202,6 +202,7 @@ does on a write and why — is in **[docs/performance.md](docs/performance.md)**
 | Writer/reader SDKs, writer-owned chunks (no metadata round-trip on writes) | ✅ |
 | Block volumes: extent map, fenced single-writer lease, NBD server, COW snapshots | ✅ |
 | **Kubernetes CSI driver** — provision, attach, mount, snapshot, clone; Helm chart | ✅ |
+| Restart-resilient attachments — volumes pause and reconnect across silod rollouts, no I/O errors | ✅ |
 | FUSE (RWX) filesystem surface — from-scratch protocol library, close-to-open | ✅ |
 | Observability/ops — Prometheus metrics, **Grafana overview dashboard**, `siloctl status`, drain, capacity rebalance | ✅ |
 | Security hardening — cloud KMS keys (AWS/GCP/Azure), cert auto-rotation, CRL revocation, scoped capability tokens | ✅ |

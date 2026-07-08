@@ -19,7 +19,7 @@ GO_PKGS := ./...
 # `make fuzz FUZZTIME=60s` per target.
 FUZZTIME ?= 1000000x
 
-.PHONY: help up up-local down restart build images test test-cover test-integration bench bench-cluster fuzz lint fmt vet clean clean-creds logs status check proto nbd-demo nbd-demo-vm
+.PHONY: help up up-local down restart build images test test-cover test-integration test-nbd-kernel bench bench-cluster fuzz lint fmt vet clean clean-creds logs status check proto nbd-demo nbd-demo-vm
 .DEFAULT_GOAL := up
 
 help: ## Show this help and exit.
@@ -160,6 +160,13 @@ test-cover: ## Run unit tests and print coverage (excludes generated code).
 
 test-integration: ## Run integration tests (require docker, build-tag 'integration').
 	@go test $(GO_TEST_FLAGS) -tags=integration ./test/integration/...
+
+test-nbd-kernel: ## Run the NBD attach/reconnect test against a real kernel (privileged docker; needs /dev/nbd*).
+	@docker run --rm --privileged --network host \
+	  -v "$(CURDIR)":/src -w /src \
+	  -v silo-gomod:/go/pkg/mod -v silo-gocache:/root/.cache/go-build \
+	  golang:1.25-alpine \
+	  go test -tags integration -count=1 -run TestKernel -v ./internal/nbdclient/
 
 bench: ## Run the data-plane benchmarks (crypto, chunk store, placement, peers, volume).
 	@go test -run '^$$' -bench=. -benchmem ./internal/crypto/... ./internal/chunkstore/... ./internal/placement/... ./internal/replication/... ./internal/volume/...

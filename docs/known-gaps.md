@@ -17,6 +17,13 @@ environment has no `/dev/fuse`, no mount privileges, and no kernel nvme-tcp.
   mount. To close: run `silo-fuse <dir>` against a `make up` cluster on a host
   with the `fuse` module and `CAP_SYS_ADMIN`, then run the fstest suite.
 
+The NBD attach/reconnect path (`internal/nbdnl`, `internal/nbdclient`) is
+**not** on this list: `make test-nbd-kernel` exercises it against a real
+kernel in a privileged container (attach → device I/O → server death →
+reconnect → detach), and the whole stack was validated end-to-end on a
+3-node arm64 Kubernetes cluster (Talos, kernel 6.18), including silod
+rolling restarts under continuous checksummed writes.
+
 ## FUSE: opcodes not yet implemented
 
 The library covers the **core** opcodes. Deferred:
@@ -82,6 +89,13 @@ The library covers the **core** opcodes. Deferred:
   "attach only volume X" yet, and no RBAC mapped to namespace ACLs. Tokens also
   cannot be revoked individually before expiry (rely on short TTLs, or rotate the
   CA). Per-resource scoping and a token denylist are roadmapped.
+- **`siloctl volume attach` for bare-metal hosts.** The CSI node plugin's
+  supervised attach (reconnects across silod restarts) lives in
+  `internal/nbdclient`; a manual `nbd-client` attach gets none of that (its
+  `-persist` is a no-op on modern kernels — the netlink path configures the
+  device and exits, leaving nothing behind to reconnect). A
+  `siloctl volume attach/detach` built on the same package would give
+  non-Kubernetes hosts the same self-healing behaviour.
 - **Protocol version in the status RPC.** The rolling-upgrade handshake exposes
   each node's protocol via `silo_gossip_protocol_version` (and fences too-old
   peers), but `siloctl status` reports only the build semver, not the wire

@@ -81,9 +81,10 @@ How the pieces fit together:
    docker push registry.example.com/silo/silo-csi:v0.10.0
    ```
 
-   The `silo-csi` image bundles `nbd-client`, `mkfs.ext4`/`mkfs.xfs`, and
-   `mount`/`blkid` so the node plugin needs nothing extra on the host but the
-   kernel module.
+   The `silo-csi` image bundles `mkfs.ext4`/`mkfs.xfs` and `mount`/`blkid`
+   (plus `nbd-client` for manual recovery only — the plugin drives the
+   kernel's NBD interface directly), so the node plugin needs nothing extra
+   on the host but the kernel module.
 
 ---
 

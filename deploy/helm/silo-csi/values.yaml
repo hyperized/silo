@@ -17,6 +17,13 @@ silod:
   # through. With hostNetwork on the node DaemonSet, 127.0.0.1 reaches the
   # silod running on the same node.
   nbdAddress: "127.0.0.1:10809"
+  # nbdReconnectTimeout is how long a volume's I/O waits for silod to come
+  # back after its connection drops (a rolling restart, an upgrade, a crash)
+  # before erroring. During the wait the I/O is simply paused; once silod
+  # returns, the node plugin reconnects the volume and the I/O resumes as if
+  # nothing happened. The default comfortably covers a rolling restart
+  # including an image pull.
+  nbdReconnectTimeout: "5m"
   # tls mounts cluster client credentials so the controller talks mTLS to silod.
   # Leave secretName empty to connect insecurely (dev clusters only).
   tls:
