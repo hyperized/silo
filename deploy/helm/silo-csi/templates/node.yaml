@@ -60,6 +60,12 @@ spec:
             - name: pods-mount-dir
               mountPath: {{ $kubeletDir }}/pods
               mountPropagation: Bidirectional
+            # Raw block volumes publish under {kubeletDir}/plugins/kubernetes.io/csi/
+            # volumeDevices; without this mount the device bind-mount would land in
+            # the container's own mount namespace where the kubelet cannot see it.
+            - name: plugins-dir
+              mountPath: {{ $kubeletDir }}/plugins
+              mountPropagation: Bidirectional
             - name: dev-dir
               mountPath: /dev
           {{- with .Values.node.resources }}
@@ -90,6 +96,10 @@ spec:
         - name: pods-mount-dir
           hostPath:
             path: {{ $kubeletDir }}/pods
+            type: Directory
+        - name: plugins-dir
+          hostPath:
+            path: {{ $kubeletDir }}/plugins
             type: Directory
         - name: dev-dir
           hostPath:
