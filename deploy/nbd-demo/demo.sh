@@ -36,7 +36,7 @@ if ! modprobe nbd nbds_max=1 2>/dev/null; then
 fi
 
 echo "==> Attaching ${VOL} as ${DEV} over NBD (${NBD_HOST}:${NBD_PORT})"
-nbd-client "$NBD_HOST" "$NBD_PORT" "$DEV" -name "$VOL" -persist
+nbd-client "$NBD_HOST" "$NBD_PORT" "$DEV" -name "$VOL"
 
 echo "==> mkfs.ext4 + mount"
 mkfs.ext4 -q "$DEV"
@@ -53,7 +53,7 @@ umount "$MNT"
 nbd-client -d "$DEV"
 
 echo "==> Re-attaching and remounting to prove persistence"
-nbd-client "$NBD_HOST" "$NBD_PORT" "$DEV" -name "$VOL" -persist
+nbd-client "$NBD_HOST" "$NBD_PORT" "$DEV" -name "$VOL"
 mount "$DEV" "$MNT"
 echo "==> File survived the detach/re-attach round trip:"
 cat "$MNT/hello.txt"

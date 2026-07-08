@@ -106,19 +106,25 @@ func TestNegotiateHonoursContextDeadline(t *testing.T) {
 
 // fakeKernel records netlink operations and simulates device state.
 type fakeKernel struct {
-	mu           sync.Mutex
-	index        uint32
-	connected    bool
-	connects     int
-	reconfigures int
-	disconnects  int
-	connectCfg   nbdnl.ConnectConfig
-	reconfigErr  error
+	mu              sync.Mutex
+	index           uint32
+	connected       bool
+	connects        int
+	reconfigures    int
+	disconnects     int
+	disconnectCalls int
+	connectCfg      nbdnl.ConnectConfig
+	connectErr      error
+	reconfigErr     error
+	disconnectErr   error
 }
 
 func (k *fakeKernel) Connect(cfg nbdnl.ConnectConfig) (uint32, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.connectErr != nil {
+		return 0, k.connectErr
+	}
 	k.connects++
 	k.connectCfg = cfg
 	k.connected = true
@@ -139,6 +145,13 @@ func (k *fakeKernel) Reconfigure(uint32, int, time.Duration, time.Duration) erro
 func (k *fakeKernel) Disconnect(uint32) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	// disconnectCalls counts every invocation, disconnects only the successful
+	// ones — a test that clears disconnectErr can then prove whether a repeated
+	// Detach retried the disconnect or short-circuited.
+	k.disconnectCalls++
+	if k.disconnectErr != nil {
+		return k.disconnectErr
+	}
 	k.disconnects++
 	k.connected = false
 	return nil
@@ -154,16 +167,29 @@ func (k *fakeKernel) snapshot() fakeKernel {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return fakeKernel{
-		connects:     k.connects,
-		reconfigures: k.reconfigures,
-		disconnects:  k.disconnects,
-		connectCfg:   k.connectCfg,
+		connects:        k.connects,
+		reconfigures:    k.reconfigures,
+		disconnects:     k.disconnects,
+		disconnectCalls: k.disconnectCalls,
+		connectCfg:      k.connectCfg,
 	}
 }
 
 func (k *fakeKernel) setConnected(v bool) {
 	k.mu.Lock()
 	k.connected = v
+	k.mu.Unlock()
+}
+
+func (k *fakeKernel) setReconfigErr(err error) {
+	k.mu.Lock()
+	k.reconfigErr = err
+	k.mu.Unlock()
+}
+
+func (k *fakeKernel) setDisconnectErr(err error) {
+	k.mu.Lock()
+	k.disconnectErr = err
 	k.mu.Unlock()
 }
 

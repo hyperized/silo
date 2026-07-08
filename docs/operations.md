@@ -809,6 +809,17 @@ has a newer lease — this is the fence working. Whoever attached most recently
 owns the volume; the previous holder must re-acquire. With NBD/CSI this resolves
 automatically on the new attach.
 
+**A pod's volume turned read-only after a long silod outage.** If silod is
+unreachable for longer than the reconnect window (`SILO_CSI_NBD_RECONNECT_TIMEOUT`,
+default `5m`), the kernel fails the volume's queued I/O and ext4 remounts
+read-only to protect itself. The attachment itself heals automatically the
+moment silod is back — only the filesystem needs a fresh mount. Restart the pod:
+the remount replays the journal and everything written up to the last fsync is
+intact (verified under test — no data loss). If outages longer than the window
+are normal for your environment, raise `silod.nbdReconnectTimeout` in the Helm
+chart. Short outages (a rolling restart, a brief network blip) never get this
+far: I/O just pauses and resumes.
+
 **Clock-skew alerts.** `silo_hlc_clock_skew_alerts_total` is climbing — a peer's
 wall clock differs from this node's by more than `SILO_MAX_CLOCK_SKEW`. Fix NTP
 on the offending node; HLC keeps ordering correct, but large skew is a warning

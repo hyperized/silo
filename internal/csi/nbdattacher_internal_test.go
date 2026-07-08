@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -74,17 +75,18 @@ func (s *fakeSession) Stop() {
 // fakeBackend wires an attacher entirely onto fakes: sessions come from here,
 // no netlink, no sockets.
 type fakeBackend struct {
-	mu          sync.Mutex
-	nextIndex   uint32
-	attaches    []string
-	adopts      []uint32
-	sessions    map[string]*fakeSession
-	attachErr   error
-	adoptErr    error
-	configured  map[uint32]bool
-	dead        map[string]bool // devices whose probe should report a dead link
-	deadLinks   chan uint32
-	disconnects []uint32
+	mu            sync.Mutex
+	nextIndex     uint32
+	attaches      []string
+	adopts        []uint32
+	sessions      map[string]*fakeSession
+	attachErr     error
+	adoptErr      error
+	configured    map[uint32]bool
+	dead          map[string]bool // devices whose probe should report a dead link
+	deadLinks     chan uint32
+	disconnects   []uint32
+	disconnectErr error
 }
 
 func newFakeBackend() *fakeBackend {
@@ -143,6 +145,18 @@ func (b *fakeBackend) session(volume string) *fakeSession {
 	return b.sessions[volume]
 }
 
+func (b *fakeBackend) setDisconnectErr(err error) {
+	b.mu.Lock()
+	b.disconnectErr = err
+	b.mu.Unlock()
+}
+
+func (b *fakeBackend) disconnectsOf() []uint32 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]uint32(nil), b.disconnects...)
+}
+
 type fakeKernelNBD struct{ b *fakeBackend }
 
 func (k *fakeKernelNBD) Connect(nbdnl.ConnectConfig) (uint32, error) { return 0, nil }
@@ -153,6 +167,9 @@ func (k *fakeKernelNBD) Reconfigure(uint32, int, time.Duration, time.Duration) e
 func (k *fakeKernelNBD) Disconnect(index uint32) error {
 	k.b.mu.Lock()
 	defer k.b.mu.Unlock()
+	if k.b.disconnectErr != nil {
+		return k.b.disconnectErr
+	}
 	k.b.disconnects = append(k.b.disconnects, index)
 	return nil
 }
@@ -464,6 +481,143 @@ func TestDeviceConfiguredProbesSysfs(t *testing.T) {
 	// false for a device that does not exist.
 	if deviceConfigured(4294967294) {
 		t.Fatal("a nonexistent device cannot be configured")
+	}
+}
+
+func TestNewNBDAttacherWithoutBackendNeedsNetlink(t *testing.T) {
+	// With no backend option the constructor dials the real NBD netlink family.
+	// On the darwin dev box (and CI without the nbd module loaded) that dial
+	// fails, which is the branch under test. A host that happens to have a live
+	// nbd family is tolerated: close and skip rather than leave it dangling.
+	a, err := NewNBDAttacher("127.0.0.1:10809", WithStateDir(t.TempDir()), WithAttacherLogger(quietLogger()))
+	if err != nil {
+		return
+	}
+	_ = a.Close()
+	t.Skip("host has a live nbd netlink family; the no-backend failure path cannot be exercised here")
+}
+
+func TestNBDAttacherResumeKeepsRecordWhenAdoptFails(t *testing.T) {
+	dir := t.TempDir()
+	backend := newFakeBackend()
+	backend.configured[3] = true
+	backend.adoptErr = errors.New("device busy")
+	if err := newAttachmentStore(dir).save([]attachmentRecord{{Volume: "/vol/db", Index: 3, Size: 1 << 20}}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	a := newTestAttacher(t, backend, dir)
+
+	// A failed adoption keeps the record — in memory and on disk — but registers
+	// no session, so the device stays attached and a later publish can retry.
+	if backend.session("/vol/db") != nil {
+		t.Fatal("a failed adoption must not register a session")
+	}
+	h, ok := a.Health("/vol/db")
+	if !ok || h.State != nbdclient.StateReconnecting || h.Device != "/dev/nbd3" {
+		t.Fatalf("Health = (%+v, %v), want the record-only reconnecting branch", h, ok)
+	}
+	records, _ := newAttachmentStore(dir).load()
+	if len(records) != 1 || records[0].Volume != "/vol/db" {
+		t.Fatalf("persisted = %+v, want the record kept", records)
+	}
+
+	// Publishing it while adoption still fails must surface the actionable error.
+	if _, err := a.Attach(context.Background(), "/vol/db"); err == nil || !strings.Contains(err.Error(), "cannot be supervised") {
+		t.Fatalf("Attach = %v, want a 'cannot be supervised' error", err)
+	}
+}
+
+func TestNBDAttacherAttachPropagatesBackendError(t *testing.T) {
+	dir := t.TempDir()
+	backend := newFakeBackend()
+	backend.attachErr = errors.New("silod unreachable")
+	a := newTestAttacher(t, backend, dir)
+
+	if _, err := a.Attach(context.Background(), "/vol/db"); err == nil {
+		t.Fatal("Attach should propagate the backend attach error")
+	}
+	if _, ok := a.Health("/vol/db"); ok {
+		t.Fatal("a failed attach must record nothing")
+	}
+	records, _ := newAttachmentStore(dir).load()
+	if len(records) != 0 {
+		t.Fatalf("records = %+v, want none after a failed attach", records)
+	}
+}
+
+func TestNBDAttacherDetachDisconnectsUnsupervisedRecord(t *testing.T) {
+	dir := t.TempDir()
+	backend := newFakeBackend()
+	backend.configured[3] = true
+	backend.adoptErr = errors.New("cannot adopt yet") // resume keeps a record, no session
+	if err := newAttachmentStore(dir).save([]attachmentRecord{{Volume: "/vol/db", Index: 3, Size: 1 << 20}}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	a := newTestAttacher(t, backend, dir)
+	ctx := context.Background()
+
+	// First make the kernel Disconnect fail: Detach must surface it and keep the
+	// record, so a still-configured device is never silently forgotten.
+	backend.setDisconnectErr(errors.New("kernel busy"))
+	if err := a.Detach(ctx, "/vol/db"); err == nil {
+		t.Fatal("Detach should surface the kernel Disconnect failure")
+	}
+	if _, ok := a.Health("/vol/db"); !ok {
+		t.Fatal("a failed Detach must keep the record")
+	}
+
+	// Now let it succeed: an unsupervised but configured record is disconnected
+	// by index and removed.
+	backend.setDisconnectErr(nil)
+	if err := a.Detach(ctx, "/vol/db"); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+	if got := backend.disconnectsOf(); len(got) == 0 || got[len(got)-1] != 3 {
+		t.Fatalf("kernel disconnects = %v, want device 3 disconnected", got)
+	}
+	if _, ok := a.Health("/vol/db"); ok {
+		t.Fatal("the record must be gone after a successful Detach")
+	}
+}
+
+func TestNBDAttacherStartWatcherFailureIsNonFatal(t *testing.T) {
+	dir := t.TempDir()
+	backend := newFakeBackend()
+	failWatcher := func(a *NBDAttacher) {
+		a.newWatcher = func() (linkWatcher, error) { return nil, errors.New("mcast group unavailable") }
+	}
+	a, err := NewNBDAttacher(
+		"127.0.0.1:10809",
+		backend.option(),
+		failWatcher, // applied after the backend option, so it wins
+		WithStateDir(dir),
+		WithAttacherLogger(quietLogger()),
+	)
+	if err != nil {
+		t.Fatalf("a watcher failure must not fail construction: %v", err)
+	}
+	// Close must not hang when no watcher goroutine ever started.
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestAttachmentStoreSaveIntoMissingDirErrors(t *testing.T) {
+	store := newAttachmentStore(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err := store.save([]attachmentRecord{{Volume: "/v", Index: 1, Size: 1}}); err == nil {
+		t.Fatal("save into a missing directory should error")
+	}
+}
+
+func TestAttachmentStoreLoadWrongShapeErrors(t *testing.T) {
+	dir := t.TempDir()
+	// Valid JSON, wrong shape: an object where a record array is expected.
+	if err := os.WriteFile(filepath.Join(dir, "attachments.json"), []byte(`{"a":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := newAttachmentStore(dir).load()
+	if err == nil || !strings.Contains(err.Error(), "corrupt") {
+		t.Fatalf("load of wrong-shape JSON = %v, want a corrupt-state error", err)
 	}
 }
 

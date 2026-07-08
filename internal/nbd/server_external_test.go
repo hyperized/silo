@@ -1124,3 +1124,45 @@ type blockingBackend struct{ dev *blockingDevice }
 func (b *blockingBackend) Open(context.Context, string) (nbd.Device, func(), error) {
 	return b.dev, func() {}, nil
 }
+
+// TestServer_ShutdownCutsHandshakingConnections: a connection that never
+// completes the handshake has nothing in flight worth draining — shutdown
+// closes it immediately.
+func TestServer_ShutdownCutsHandshakingConnections(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	// A nil logger exercises the slog.Default fallback; a zero drain grace is
+	// ignored in favour of the default.
+	srv := nbd.NewServer(&backend{dev: &memDevice{data: make([]byte, 512)}}, nil, nbd.WithDrainGrace(0))
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ctx, ln) }()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	// Read the greeting but never send client flags: mid-handshake forever.
+	greeting := make([]byte, 18)
+	if _, err := io.ReadFull(conn, greeting); err != nil {
+		t.Fatalf("greeting: %v", err)
+	}
+
+	cancel()
+	_ = ln.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(conn, greeting[:1]); err == nil {
+		t.Fatal("a handshaking connection should be cut at shutdown")
+	}
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("Serve returned %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return")
+	}
+}

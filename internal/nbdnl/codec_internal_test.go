@@ -2,8 +2,6 @@ package nbdnl
 
 import (
 	"encoding/binary"
-	"errors"
-	"strings"
 	"testing"
 	"time"
 )
@@ -132,14 +130,16 @@ func TestParseMessagesAckAndError(t *testing.T) {
 		t.Fatalf("ack parse: msgs=%+v err=%v", msgs, err)
 	}
 
-	// errno -2 (ENOENT) in native byte order, two's complement.
+	// errno -2 (ENOENT) in native byte order, two's complement. The message
+	// text is platform-specific (the linux build maps codes to real errnos),
+	// so only the presence of an error is asserted here.
 	nlerr := nlBytes(uint32(20), nlmsgError, uint16(0), uint32(5), uint32(0), uint32(0xfffffffe))
 	msgs, err = parseMessages(nlerr)
 	if err != nil || len(msgs) != 1 || msgs[0].Err == nil {
 		t.Fatalf("error parse: msgs=%+v err=%v", msgs, err)
 	}
-	if !strings.Contains(msgs[0].Err.Error(), "2") {
-		t.Fatalf("errno should surface in the error, got %v", msgs[0].Err)
+	if msgs[0].Err.Error() == "" {
+		t.Fatal("the errno error should carry a message")
 	}
 }
 
@@ -306,13 +306,13 @@ func TestSecondsRoundsUp(t *testing.T) {
 	}
 }
 
-func TestErrnoToErrorDefault(t *testing.T) {
+func TestErrnoToError(t *testing.T) {
+	// The mapping is platform-specific: the linux build swaps in real errnos
+	// at init, elsewhere the numeric fallback names the code. Either way a
+	// negative kernel code must become a non-empty error.
 	err := errnoToError(-13)
-	if err == nil || !strings.Contains(err.Error(), "13") {
-		t.Fatalf("default errno mapping should mention the code, got %v", err)
-	}
-	if errors.Is(err, errors.New("x")) {
-		t.Fatal("sanity: errors.Is misbehaving")
+	if err == nil || err.Error() == "" {
+		t.Fatalf("errno mapping produced no error: %v", err)
 	}
 }
 
@@ -373,5 +373,91 @@ func TestRequestConstructors(t *testing.T) {
 	}
 	if idx, _ := requireAttr(t, stat, nbdAttrIndex).U32(); idx != 2 {
 		t.Fatalf("status index = %d", idx)
+	}
+}
+
+func TestRawAttrShortInputs(t *testing.T) {
+	short := rawAttr{Typ: 1, Data: []byte{0xaa}}
+	if _, err := short.U16(); err == nil {
+		t.Fatal("U16 accepted a 1-byte attribute")
+	}
+	if _, err := short.U32(); err == nil {
+		t.Fatal("U32 accepted a 1-byte attribute")
+	}
+	if _, err := (rawAttr{Typ: 1}).U8(); err == nil {
+		t.Fatal("U8 accepted an empty attribute")
+	}
+	// A netlink string without a NUL terminator is returned whole.
+	if s := (rawAttr{Typ: 1, Data: []byte("nbd")}).String(); s != "nbd" {
+		t.Fatalf("String without NUL = %q, want nbd", s)
+	}
+}
+
+func TestParseRepliesTolerateSparseAttrs(t *testing.T) {
+	// LINK_DEAD without an index is not a usable notification.
+	dead := marshalMessage(0x1d, 0, 0, 0, nbdCmdLinkDead, nbdGenlVersion, nil)
+	msgs, _ := parseMessages(dead)
+	if _, ok := parseLinkDead(msgs[0]); ok {
+		t.Fatal("parseLinkDead invented an index")
+	}
+	// A LINK_DEAD whose index attribute is too short is likewise ignored.
+	deadShort := marshalMessage(0x1d, 0, 0, 0, nbdCmdLinkDead, nbdGenlVersion,
+		[]attr{{typ: nbdAttrIndex, data: []byte{1}}})
+	msgs, _ = parseMessages(deadShort)
+	if _, ok := parseLinkDead(msgs[0]); ok {
+		t.Fatal("parseLinkDead accepted a short index")
+	}
+
+	// Status items lacking index or connected fields are skipped, not fatal.
+	status := marshalMessage(0x1d, 0, 1, 0, nbdCmdStatus, nbdGenlVersion, []attr{
+		nest(nbdAttrDeviceList,
+			nest(nbdDeviceItem, u32Attr(nbdDeviceIndex, 9)), // no connected flag
+			nest(nbdDeviceItem,
+				u32Attr(nbdDeviceIndex, 2),
+				attr{typ: nbdDeviceConnected, data: []byte{1}},
+			),
+		),
+	})
+	msgs, _ = parseMessages(status)
+	if connected, err := parseStatusReply(msgs[0], 2); err != nil || !connected {
+		t.Fatalf("sparse status reply: connected=%v err=%v", connected, err)
+	}
+
+	// Malformed nested payloads surface as errors.
+	badNested := marshalMessage(0x1d, 0, 1, 0, nbdCmdStatus, nbdGenlVersion,
+		[]attr{{typ: nbdAttrDeviceList | nlaFNested, data: []byte{9, 0, 1}}})
+	msgs, _ = parseMessages(badNested)
+	if _, err := parseStatusReply(msgs[0], 2); err == nil {
+		t.Fatal("parseStatusReply accepted a malformed device list")
+	}
+
+	// Family reply: groups missing name or id are skipped; malformed nested
+	// group data errors.
+	fam := marshalMessage(genlIDCtrl, 0, 1, 0, 1, 2, []attr{
+		{typ: ctrlAttrFamilyID, data: binary.NativeEndian.AppendUint16(nil, 0x1d)},
+		nest(ctrlAttrMcastGroups,
+			nest(1, stringAttr(ctrlAttrMcastGrpName, "half")), // no id
+		),
+	})
+	msgs, _ = parseMessages(fam)
+	info, err := parseFamilyReply(msgs[0])
+	if err != nil || len(info.groups) != 0 {
+		t.Fatalf("sparse family reply: groups=%v err=%v", info.groups, err)
+	}
+	famBad := marshalMessage(genlIDCtrl, 0, 1, 0, 1, 2, []attr{
+		{typ: ctrlAttrFamilyID, data: binary.NativeEndian.AppendUint16(nil, 0x1d)},
+		{typ: ctrlAttrMcastGroups | nlaFNested, data: []byte{9, 0, 1}},
+	})
+	msgs, _ = parseMessages(famBad)
+	if _, err := parseFamilyReply(msgs[0]); err == nil {
+		t.Fatal("parseFamilyReply accepted malformed group data")
+	}
+
+	// A connect reply whose index is too short errors rather than misreading.
+	conn := marshalMessage(0x1d, 0, 1, 0, nbdCmdConnect, nbdGenlVersion,
+		[]attr{{typ: nbdAttrIndex, data: []byte{5}}})
+	msgs, _ = parseMessages(conn)
+	if _, err := parseConnectReply(msgs[0]); err == nil {
+		t.Fatal("parseConnectReply accepted a short index")
 	}
 }
