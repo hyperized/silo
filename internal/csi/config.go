@@ -1,6 +1,9 @@
 package csi
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Mode selects which CSI services a silo-csi process runs. In Kubernetes the
 // controller runs once per cluster (a Deployment) and the node plugin runs on
@@ -39,6 +42,14 @@ type Config struct {
 	// NBDAddr is the local silod NBD address the node plugin attaches volumes
 	// through.
 	NBDAddr string
+	// NBDReconnectTimeout is how long a volume's I/O waits for silod to come
+	// back after its connection drops (a restart, an upgrade) before erroring.
+	// During the wait the kernel queues the I/O; once silod returns, it resumes
+	// as if nothing happened.
+	NBDReconnectTimeout time.Duration
+	// StateDir is where the node plugin remembers its attachments across
+	// restarts; it must be a host-backed directory (the CSI plugin dir).
+	StateDir string
 	// LogLevel and LogFormat configure structured logging, matching silod.
 	LogLevel  string
 	LogFormat string
@@ -52,6 +63,12 @@ const (
 	DefaultMode      = ModeAll
 	DefaultSilodAddr = "127.0.0.1:7000"
 	DefaultNBDAddr   = "127.0.0.1:10809"
+	// DefaultNBDReconnectTimeout comfortably covers a rolling silod restart,
+	// including an image pull on a slow link.
+	DefaultNBDReconnectTimeout = 5 * time.Minute
+	// DefaultStateDir is the conventional CSI plugin directory, mounted from
+	// the host in the node DaemonSet.
+	DefaultStateDir = "/csi"
 )
 
 // LoadConfig reads silo-csi's configuration from getenv (os.Getenv in
@@ -60,13 +77,22 @@ const (
 // LoadConfig stays free of host lookups and easy to test.
 func LoadConfig(getenv func(string) string) (Config, error) {
 	cfg := Config{
-		Endpoint:  envOr(getenv, "SILO_CSI_ENDPOINT", DefaultEndpoint),
-		Mode:      Mode(envOr(getenv, "SILO_CSI_MODE", string(DefaultMode))),
-		SilodAddr: envOr(getenv, "SILO_SERVER", DefaultSilodAddr),
-		NodeID:    getenv("SILO_CSI_NODE_ID"),
-		NBDAddr:   envOr(getenv, "SILO_CSI_NBD_ADDR", DefaultNBDAddr),
-		LogLevel:  envOr(getenv, "SILO_LOG_LEVEL", "info"),
-		LogFormat: envOr(getenv, "SILO_LOG_FORMAT", "json"),
+		Endpoint:            envOr(getenv, "SILO_CSI_ENDPOINT", DefaultEndpoint),
+		Mode:                Mode(envOr(getenv, "SILO_CSI_MODE", string(DefaultMode))),
+		SilodAddr:           envOr(getenv, "SILO_SERVER", DefaultSilodAddr),
+		NodeID:              getenv("SILO_CSI_NODE_ID"),
+		NBDAddr:             envOr(getenv, "SILO_CSI_NBD_ADDR", DefaultNBDAddr),
+		NBDReconnectTimeout: DefaultNBDReconnectTimeout,
+		StateDir:            envOr(getenv, "SILO_CSI_STATE_DIR", DefaultStateDir),
+		LogLevel:            envOr(getenv, "SILO_LOG_LEVEL", "info"),
+		LogFormat:           envOr(getenv, "SILO_LOG_FORMAT", "json"),
+	}
+	if v := getenv("SILO_CSI_NBD_RECONNECT_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("SILO_CSI_NBD_RECONNECT_TIMEOUT %q is not a positive duration; use a value like 5m (how long a volume's I/O waits for silod to come back before erroring)", v)
+		}
+		cfg.NBDReconnectTimeout = d
 	}
 	switch cfg.Mode {
 	case ModeController, ModeNode, ModeAll:

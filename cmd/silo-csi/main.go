@@ -28,6 +28,22 @@ var signalContext = func() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
+// newAttacher builds the node plugin's volume attacher; swappable so tests can
+// run node mode on hosts without a Linux NBD stack. The returned closer stops
+// supervision goroutines only — attached devices keep serving I/O across a
+// plugin restart and are re-adopted on start.
+var newAttacher = func(cfg csi.Config, logger *slog.Logger) (csi.VolumeAttacher, func() error, error) {
+	a, err := csi.NewNBDAttacher(cfg.NBDAddr,
+		csi.WithReconnectWindow(cfg.NBDReconnectTimeout),
+		csi.WithStateDir(cfg.StateDir),
+		csi.WithAttacherLogger(logger),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return a, a.Close, nil
+}
+
 func main() {
 	os.Exit(runMain(os.Stdout, os.Stderr))
 }
@@ -68,13 +84,14 @@ func runMain(stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "silo-csi: %v\n", err)
 			return 1
 		}
-		attacher, err := csi.NewNBDAttacher(cfg.NBDAddr)
+		attacher, closeAttacher, err := newAttacher(cfg, logger)
 		if err != nil {
 			fmt.Fprintf(stderr, "silo-csi: %v\n", err)
 			return 1
 		}
+		defer func() { _ = closeAttacher() }()
 		opts = append(opts, csi.WithNode(csi.NewNodeService(nodeID, attacher, csi.NewHostMounter())))
-		logger.Info("silo-csi node enabled", "node", nodeID, "nbd", cfg.NBDAddr)
+		logger.Info("silo-csi node enabled", "node", nodeID, "nbd", cfg.NBDAddr, "reconnect_timeout", cfg.NBDReconnectTimeout.String())
 	}
 
 	ctx, cancel := signalContext()

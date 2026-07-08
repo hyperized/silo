@@ -3,6 +3,7 @@ package csi_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -180,19 +181,85 @@ func TestNodeInfoCapabilitiesAndUnimplemented(t *testing.T) {
 		t.Errorf("NodeGetInfo = (%v, %v), want node-7", info, err)
 	}
 	caps, err := svc.NodeGetCapabilities(ctx, &csiv1.NodeGetCapabilitiesRequest{})
-	if err != nil || len(caps.GetCapabilities()) != 0 {
-		t.Errorf("NodeGetCapabilities = (%v, %v), want none", caps, err)
+	if err != nil {
+		t.Fatalf("NodeGetCapabilities: %v", err)
+	}
+	var got []csiv1.NodeServiceCapability_RPC_Type
+	for _, c := range caps.GetCapabilities() {
+		got = append(got, c.GetRpc().GetType())
+	}
+	want := []csiv1.NodeServiceCapability_RPC_Type{
+		csiv1.NodeServiceCapability_RPC_GET_VOLUME_STATS,
+		csiv1.NodeServiceCapability_RPC_VOLUME_CONDITION,
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("NodeGetCapabilities = %v, want %v", got, want)
 	}
 
 	checks := []func() error{
 		func() error { _, err := svc.NodeStageVolume(ctx, &csiv1.NodeStageVolumeRequest{}); return err },
 		func() error { _, err := svc.NodeUnstageVolume(ctx, &csiv1.NodeUnstageVolumeRequest{}); return err },
-		func() error { _, err := svc.NodeGetVolumeStats(ctx, &csiv1.NodeGetVolumeStatsRequest{}); return err },
 		func() error { _, err := svc.NodeExpandVolume(ctx, &csiv1.NodeExpandVolumeRequest{}); return err },
 	}
 	for i, check := range checks {
 		if status.Code(check()) != codes.Unimplemented {
 			t.Errorf("node check %d: want Unimplemented", i)
 		}
+	}
+}
+
+// healthyFakeAttacher extends the fake with the health surface the stats RPC
+// consumes, standing in for the real NBD attacher.
+type healthyFakeAttacher struct {
+	fakeAttacher
+	health map[string]csi.AttachmentHealth
+}
+
+func (f *healthyFakeAttacher) Health(volumePath string) (csi.AttachmentHealth, bool) {
+	h, ok := f.health[volumePath]
+	return h, ok
+}
+
+func TestNodeGetVolumeStats(t *testing.T) {
+	ctx := context.Background()
+	att := &healthyFakeAttacher{health: map[string]csi.AttachmentHealth{
+		"/csi/volumes/pvc-1": {Device: "/dev/nbd0", State: "healthy"},
+		"/csi/volumes/pvc-2": {Device: "/dev/nbd1", State: "reconnecting", Reconnects: 3},
+	}}
+	svc := csi.NewNodeService("n", att, &fakeMounter{})
+
+	// A healthy attachment reports a normal condition.
+	resp, err := svc.NodeGetVolumeStats(ctx, &csiv1.NodeGetVolumeStatsRequest{VolumeId: "/csi/volumes/pvc-1", VolumePath: "/t"})
+	if err != nil {
+		t.Fatalf("NodeGetVolumeStats: %v", err)
+	}
+	if resp.GetVolumeCondition().GetAbnormal() {
+		t.Errorf("healthy volume reported abnormal: %v", resp.GetVolumeCondition())
+	}
+
+	// A reconnecting attachment reports an abnormal condition that tells the
+	// operator what is happening and where to look.
+	resp, err = svc.NodeGetVolumeStats(ctx, &csiv1.NodeGetVolumeStatsRequest{VolumeId: "/csi/volumes/pvc-2", VolumePath: "/t"})
+	if err != nil {
+		t.Fatalf("NodeGetVolumeStats (reconnecting): %v", err)
+	}
+	cond := resp.GetVolumeCondition()
+	if !cond.GetAbnormal() || !strings.Contains(cond.GetMessage(), "silod") {
+		t.Errorf("reconnecting condition = %v, want abnormal with instructions", cond)
+	}
+
+	// Unknown volumes are NotFound; missing arguments are InvalidArgument.
+	if _, err := svc.NodeGetVolumeStats(ctx, &csiv1.NodeGetVolumeStatsRequest{VolumeId: "/nope", VolumePath: "/t"}); status.Code(err) != codes.NotFound {
+		t.Errorf("unknown volume = %v, want NotFound", status.Code(err))
+	}
+	if _, err := svc.NodeGetVolumeStats(ctx, &csiv1.NodeGetVolumeStatsRequest{VolumeId: "/v"}); status.Code(err) != codes.InvalidArgument {
+		t.Errorf("missing path = %v, want InvalidArgument", status.Code(err))
+	}
+
+	// An attacher without the health surface answers Unimplemented rather
+	// than inventing a condition.
+	plain := csi.NewNodeService("n", &fakeAttacher{}, &fakeMounter{})
+	if _, err := plain.NodeGetVolumeStats(ctx, &csiv1.NodeGetVolumeStatsRequest{VolumeId: "/v", VolumePath: "/t"}); status.Code(err) != codes.Unimplemented {
+		t.Errorf("health-less attacher = %v, want Unimplemented", status.Code(err))
 	}
 }
