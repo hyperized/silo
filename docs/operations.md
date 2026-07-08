@@ -634,6 +634,25 @@ the volume's I/O fails and the pod sees errors, so keep the window above your
 worst-case restart. Volumes attached manually with `nbd-client` do **not**
 get this — see [Block volumes over NBD](#block-volumes-over-nbd).
 
+**Rebooting a node: drain it first, or configure kubelet graceful node
+shutdown.** A whole-node shutdown kills the workload pods, silod, and the
+node plugin with no ordering between them. If a pod still has writes in
+flight on an attached volume when silod dies, those writes have no server to
+go to and no supervisor left to reconnect them — the kernel requeues them
+indefinitely, the volume's unmount blocks, and the node's shutdown can hang
+until someone cuts the power (observed on Talos: the reboot held a stuck
+`nbd0` write for 20+ minutes until a BMC reset). No data is lost either way —
+everything up to the last fsync survives even a power cut — but the hang is
+real. Two ways to make node reboots orderly:
+
+- **Drain before maintenance** (`kubectl drain <node>`): pods leave, their
+  volumes unmount and detach cleanly, then nothing holds the shutdown.
+- **Kubelet graceful node shutdown**: give workload pods a shutdown grace
+  period longer than the system pods' so their unmounts complete while silod
+  is still running (on Talos, `machine.kubelet.extraConfig` with
+  `shutdownGracePeriod`/`shutdownGracePeriodCriticalPods`), and run silod
+  with `priorityClassName: system-node-critical` so it is stopped last.
+
 ## Block volumes over NBD
 
 A silo volume is an extent map over immutable chunks. To serve it as a block
