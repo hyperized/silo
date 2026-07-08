@@ -188,7 +188,9 @@ func (a *NBDAttacher) resume() {
 		kept = append(kept, rec)
 	}
 	if len(kept) != len(records) {
-		a.persistLocked()
+		if err := a.persistLocked(); err != nil {
+			a.logger.Warn("could not persist the pruned attachment state", "error", err)
+		}
 	}
 }
 

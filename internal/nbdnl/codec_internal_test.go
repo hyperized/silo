@@ -41,7 +41,7 @@ func TestMarshalMessageLayout(t *testing.T) {
 		uint32(7),          // sequence
 		uint32(99),         // port id
 		[]byte{1, 1, 0, 0}, // genl: cmd=CONNECT version=1 reserved
-		uint16(8), uint16(nbdAttrIndex), uint32(3),
+		uint16(8), nbdAttrIndex, uint32(3),
 	)
 	if string(msg) != string(want) {
 		t.Fatalf("marshalMessage layout mismatch\n got %v\nwant %v", msg, want)
@@ -146,9 +146,11 @@ func TestParseMessagesAckAndError(t *testing.T) {
 func TestFamilyReplyRoundTrip(t *testing.T) {
 	reply := marshalMessage(genlIDCtrl, 0, 1, 0, 1, 2, []attr{
 		stringAttr(ctrlAttrFamilyName, "nbd"),
-		attr{typ: ctrlAttrFamilyID, data: binary.NativeEndian.AppendUint16(nil, 0x1d)},
-		nest(ctrlAttrMcastGroups,
-			nest(1,
+		{typ: ctrlAttrFamilyID, data: binary.NativeEndian.AppendUint16(nil, 0x1d)},
+		nest(
+			ctrlAttrMcastGroups,
+			nest(
+				1,
 				stringAttr(ctrlAttrMcastGrpName, nbdMcastGroup),
 				u32Attr(ctrlAttrMcastGrpID, 7),
 			),
@@ -214,12 +216,15 @@ func TestConnectReplyAndLinkDead(t *testing.T) {
 
 func TestParseStatusReply(t *testing.T) {
 	reply := marshalMessage(0x1d, 0, 1, 0, nbdCmdStatus, nbdGenlVersion, []attr{
-		nest(nbdAttrDeviceList,
-			nest(nbdDeviceItem,
+		nest(
+			nbdAttrDeviceList,
+			nest(
+				nbdDeviceItem,
 				u32Attr(nbdDeviceIndex, 2),
 				attr{typ: nbdDeviceConnected, data: []byte{1}},
 			),
-			nest(nbdDeviceItem,
+			nest(
+				nbdDeviceItem,
 				u32Attr(nbdDeviceIndex, 3),
 				attr{typ: nbdDeviceConnected, data: []byte{0}},
 			),
@@ -308,5 +313,65 @@ func TestErrnoToErrorDefault(t *testing.T) {
 	}
 	if errors.Is(err, errors.New("x")) {
 		t.Fatal("sanity: errors.Is misbehaving")
+	}
+}
+
+// TestRequestConstructors pins the wire shape of every command the linux
+// driver sends, by parsing each constructed request back.
+func TestRequestConstructors(t *testing.T) {
+	requireAttr := func(t *testing.T, m message, typ uint16) rawAttr {
+		t.Helper()
+		a, ok := attrByType(m.Attrs, typ)
+		if !ok {
+			t.Fatalf("request lacks attribute %d", typ)
+		}
+		return a
+	}
+	parseOne := func(t *testing.T, buf []byte) message {
+		t.Helper()
+		msgs, err := parseMessages(buf)
+		if err != nil || len(msgs) != 1 {
+			t.Fatalf("parse: msgs=%d err=%v", len(msgs), err)
+		}
+		return msgs[0]
+	}
+
+	fam := parseOne(t, getFamilyRequest(1, 10, nbdFamilyName))
+	if fam.Type != genlIDCtrl || fam.Cmd != ctrlCmdGetFamily {
+		t.Fatalf("family request header: %+v", fam)
+	}
+	if name := requireAttr(t, fam, ctrlAttrFamilyName).String(); name != "nbd" {
+		t.Fatalf("family name = %q", name)
+	}
+
+	reconf := parseOne(t, reconfigureRequest(0x1d, 2, 10, 4, 9, 0, 2*time.Minute))
+	if reconf.Cmd != nbdCmdReconfigure {
+		t.Fatalf("reconfigure cmd = %d", reconf.Cmd)
+	}
+	if idx, err := requireAttr(t, reconf, nbdAttrIndex).U32(); err != nil || idx != 4 {
+		t.Fatalf("reconfigure index = (%d, %v)", idx, err)
+	}
+	if _, ok := attrByType(reconf.Attrs, nbdAttrTimeout); ok {
+		t.Fatal("a zero io timeout must not be sent")
+	}
+	sockets, err := requireAttr(t, reconf, nbdAttrSockets).Nested()
+	if err != nil || len(sockets) != 1 {
+		t.Fatalf("reconfigure sockets: %v %v", sockets, err)
+	}
+
+	disc := parseOne(t, disconnectRequest(0x1d, 3, 10, 6))
+	if disc.Cmd != nbdCmdDisconnect {
+		t.Fatalf("disconnect cmd = %d", disc.Cmd)
+	}
+	if idx, _ := requireAttr(t, disc, nbdAttrIndex).U32(); idx != 6 {
+		t.Fatalf("disconnect index = %d", idx)
+	}
+
+	stat := parseOne(t, statusRequest(0x1d, 4, 10, 2))
+	if stat.Cmd != nbdCmdStatus {
+		t.Fatalf("status cmd = %d", stat.Cmd)
+	}
+	if idx, _ := requireAttr(t, stat, nbdAttrIndex).U32(); idx != 2 {
+		t.Fatalf("status index = %d", idx)
 	}
 }

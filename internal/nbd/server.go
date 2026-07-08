@@ -16,6 +16,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Protocol magics and flags (see the NBD protocol spec).
@@ -83,31 +84,55 @@ type Backend interface {
 	Open(ctx context.Context, export string) (dev Device, release func(), err error)
 }
 
+// defaultDrainGrace bounds how long a shutdown waits for in-flight requests
+// to finish and their replies to flush before connections are cut. It must
+// fit inside silod's overall shutdown budget.
+const defaultDrainGrace = 3 * time.Second
+
 // Server serves NBD over accepted connections, one Device per connection.
 type Server struct {
-	backend Backend
-	logger  *slog.Logger
+	backend    Backend
+	logger     *slog.Logger
+	drainGrace time.Duration
+}
+
+// ServerOption configures a Server.
+type ServerOption func(*Server)
+
+// WithDrainGrace bounds the shutdown drain: how long in-flight requests get
+// to finish and reply before their connections are cut.
+func WithDrainGrace(d time.Duration) ServerOption {
+	return func(s *Server) {
+		if d > 0 {
+			s.drainGrace = d
+		}
+	}
 }
 
 // NewServer wires a backend onto the NBD protocol. A nil logger defaults to
 // slog.Default.
-func NewServer(backend Backend, logger *slog.Logger) *Server {
+func NewServer(backend Backend, logger *slog.Logger, opts ...ServerOption) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{backend: backend, logger: logger}
+	s := &Server{backend: backend, logger: logger, drainGrace: defaultDrainGrace}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Serve accepts connections until ctx is cancelled or the listener errors,
-// handling each in its own goroutine. On cancellation it closes every
-// in-flight connection so a transmit loop blocked reading the next request
-// unblocks and its goroutine exits, then waits for them to drain — a graceful
-// shutdown rather than leaving established sessions running until the client
-// happens to disconnect.
+// handling each in its own goroutine. On cancellation it drains: every
+// transmitting connection stops reading new requests, finishes its in-flight
+// ones and delivers their replies, then closes — so a client never loses a
+// write it was told succeeded to a rollout. Connections still handshaking,
+// and any drain that outlives the grace period, are cut hard; the kernel
+// client re-sends whatever went unreplied once it reconnects.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	var (
 		mu      sync.Mutex
-		conns   = map[net.Conn]struct{}{}
+		conns   = map[net.Conn]*connState{} // nil until transmission starts
 		closing bool
 		wg      sync.WaitGroup
 	)
@@ -120,7 +145,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		if closing {
 			return false
 		}
-		conns[c] = struct{}{}
+		conns[c] = nil
 		return true
 	}
 	untrack := func(c net.Conn) {
@@ -128,25 +153,61 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		delete(conns, c)
 		mu.Unlock()
 	}
-	closeAll := func() {
+	// register attaches the transmission state once the handshake completes,
+	// making the connection drainable. It reports false during shutdown: the
+	// connection is already being closed, transmission must not start.
+	register := func(c net.Conn, cs *connState) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if closing {
+			return false
+		}
+		conns[c] = cs
+		return true
+	}
+	beginShutdown := func() *time.Timer {
 		mu.Lock()
 		closing = true
-		live := make([]net.Conn, 0, len(conns))
-		for c := range conns {
-			live = append(live, c)
+		live := make(map[net.Conn]*connState, len(conns))
+		for c, cs := range conns {
+			live[c] = cs
 		}
 		mu.Unlock()
-		for _, c := range live {
-			_ = c.Close()
+		for c, cs := range live {
+			if cs != nil {
+				cs.beginDrain()
+			} else {
+				_ = c.Close() // still handshaking: nothing in flight to save
+			}
 		}
+		// The grace bound: whatever has not drained by then is cut, keeping
+		// shutdown inside silod's budget even if a device write is stuck.
+		return time.AfterFunc(s.drainGrace, func() {
+			mu.Lock()
+			remaining := make([]net.Conn, 0, len(conns))
+			for c := range conns {
+				remaining = append(remaining, c)
+			}
+			mu.Unlock()
+			for _, c := range remaining {
+				_ = c.Close()
+			}
+		})
 	}
 
 	stop := make(chan struct{})
 	defer close(stop)
+	var (
+		graceMu    sync.Mutex
+		graceTimer *time.Timer
+	)
 	go func() {
 		select {
 		case <-ctx.Done():
-			closeAll()
+			t := beginShutdown()
+			graceMu.Lock()
+			graceTimer = t
+			graceMu.Unlock()
 		case <-stop:
 		}
 	}()
@@ -155,7 +216,12 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
-				wg.Wait() // let the closed in-flight connections drain
+				wg.Wait() // wait for the drain to finish delivering replies
+				graceMu.Lock()
+				if graceTimer != nil {
+					graceTimer.Stop()
+				}
+				graceMu.Unlock()
 				return nil
 			}
 			return fmt.Errorf("nbd: accept failed (%w)", err)
@@ -168,7 +234,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		go func() {
 			defer wg.Done()
 			defer untrack(conn)
-			if err := s.ServeConn(ctx, conn); err != nil {
+			if err := s.serveConn(ctx, conn, register); err != nil {
 				s.logger.Warn("nbd connection ended", "error", err)
 			}
 		}()
@@ -178,6 +244,13 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 // ServeConn runs the handshake and transmission phases on one connection,
 // closing it on return. Exported so a test can drive it over a pipe.
 func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
+	return s.serveConn(ctx, conn, nil)
+}
+
+// serveConn is ServeConn with an optional registration hook that makes the
+// connection drainable once transmission starts; register reporting false
+// means the server is shutting down and the connection must end instead.
+func (s *Server) serveConn(ctx context.Context, conn net.Conn, register func(net.Conn, *connState) bool) error {
 	defer func() { _ = conn.Close() }()
 
 	dev, release, export, err := s.handshake(ctx, conn)
@@ -190,15 +263,20 @@ func (s *Server) ServeConn(ctx context.Context, conn net.Conn) error {
 	if release != nil {
 		defer release()
 	}
+	cs := &connState{conn: conn, dev: dev, logger: s.logger, sem: make(chan struct{}, maxInflightPerConn)}
+	if register != nil && !register(conn, cs) {
+		return nil
+	}
 	s.logger.Info("nbd export attached", "export", export, "size", dev.Size())
-	return s.transmit(conn, dev)
+	return s.transmit(cs)
 }
 
 // handshake performs the fixed-newstyle greeting and option haggling, returning
 // the Device for the requested export once the client asks to go. A nil Device
 // with a nil error means the client aborted cleanly.
 func (s *Server) handshake(ctx context.Context, conn net.Conn) (Device, func(), string, error) {
-	if err := writeAll(conn,
+	if err := writeAll(
+		conn,
 		be64(magicNBD), be64(magicIHAVE), be16(flagFixedNewstyle|flagNoZeroes),
 	); err != nil {
 		return nil, nil, "", err
@@ -292,8 +370,9 @@ func transmissionFlags() uint16 {
 	return tFlagHasFlags | tFlagSendFlush | tFlagSendTrim
 }
 
-// transmit runs the request/reply loop until the client disconnects or the
-// connection is closed (which is how a shutdown unblocks the read).
+// transmit runs the request/reply loop until the client disconnects, the
+// connection is closed, or a drain interrupts the read; in every case the
+// in-flight workers finish and their replies flush before it returns.
 //
 // Requests are dispatched to a bounded worker pool so reads and writes overlap
 // across the connection — the NBD spec lets the server reply out of order, and
@@ -302,8 +381,7 @@ func transmissionFlags() uint16 {
 // interleaved with another worker's reply. cmdFlush drains the inflight set
 // before replying so its ack means "every prior write is durable," and cmdDisc
 // drains so we don't return while workers are mid-write.
-func (s *Server) transmit(conn net.Conn, dev Device) error {
-	cs := &connState{conn: conn, dev: dev, logger: s.logger, sem: make(chan struct{}, maxInflightPerConn)}
+func (s *Server) transmit(cs *connState) error {
 	readerErr := cs.readLoop()
 	cs.inflight.Wait()
 	if e := cs.firstWriteErr.Load(); e != nil {
@@ -326,13 +404,22 @@ type connState struct {
 	inflight      sync.WaitGroup
 	sem           chan struct{}
 	firstWriteErr atomic.Pointer[error]
+	draining      atomic.Bool
+}
+
+// beginDrain stops the connection's reader by expiring its read deadline —
+// writes are unaffected, so in-flight replies still reach the client — and
+// marks the interruption deliberate so the reader ends cleanly.
+func (cs *connState) beginDrain() {
+	cs.draining.Store(true)
+	_ = cs.conn.SetReadDeadline(time.Now())
 }
 
 func (cs *connState) readLoop() error {
 	header := make([]byte, 28)
 	for {
 		if _, err := io.ReadFull(cs.conn, header); err != nil {
-			if errors.Is(err, io.EOF) {
+			if errors.Is(err, io.EOF) || cs.draining.Load() {
 				return nil
 			}
 			return fmt.Errorf("nbd: reading request (%w)", err)
@@ -360,6 +447,11 @@ func (cs *connState) readLoop() error {
 			}
 			writePayload = make([]byte, length)
 			if _, err := io.ReadFull(cs.conn, writePayload); err != nil {
+				if cs.draining.Load() {
+					// The drain caught a half-read request; the client never
+					// gets its reply and re-sends it after reconnecting.
+					return nil
+				}
 				return fmt.Errorf("nbd: reading write payload (%w)", err)
 			}
 		}
@@ -477,7 +569,8 @@ func readOption(conn net.Conn) (magic uint64, opt uint32, data []byte, err error
 }
 
 func writeOptionReply(conn net.Conn, opt, rep uint32, payload []byte) error {
-	return writeAll(conn,
+	return writeAll(
+		conn,
 		be64(magicRep), be32(opt), be32(rep), be32(uint32(len(payload))), payload, // #nosec G115 -- reply payloads are small and bounded
 	)
 }

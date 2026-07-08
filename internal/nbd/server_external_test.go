@@ -976,3 +976,151 @@ func TestServer_ServeReturnsErrorOnListenerClose(t *testing.T) {
 		t.Fatal("Serve did not return after listener close")
 	}
 }
+
+// blockingDevice parks ReadAt until released, so a test can hold a request
+// in flight across a shutdown and prove what happens to its reply.
+type blockingDevice struct {
+	entered   chan struct{}
+	release   chan struct{}
+	enterOnce sync.Once
+}
+
+func (d *blockingDevice) Size() int64 { return 4096 }
+
+func (d *blockingDevice) ReadAt(p []byte, _ int64) (int, error) {
+	d.enterOnce.Do(func() { close(d.entered) })
+	<-d.release
+	for i := range p {
+		p[i] = 0xab
+	}
+	return len(p), nil
+}
+
+func (d *blockingDevice) WriteAt(p []byte, _ int64) (int, error) { return len(p), nil }
+
+// drainClient attaches over a real listener and leaves one read in flight on
+// the blocked device, returning the raw conn for reply inspection.
+func drainClient(t *testing.T, addr string, dev *blockingDevice) net.Conn {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	c := &testClient{t: t, conn: conn}
+	c.greet(cFlagNoZeroes)
+	c.goExport("vol")
+
+	// One read request, sent raw so the reply can be read after the drain.
+	h := be32(magicRequest)
+	h = append(h, be16(0)...) // command flags
+	h = append(h, be16(0)...) // NBD_CMD_READ
+	h = append(h, be64(7)...) // handle
+	h = append(h, be64(0)...) // offset
+	h = append(h, be32(8)...) // length
+	c.write(h)
+	<-dev.entered
+	return conn
+}
+
+// TestServer_ShutdownDrainsInFlightReplies is the rollout contract: a request
+// that silod already accepted when the shutdown starts still gets its reply
+// before the connection closes, so the client never has to guess whether an
+// acknowledged write happened.
+func TestServer_ShutdownDrainsInFlightReplies(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	dev := &blockingDevice{entered: make(chan struct{}), release: make(chan struct{})}
+	srv := nbd.NewServer(&blockingBackend{dev: dev}, discardLogger())
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ctx, ln) }()
+
+	conn := drainClient(t, ln.Addr().String(), dev)
+
+	cancel()
+	_ = ln.Close()
+	// Give the drain a moment to interrupt the reader, then let the device
+	// finish — the reply must still arrive on the half-drained connection.
+	time.Sleep(50 * time.Millisecond)
+	close(dev.release)
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	rh := make([]byte, 16)
+	if _, err := io.ReadFull(conn, rh); err != nil {
+		t.Fatalf("the drain dropped the in-flight reply: %v", err)
+	}
+	if binary.BigEndian.Uint32(rh[0:4]) != magicReply || binary.BigEndian.Uint32(rh[4:8]) != 0 {
+		t.Fatalf("bad drained reply header: % x", rh)
+	}
+	if binary.BigEndian.Uint64(rh[8:16]) != 7 {
+		t.Fatalf("drained reply handle = %d, want 7", binary.BigEndian.Uint64(rh[8:16]))
+	}
+	data := make([]byte, 8)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		t.Fatalf("drained reply payload: %v", err)
+	}
+	// After the drain the server closes the connection.
+	if _, err := io.ReadFull(conn, rh[:1]); err == nil {
+		t.Fatal("the connection should close once the drain completes")
+	}
+
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("Serve returned %v, want nil after a drained shutdown", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after the drain")
+	}
+}
+
+// TestServer_ShutdownGraceCutsStuckConnections bounds the drain: a device
+// operation that never finishes must not hold the shutdown hostage — the
+// connection is cut once the grace expires.
+func TestServer_ShutdownGraceCutsStuckConnections(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	dev := &blockingDevice{entered: make(chan struct{}), release: make(chan struct{})}
+	srv := nbd.NewServer(&blockingBackend{dev: dev}, discardLogger(), nbd.WithDrainGrace(100*time.Millisecond))
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- srv.Serve(ctx, ln) }()
+
+	conn := drainClient(t, ln.Addr().String(), dev)
+
+	cancel()
+	_ = ln.Close()
+
+	// The device stays stuck past the grace, so the client's connection must
+	// be cut rather than kept open indefinitely.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	if _, err := io.ReadFull(conn, buf); err == nil {
+		t.Fatal("the grace period should cut a stuck connection")
+	} else if errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("unexpected read result: %v", err)
+	}
+
+	// Only after the device finally releases can Serve finish its wait.
+	close(dev.release)
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("Serve returned %v, want nil", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return after the stuck device released")
+	}
+}
+
+// blockingBackend serves the blockingDevice.
+type blockingBackend struct{ dev *blockingDevice }
+
+func (b *blockingBackend) Open(context.Context, string) (nbd.Device, func(), error) {
+	return b.dev, func() {}, nil
+}

@@ -14,8 +14,8 @@ func SetSocketFDForTest(fn func(net.Conn) (int, error)) (restore func()) {
 }
 
 // SetBackoffForTest tightens the reconnect backoff so tests converge fast.
-func SetBackoffForTest(floor, cap time.Duration) (restore func()) {
+func SetBackoffForTest(floor, ceiling time.Duration) (restore func()) {
 	oldFloor, oldCap := backoffFloor, backoffCap
-	backoffFloor, backoffCap = floor, cap
+	backoffFloor, backoffCap = floor, ceiling
 	return func() { backoffFloor, backoffCap = oldFloor, oldCap }
 }

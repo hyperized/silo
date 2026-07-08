@@ -142,6 +142,7 @@ func (k *fakeKernelNBD) Connect(nbdnl.ConnectConfig) (uint32, error) { return 0,
 func (k *fakeKernelNBD) Reconfigure(uint32, int, time.Duration, time.Duration) error {
 	return nil
 }
+
 func (k *fakeKernelNBD) Disconnect(index uint32) error {
 	k.b.mu.Lock()
 	defer k.b.mu.Unlock()
@@ -174,7 +175,8 @@ func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard
 
 func newTestAttacher(t *testing.T, backend *fakeBackend, dir string) *NBDAttacher {
 	t.Helper()
-	a, err := NewNBDAttacher("127.0.0.1:10809",
+	a, err := NewNBDAttacher(
+		"127.0.0.1:10809",
 		backend.option(),
 		WithStateDir(dir),
 		WithAttacherLogger(quietLogger()),

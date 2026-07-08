@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -119,6 +120,9 @@ func TestHostMounter_BlockRemountAndTargetErrors(t *testing.T) {
 }
 
 func TestProcMountsContains(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the production delegate reads /proc/mounts, which only Linux has")
+	}
 	// Exercises the production delegate; root ("/") is always a mountpoint.
 	if ok, err := procMountsContains("/"); err != nil || !ok {
 		t.Errorf("procMountsContains(/) = (%v, %v), want true", ok, err)

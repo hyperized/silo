@@ -33,7 +33,8 @@ var signalContext = func() (context.Context, context.CancelFunc) {
 // supervision goroutines only — attached devices keep serving I/O across a
 // plugin restart and are re-adopted on start.
 var newAttacher = func(cfg csi.Config, logger *slog.Logger) (csi.VolumeAttacher, func() error, error) {
-	a, err := csi.NewNBDAttacher(cfg.NBDAddr,
+	a, err := csi.NewNBDAttacher(
+		cfg.NBDAddr,
 		csi.WithReconnectWindow(cfg.NBDReconnectTimeout),
 		csi.WithStateDir(cfg.StateDir),
 		csi.WithAttacherLogger(logger),
