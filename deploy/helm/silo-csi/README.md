@@ -1,6 +1,6 @@
 # silo-csi Helm chart
 
-Installs the silo CSI driver — the `silo-csi` controller and per-node plugin —
+Installs the silo CSI driver (the `silo-csi` controller and per-node plugin)
 so Kubernetes workloads can use silo block volumes through ordinary
 PersistentVolumeClaims.
 

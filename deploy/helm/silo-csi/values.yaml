@@ -19,10 +19,9 @@ silod:
   nbdAddress: "127.0.0.1:10809"
   # nbdReconnectTimeout is how long a volume's I/O waits for silod to come
   # back after its connection drops (a rolling restart, an upgrade, a crash)
-  # before erroring. During the wait the I/O is simply paused; once silod
-  # returns, the node plugin reconnects the volume and the I/O resumes as if
-  # nothing happened. The default comfortably covers a rolling restart
-  # including an image pull.
+  # before erroring. During the wait the I/O is paused; once silod returns,
+  # the node plugin reconnects the volume and the I/O resumes. The default
+  # covers a rolling restart including an image pull.
   nbdReconnectTimeout: "5m"
   # nbdRequestTimeout bounds a single block request in the kernel: a request
   # that exceeds it has its connection retired and is retried on the next
@@ -91,8 +90,8 @@ storageClass:
     snapshot-retention: "24h"
     # chunk-size is the copy-on-write extent: the unit silod rewrites on every
     # partial write. For a filesystem-formatted block volume (ext4's 4 KiB
-    # metadata writes) an oversized extent means large write amplification — a
-    # 4 KiB write rewrites, re-encrypts and re-replicates a whole extent — and a
+    # metadata writes) an oversized extent means large write amplification (a
+    # 4 KiB write rewrites, re-encrypts and re-replicates a whole extent) and a
     # correspondingly large transient buffer per in-flight write. The earlier
     # 4Mi default amplified 4 KiB writes ~1000x. 256Ki is a balance: ~16x less
     # amplification and per-write memory than 4Mi, while keeping the (currently

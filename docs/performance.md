@@ -20,16 +20,16 @@ typical Ceph/Rook install has several daemon types to place and scale (monitors
 that must hold quorum, managers, metadata servers, an OSD per disk), a
 placement-group model you size up front and reshape as you grow, and an operator
 whose custom resources span dozens of fields before a single volume exists. It is
-powerful and proven — and most of that surface area is something you have to
+proven, and most of that surface area is something you have to
 understand *before* you can run it safely.
 
 silo makes a smaller bet: one component (`silod`), deployed the same way
 everywhere, with as few decisions as possible between you and a working volume.
-You give up features for that — `ReadWriteOnce` volumes, close-to-open FUSE
+You give up features for that: `ReadWriteOnce` volumes, close-to-open FUSE
 coherence, no erasure coding yet (see
 [What works today](../README.md#what-works-today) and
-[known-gaps.md](known-gaps.md)) — and on small synchronous writes you give up some
-latency, which the rest of this page covers.
+[known-gaps.md](known-gaps.md)). On small synchronous writes you also give up
+some latency, which the rest of this page covers.
 
 ---
 
@@ -47,7 +47,7 @@ When a client writes a chunk over NBD:
 Once silod says the write succeeded, the data is on real disk on multiple
 machines. There is no background work to drain and no in-flight state to recover.
 
-This majority is **per chunk** — it is the chunk's own replica set acknowledging,
+This majority is **per chunk**: it is the chunk's own replica set acknowledging,
 not a cluster-wide consensus quorum. It is unrelated to the "no quorum to lose"
 property of membership: there is no Raft/monitor quorum that, once lost, takes the
 cluster down. Losing nodes here never blocks the cluster; it only leaves some
@@ -55,15 +55,15 @@ chunks under-replicated until the scrubber heals them onto survivors.
 
 ## What Ceph does instead
 
-Ceph acknowledges from a journal — the data is on a fast journal device but
+Ceph acknowledges from a journal: the data is on a fast journal device but
 hasn't reached its final home yet, and the journal drains in the background. That
 is why default-tuned Ceph wins on small synchronous writes: most of the cost is
 paid later.
 
 ## Where you'll feel it
 
-Workloads dominated by small synchronous writes — database transaction logs,
-`fsync`-heavy filesystems, NBD-backed swap — will be noticeably faster on Ceph.
+Workloads dominated by small synchronous writes (database transaction logs,
+`fsync`-heavy filesystems, NBD-backed swap) will be noticeably faster on Ceph.
 Bulk sequential I/O is much closer, because the per-write overhead spreads across
 more bytes.
 
@@ -81,7 +81,7 @@ more bytes.
 ## Knobs you do get
 
 - `SILO_REPLICATION=2` lands writes on two disks instead of three. Still
-  real-disk durable on every ACK, just fewer copies before silod says OK.
+  real-disk durable on every ACK, with fewer copies before silod says OK.
 - The CSI StorageClass `chunk-size` parameter sets extent size per volume. Larger
   extents amortize per-chunk overhead for sequential workloads; smaller extents
   reduce read amplification for small random reads.
@@ -97,4 +97,4 @@ The hot paths are benchmarked in-tree (`make bench`): chunk encrypt/decrypt
 consistent-hash placement locator (`internal/placement`). The placement locator
 is flat from 3 to 200 nodes (~3 µs, one allocation per lookup), so cluster size
 is not a write-path cost. Cluster-level and end-to-end throughput benchmarks are
-not yet automated — see [known-gaps.md](known-gaps.md#performance).
+not yet automated; see [known-gaps.md](known-gaps.md#performance-measured-floor-deferred-follow-ups).
