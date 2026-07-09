@@ -89,20 +89,19 @@ The library covers the **core** opcodes. Deferred:
   "attach only volume X" yet, and no RBAC mapped to namespace ACLs. Tokens also
   cannot be revoked individually before expiry (rely on short TTLs, or rotate the
   CA). Per-resource scoping and a token denylist are roadmapped.
-- **Node-shutdown ordering for in-use volumes.** A whole-node shutdown kills
-  workload pods, silod, and the node plugin with no ordering guarantee; a
-  write still in flight when silod dies is requeued by the kernel forever
-  (nothing remains to reconnect it), the unmount blocks, and the node's
-  shutdown can hang until a hard power cut. Verified on a real node: no data
-  loss past the last fsync, but a 20-minute hang ending in a BMC reset. The
-  fix is deployment-level ordering — drain before maintenance, or kubelet
-  graceful node shutdown with silod at `system-node-critical` priority (see
-  [operations.md](operations.md#rolling-upgrades)) — because no client-side
-  component survives long enough to act. Whether the kernel's own request
-  timeout (`NBD_ATTR_TIMEOUT`, which silo does not set today) would bound the
-  requeue loop is untested; setting it is a candidate hardening with
-  side-effects to evaluate (a slow-but-healthy silod under fsync storms must
-  not trip it).
+- **Node-shutdown ordering for in-use volumes** (largely closed). A
+  whole-node shutdown kills workload pods, silod, and the node plugin with no
+  ordering guarantee, orphaning any write still in flight. The node plugin now
+  sets the kernel's per-request timeout (`SILO_CSI_NBD_REQUEST_TIMEOUT`,
+  default `2m`), which bounds the damage: the orphaned write fails, the
+  unmount proceeds, and the reboot completes — verified on a real node
+  (~6 minutes end to end, no data loss past the last fsync; without the
+  timeout the same reboot hung for 20+ minutes until a BMC power cut). What
+  remains open is making the teardown *orderly* (zero I/O errors instead of a
+  bounded few): drain before maintenance, or kubelet graceful node shutdown
+  with silod at `system-node-critical` priority (see
+  [operations.md](operations.md#rolling-upgrades)) — deployment-level
+  settings silo cannot impose on its own.
 - **`siloctl volume attach` for bare-metal hosts.** The CSI node plugin's
   supervised attach (reconnects across silod restarts) lives in
   `internal/nbdclient`; a manual `nbd-client` attach gets none of that (its

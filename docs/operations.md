@@ -634,16 +634,19 @@ the volume's I/O fails and the pod sees errors, so keep the window above your
 worst-case restart. Volumes attached manually with `nbd-client` do **not**
 get this — see [Block volumes over NBD](#block-volumes-over-nbd).
 
-**Rebooting a node: drain it first, or configure kubelet graceful node
-shutdown.** A whole-node shutdown kills the workload pods, silod, and the
-node plugin with no ordering between them. If a pod still has writes in
-flight on an attached volume when silod dies, those writes have no server to
-go to and no supervisor left to reconnect them — the kernel requeues them
-indefinitely, the volume's unmount blocks, and the node's shutdown can hang
-until someone cuts the power (observed on Talos: the reboot held a stuck
-`nbd0` write for 20+ minutes until a BMC reset). No data is lost either way —
-everything up to the last fsync survives even a power cut — but the hang is
-real. Two ways to make node reboots orderly:
+**Rebooting a node with in-use volumes works, but drain it for a clean exit.**
+A whole-node shutdown kills the workload pods, silod, and the node plugin
+with no ordering between them, so a write still in flight when silod dies
+has no server to go to and no supervisor left to reconnect it. The node
+plugin's request timeout (`SILO_CSI_NBD_REQUEST_TIMEOUT`, default `2m`,
+`silod.nbdRequestTimeout` in the chart) bounds this: the kernel fails the
+orphaned write, the filesystem's unmount proceeds, and the reboot completes
+(verified on Talos: ~6 minutes end to end, all data to the last fsync
+intact; the volume re-attaches cleanly after boot). **Never set that timeout
+to 0 on Kubernetes nodes** — without it the kernel requeues the orphaned
+write forever and the shutdown hangs until someone cuts the power (also
+observed: 20+ minutes and a BMC reset). For a reboot with *zero* I/O errors
+rather than a bounded few, make the teardown orderly:
 
 - **Drain before maintenance** (`kubectl drain <node>`): pods leave, their
   volumes unmount and detach cleanly, then nothing holds the shutdown.
