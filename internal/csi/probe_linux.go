@@ -41,10 +41,11 @@ var probeDeviceLiveness = func(device string, timeout time.Duration) bool {
 }
 
 // alignedBlock returns a size-byte buffer aligned to 512 bytes, the alignment
-// O_DIRECT requires.
+// O_DIRECT requires. The unsafe.Pointer is only read for its address so the
+// slice can be offset to an aligned start; nothing is dereferenced.
 func alignedBlock(size int) []byte {
 	raw := make([]byte, size+512)
-	off := int(uintptr(unsafe.Pointer(&raw[0])) & 511)
+	off := int(uintptr(unsafe.Pointer(&raw[0])) & 511) // #nosec G103 -- address arithmetic for O_DIRECT alignment only
 	if off != 0 {
 		off = 512 - off
 	}

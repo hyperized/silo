@@ -84,10 +84,10 @@ How the pieces fit together:
    docker push registry.example.com/silo/silo-csi:v0.10.0
    ```
 
-   The `silo-csi` image bundles `mkfs.ext4`/`mkfs.xfs` and `mount`/`blkid`
-   (plus `nbd-client` for manual recovery only — the plugin drives the
-   kernel's NBD interface directly), so the node plugin needs nothing extra
-   on the host but the kernel module.
+   The `silo-csi` image bundles `mkfs.ext4`/`mkfs.xfs` and `mount`/`blkid`,
+   plus `nbd-client` for manual recovery only (the plugin drives the kernel's
+   NBD interface directly). The node plugin needs nothing on the host but the
+   kernel module.
 
 ---
 
@@ -157,21 +157,20 @@ The others are accepted and recorded so manifests written now keep working when
 placement and retention ship.
 
 For a different filesystem, set the standard CSI parameter on a StorageClass:
-`csi.storage.k8s.io/fstype: xfs` (the node plugin image ships `mkfs.ext4` and
-`mkfs.xfs`; ext4 is the default). Raw block volumes (`volumeMode: Block`) are
-supported too — the pod gets the device node itself via `volumeDevices`.
+`csi.storage.k8s.io/fstype: xfs`. The node plugin image ships `mkfs.ext4` and
+`mkfs.xfs`; ext4 is the default. Raw block volumes (`volumeMode: Block`) are
+supported too: the pod gets the device node itself via `volumeDevices`.
 
 ### Behaviour during silod restarts
 
-Attached volumes survive silod restarts (rolling upgrades, crashes): the node
-plugin supervises every attachment and reconnects it the moment silod is
-back, while the kernel holds the volume's I/O — pods see a pause of a couple
+Attached volumes survive silod restarts (rolling upgrades, crashes). The node
+plugin supervises every attachment and reconnects it as soon as silod is
+back, while the kernel queues the volume's I/O. Pods see a pause of a couple
 of seconds, not an error. The plugin records its attachments on disk, so its
 own upgrades never orphan a mounted volume, and it reports each volume's
-health through `NodeGetVolumeStats` (usage plus an abnormal condition while a
-volume is reconnecting). Details and bounds: [operations.md — rolling
-upgrades](operations.md#rolling-upgrades); reboot guidance for nodes with
-in-use volumes is there too.
+health through `NodeGetVolumeStats`: usage, plus an abnormal condition while
+a volume is reconnecting. Bounds and reboot guidance for nodes with in-use
+volumes live in [operations.md](operations.md#rolling-upgrades).
 
 ---
 

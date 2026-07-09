@@ -15,7 +15,9 @@ import (
 func init() {
 	// Surface kernel error codes as errno values so callers can test with
 	// errors.Is(err, unix.ENOENT) and friends.
-	errnoToError = func(code int32) error { return unix.Errno(-code) }
+	errnoToError = func(code int32) error {
+		return unix.Errno(-code) // #nosec G115 -- netlink carries errnos as small negative numbers; the negation fits any errno
+	}
 }
 
 // receiveBufSize fits any reply the NBD family produces, including a status

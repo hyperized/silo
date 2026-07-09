@@ -29,11 +29,11 @@ Verify the driver registered on every node:
   kubectl get csidrivers {{ include "silo-csi.driverName" . }}
   kubectl get csinodes -o wide
 
-Note: the node plugin needs the kernel nbd module on each host (it attaches
-volumes over NBD from the node-local silod, driving the kernel directly — no
-nbd-client needed). Load it with:
+Note: the node plugin needs the kernel nbd module on each host. It drives the
+kernel's NBD interface directly, so no nbd-client is needed. Load the module
+with:
   modprobe nbd
 
 Volumes survive silod restarts: while silod is briefly away (a rolling
-restart, an upgrade) a volume's I/O pauses and resumes — for up to
-{{ .Values.silod.nbdReconnectTimeout }} (silod.nbdReconnectTimeout).
+restart, an upgrade), a volume's I/O pauses and resumes. The pause is bounded
+by {{ .Values.silod.nbdReconnectTimeout }} (silod.nbdReconnectTimeout).

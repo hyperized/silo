@@ -623,38 +623,43 @@ re-reads the data dir and rejoins), but for a node you are also moving or
 reprovisioning, drain it first as above.
 
 **Volumes attached through the CSI driver survive the restart.** The node
-plugin watches every attachment and reconnects it the moment silod is back,
-while the kernel holds the volume's I/O — workloads see a short pause (a
-couple of seconds in practice), not an error. On shutdown silod also finishes
-answering the block requests it already accepted before closing, so an
-acknowledged write is never in doubt. The pause is bounded by the node
-plugin's `SILO_CSI_NBD_RECONNECT_TIMEOUT` (default `5m`,
-`silod.nbdReconnectTimeout` in the Helm chart); if silod stays away longer,
-the volume's I/O fails and the pod sees errors, so keep the window above your
-worst-case restart. Volumes attached manually with `nbd-client` do **not**
-get this — see [Block volumes over NBD](#block-volumes-over-nbd).
+plugin watches every attachment and reconnects it as soon as silod is back.
+The kernel queues the volume's I/O in the meantime, so workloads see a short
+pause (a couple of seconds in practice) instead of an error. On shutdown,
+silod first answers the block requests it has already accepted, so an
+acknowledged write is always durable.
+
+The pause is bounded by `SILO_CSI_NBD_RECONNECT_TIMEOUT` on the node plugin
+(default `5m`, `silod.nbdReconnectTimeout` in the Helm chart). If silod stays
+away longer than that, the volume's I/O fails and the pod sees errors. Keep
+the window above your worst-case restart time. Volumes attached manually with
+`nbd-client` do **not** reconnect; see
+[Block volumes over NBD](#block-volumes-over-nbd).
 
 **Rebooting a node with in-use volumes works, but drain it for a clean exit.**
-A whole-node shutdown kills the workload pods, silod, and the node plugin
-with no ordering between them, so a write still in flight when silod dies
-has no server to go to and no supervisor left to reconnect it. The node
-plugin's request timeout (`SILO_CSI_NBD_REQUEST_TIMEOUT`, default `2m`,
-`silod.nbdRequestTimeout` in the chart) bounds this: the kernel fails the
-orphaned write, the filesystem's unmount proceeds, and the reboot completes
-(verified on Talos: ~6 minutes end to end, all data to the last fsync
-intact; the volume re-attaches cleanly after boot). **Never set that timeout
-to 0 on Kubernetes nodes** — without it the kernel requeues the orphaned
-write forever and the shutdown hangs until someone cuts the power (also
-observed: 20+ minutes and a BMC reset). For a reboot with *zero* I/O errors
-rather than a bounded few, make the teardown orderly:
+A whole-node shutdown stops the workload pods, silod, and the node plugin in
+no particular order. A write that is still in flight when silod dies has no
+server to go to, and no supervisor is left to reconnect it. The request
+timeout (`SILO_CSI_NBD_REQUEST_TIMEOUT`, default `2m`,
+`silod.nbdRequestTimeout` in the chart) bounds this case: the kernel fails
+the orphaned write, the unmount proceeds, and the reboot completes. Verified
+on Talos: about 6 minutes end to end, no data loss up to the last fsync, and
+the volume re-attaches cleanly after boot.
 
-- **Drain before maintenance** (`kubectl drain <node>`): pods leave, their
-  volumes unmount and detach cleanly, then nothing holds the shutdown.
-- **Kubelet graceful node shutdown**: give workload pods a shutdown grace
-  period longer than the system pods' so their unmounts complete while silod
-  is still running (on Talos, `machine.kubelet.extraConfig` with
-  `shutdownGracePeriod`/`shutdownGracePeriodCriticalPods`), and run silod
-  with `priorityClassName: system-node-critical` so it is stopped last.
+**Never set the request timeout to 0 on Kubernetes nodes.** Without it the
+kernel requeues the orphaned write forever and the shutdown hangs until
+someone cuts the power. We have seen this take more than 20 minutes and end
+in a BMC reset.
+
+A drained node avoids the failed writes entirely:
+
+- **Drain before maintenance** (`kubectl drain <node>`). Pods leave, their
+  volumes unmount and detach cleanly, and nothing holds up the shutdown.
+- **Kubelet graceful node shutdown.** Give workload pods a longer shutdown
+  grace period than system pods, so their unmounts complete while silod is
+  still running. On Talos this is `machine.kubelet.extraConfig` with
+  `shutdownGracePeriod` and `shutdownGracePeriodCriticalPods`. Run silod with
+  `priorityClassName: system-node-critical` so it stops last.
 
 ## Block volumes over NBD
 
@@ -667,15 +672,14 @@ nbd-client <silod-host> 10809 /dev/nbd0 -name /db
 mkfs.ext4 /dev/nbd0 && mount /dev/nbd0 /mnt/db     # first use only; chunks are immutable
 ```
 
-> **A manual nbd-client attachment does not survive a silod restart.** Its
+> **A manual nbd-client attachment does not survive a silod restart.** The
 > `-persist` flag looks like it should reconnect, but on modern kernels
-> nbd-client configures the device and exits, so nothing is left to
-> reconnect — the device fails its I/O instead, and the filesystem on top
-> usually shuts down until you unmount, re-attach, and fsck. The CSI node
-> plugin has its own supervised attach path that reconnects automatically and
-> is the recommended way to keep a volume mounted across restarts; a
-> `siloctl volume attach` with the same behaviour for bare-metal hosts is
-> roadmapped.
+> nbd-client configures the device and exits, leaving no process behind to
+> reconnect. The device fails its I/O instead, and the filesystem on top
+> usually shuts down until you unmount, re-attach, and fsck. On Kubernetes
+> the CSI node plugin uses its own attach path, which reconnects
+> automatically. A `siloctl volume attach` with the same behaviour for
+> bare-metal hosts is roadmapped.
 
 Attaching takes the volume's **single-writer lease** and fences any stale
 holder, so moving a volume between hosts is safe — the old writer's writes are
@@ -748,11 +752,11 @@ The **CSI node plugin** serves its own series on `SILO_CSI_HTTP_ADDR`
 
 - `silo_csi_nbd_attached_volumes` — volumes attached on the node.
 - `silo_csi_nbd_reconnecting_volumes` — volumes whose connection to silod is
-  down right now; their I/O is paused while the plugin reconnects. **Alert
-  when this is non-zero for longer than a rollout explains.**
-- `silo_csi_nbd_reconnects_total` — completed reconnections. A climbing rate
-  without a silod rollout to explain it means connections are dying for some
-  other reason (network, resource pressure) and deserves a look.
+  down right now. Their I/O is paused while the plugin reconnects. **Alert
+  when this stays non-zero longer than a rollout explains.**
+- `silo_csi_nbd_reconnects_total` — completed reconnections. If this climbs
+  without a silod rollout to explain it, connections are dying for another
+  reason (network trouble, resource pressure) and you should investigate.
 - `silo_namespace_inodes_reaped_total` — orphaned (unreachable) namespace inodes
   reclaimed after their directory link was removed. Removing a path tombstones
   the link; the inode it pointed at is reaped on the next gossip merge and on the
@@ -843,15 +847,16 @@ owns the volume; the previous holder must re-acquire. With NBD/CSI this resolves
 automatically on the new attach.
 
 **A pod's volume turned read-only after a long silod outage.** If silod is
-unreachable for longer than the reconnect window (`SILO_CSI_NBD_RECONNECT_TIMEOUT`,
-default `5m`), the kernel fails the volume's queued I/O and ext4 remounts
-read-only to protect itself. The attachment itself heals automatically the
-moment silod is back — only the filesystem needs a fresh mount. Restart the pod:
-the remount replays the journal and everything written up to the last fsync is
-intact (verified under test — no data loss). If outages longer than the window
-are normal for your environment, raise `silod.nbdReconnectTimeout` in the Helm
-chart. Short outages (a rolling restart, a brief network blip) never get this
-far: I/O just pauses and resumes.
+unreachable for longer than the reconnect window
+(`SILO_CSI_NBD_RECONNECT_TIMEOUT`, default `5m`), the kernel fails the
+volume's queued I/O and ext4 remounts read-only to protect itself. The
+attachment heals automatically once silod is back; only the filesystem needs
+a fresh mount. Restart the pod. The remount replays the journal, and
+everything written up to the last fsync is intact (verified under test, no
+data loss). If outages longer than the window are normal in your environment,
+raise `silod.nbdReconnectTimeout` in the Helm chart. Short outages, such as a
+rolling restart or a brief network blip, never get this far: I/O pauses and
+resumes.
 
 **Clock-skew alerts.** `silo_hlc_clock_skew_alerts_total` is climbing — a peer's
 wall clock differs from this node's by more than `SILO_MAX_CLOCK_SKEW`. Fix NTP

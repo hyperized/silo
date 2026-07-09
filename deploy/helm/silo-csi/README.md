@@ -20,24 +20,24 @@ PersistentVolumeClaims.
 - Each node runs a silod with its NBD server enabled, reachable from the node
   plugin (default `127.0.0.1:10809` via `hostNetwork`).
 - The `nbd` kernel module on every node (`modprobe nbd`). The node plugin
-  drives the kernel directly — no `nbd-client` on the host is needed, and
-  devices are picked by the kernel, so `nbds_max` needs no tuning.
+  drives the kernel directly, so the host needs no `nbd-client` and no
+  `nbds_max` tuning: the kernel hands out devices on demand.
 
 ## Behaviour during silod restarts
 
-Attached volumes survive silod restarts (rolling upgrades, crashes): the node
-plugin watches every attachment and reconnects it the moment silod is back,
-while the kernel holds the volume's I/O. Workloads see a short pause, not an
-error. `silod.nbdReconnectTimeout` (default `5m`) bounds how long I/O waits
-before it fails, and `silod.nbdRequestTimeout` (default `2m`) bounds a single
-hung request — keep it set; it is also what lets a node with in-use volumes
-shut down instead of hanging on an unanswerable write. The plugin remembers
-its attachments on disk, so its own restarts (upgrades of this chart) never
-orphan a mounted volume.
+Attached volumes survive silod restarts (rolling upgrades, crashes). The node
+plugin watches every attachment and reconnects it as soon as silod is back,
+while the kernel queues the volume's I/O. Workloads see a short pause, not an
+error. `silod.nbdReconnectTimeout` (default `5m`) sets how long I/O waits
+before it fails. `silod.nbdRequestTimeout` (default `2m`) bounds a single
+hung request; keep it set, because it is also what lets a node with in-use
+volumes shut down instead of hanging on an unanswerable write. The plugin
+remembers its attachments on disk, so its own restarts (upgrades of this
+chart) never orphan a mounted volume.
 
 Each node plugin serves Prometheus metrics and `/healthz` on
 `node.metricsAddress` (default `:7090`): attached volumes, volumes currently
-reconnecting, and completed reconnects — alert on reconnects that no rollout
+reconnecting, and completed reconnects. Alert on reconnects that no rollout
 explains. Volume health also reaches the kubelet through the CSI volume
 condition.
 

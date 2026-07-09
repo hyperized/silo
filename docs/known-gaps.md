@@ -18,11 +18,11 @@ environment has no `/dev/fuse`, no mount privileges, and no kernel nvme-tcp.
   with the `fuse` module and `CAP_SYS_ADMIN`, then run the fstest suite.
 
 The NBD attach/reconnect path (`internal/nbdnl`, `internal/nbdclient`) is
-**not** on this list: `make test-nbd-kernel` exercises it against a real
-kernel in a privileged container (attach → device I/O → server death →
-reconnect → detach), and the whole stack was validated end-to-end on a
-3-node arm64 Kubernetes cluster (Talos, kernel 6.18), including silod
-rolling restarts under continuous checksummed writes.
+**not** on this list. `make test-nbd-kernel` exercises it against a real
+kernel in a privileged container (attach, device I/O, server death,
+reconnect, detach), and the whole stack was validated end to end on a 3-node
+arm64 Kubernetes cluster (Talos, kernel 6.18), including silod rolling
+restarts under continuous checksummed writes.
 
 ## FUSE: opcodes not yet implemented
 
@@ -90,23 +90,23 @@ The library covers the **core** opcodes. Deferred:
   cannot be revoked individually before expiry (rely on short TTLs, or rotate the
   CA). Per-resource scoping and a token denylist are roadmapped.
 - **Node-shutdown ordering for in-use volumes** (largely closed). A
-  whole-node shutdown kills workload pods, silod, and the node plugin with no
-  ordering guarantee, orphaning any write still in flight. The node plugin now
+  whole-node shutdown stops workload pods, silod, and the node plugin in no
+  particular order, orphaning any write still in flight. The node plugin now
   sets the kernel's per-request timeout (`SILO_CSI_NBD_REQUEST_TIMEOUT`,
   default `2m`), which bounds the damage: the orphaned write fails, the
-  unmount proceeds, and the reboot completes — verified on a real node
-  (~6 minutes end to end, no data loss past the last fsync; without the
-  timeout the same reboot hung for 20+ minutes until a BMC power cut). What
-  remains open is making the teardown *orderly* (zero I/O errors instead of a
-  bounded few): drain before maintenance, or kubelet graceful node shutdown
-  with silod at `system-node-critical` priority (see
-  [operations.md](operations.md#rolling-upgrades)) — deployment-level
+  unmount proceeds, and the reboot completes. Verified on a real node: about
+  6 minutes end to end with no data loss past the last fsync, where the same
+  reboot without the timeout hung for more than 20 minutes and needed a BMC
+  power cut. What remains open is making the teardown orderly, with zero I/O
+  errors instead of a bounded few: drain before maintenance, or kubelet
+  graceful node shutdown with silod at `system-node-critical` priority (see
+  [operations.md](operations.md#rolling-upgrades)). Those are deployment
   settings silo cannot impose on its own.
 - **`siloctl volume attach` for bare-metal hosts.** The CSI node plugin's
   supervised attach (reconnects across silod restarts) lives in
-  `internal/nbdclient`; a manual `nbd-client` attach gets none of that (its
-  `-persist` is a no-op on modern kernels — the netlink path configures the
-  device and exits, leaving nothing behind to reconnect). A
+  `internal/nbdclient`. A manual `nbd-client` attach gets none of that: its
+  `-persist` flag is a no-op on modern kernels, where the netlink path
+  configures the device and exits, leaving nothing behind to reconnect. A
   `siloctl volume attach/detach` built on the same package would give
   non-Kubernetes hosts the same self-healing behaviour.
 - **Protocol version in the status RPC.** The rolling-upgrade handshake exposes
