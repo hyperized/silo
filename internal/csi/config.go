@@ -1,6 +1,9 @@
 package csi
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Mode selects which CSI services a silo-csi process runs. In Kubernetes the
 // controller runs once per cluster (a Deployment) and the node plugin runs on
@@ -39,6 +42,23 @@ type Config struct {
 	// NBDAddr is the local silod NBD address the node plugin attaches volumes
 	// through.
 	NBDAddr string
+	// NBDReconnectTimeout is how long a volume's I/O waits for silod to come
+	// back after its connection drops (a restart, an upgrade) before erroring.
+	// During the wait the kernel queues the I/O; once silod returns, it resumes
+	// as if nothing happened.
+	NBDReconnectTimeout time.Duration
+	// NBDRequestTimeout bounds a single block request in the kernel. When a
+	// request exceeds it, the kernel retires the connection and the request is
+	// retried on the next one — which turns a silently hung connection into a
+	// quick reconnect, and bounds how long a dying node's unmount can block on
+	// an unanswerable write. Zero disables the bound (the kernel then only
+	// warns about stuck requests, forever).
+	NBDRequestTimeout time.Duration
+	// StateDir is where the node plugin remembers its attachments across
+	// restarts; it must be a host-backed directory (the CSI plugin dir).
+	StateDir string
+	// HTTPAddr serves /metrics and /healthz when set (empty = off).
+	HTTPAddr string
 	// LogLevel and LogFormat configure structured logging, matching silod.
 	LogLevel  string
 	LogFormat string
@@ -52,6 +72,16 @@ const (
 	DefaultMode      = ModeAll
 	DefaultSilodAddr = "127.0.0.1:7000"
 	DefaultNBDAddr   = "127.0.0.1:10809"
+	// DefaultNBDReconnectTimeout comfortably covers a rolling silod restart,
+	// including an image pull on a slow link.
+	DefaultNBDReconnectTimeout = 5 * time.Minute
+	// DefaultNBDRequestTimeout is far above any legitimate request latency
+	// (silo's fsync-bound writes complete in milliseconds to seconds) while
+	// keeping hung-connection detection and shutdown unblocking prompt.
+	DefaultNBDRequestTimeout = 2 * time.Minute
+	// DefaultStateDir is the conventional CSI plugin directory, mounted from
+	// the host in the node DaemonSet.
+	DefaultStateDir = "/csi"
 )
 
 // LoadConfig reads silo-csi's configuration from getenv (os.Getenv in
@@ -60,13 +90,31 @@ const (
 // LoadConfig stays free of host lookups and easy to test.
 func LoadConfig(getenv func(string) string) (Config, error) {
 	cfg := Config{
-		Endpoint:  envOr(getenv, "SILO_CSI_ENDPOINT", DefaultEndpoint),
-		Mode:      Mode(envOr(getenv, "SILO_CSI_MODE", string(DefaultMode))),
-		SilodAddr: envOr(getenv, "SILO_SERVER", DefaultSilodAddr),
-		NodeID:    getenv("SILO_CSI_NODE_ID"),
-		NBDAddr:   envOr(getenv, "SILO_CSI_NBD_ADDR", DefaultNBDAddr),
-		LogLevel:  envOr(getenv, "SILO_LOG_LEVEL", "info"),
-		LogFormat: envOr(getenv, "SILO_LOG_FORMAT", "json"),
+		Endpoint:            envOr(getenv, "SILO_CSI_ENDPOINT", DefaultEndpoint),
+		Mode:                Mode(envOr(getenv, "SILO_CSI_MODE", string(DefaultMode))),
+		SilodAddr:           envOr(getenv, "SILO_SERVER", DefaultSilodAddr),
+		NodeID:              getenv("SILO_CSI_NODE_ID"),
+		NBDAddr:             envOr(getenv, "SILO_CSI_NBD_ADDR", DefaultNBDAddr),
+		NBDReconnectTimeout: DefaultNBDReconnectTimeout,
+		NBDRequestTimeout:   DefaultNBDRequestTimeout,
+		StateDir:            envOr(getenv, "SILO_CSI_STATE_DIR", DefaultStateDir),
+		HTTPAddr:            getenv("SILO_CSI_HTTP_ADDR"),
+		LogLevel:            envOr(getenv, "SILO_LOG_LEVEL", "info"),
+		LogFormat:           envOr(getenv, "SILO_LOG_FORMAT", "json"),
+	}
+	if v := getenv("SILO_CSI_NBD_RECONNECT_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("SILO_CSI_NBD_RECONNECT_TIMEOUT %q is not a positive duration; use a value like 5m (how long a volume's I/O waits for silod to come back before erroring)", v)
+		}
+		cfg.NBDReconnectTimeout = d
+	}
+	if v := getenv("SILO_CSI_NBD_REQUEST_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return Config{}, fmt.Errorf("SILO_CSI_NBD_REQUEST_TIMEOUT %q is not a duration; use a value like 2m (how long a single block request may take before its connection is retired and it is retried), or 0 to disable the bound", v)
+		}
+		cfg.NBDRequestTimeout = d
 	}
 	switch cfg.Mode {
 	case ModeController, ModeNode, ModeAll:

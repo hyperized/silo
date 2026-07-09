@@ -2,11 +2,13 @@ package csi
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	csiv1 "github.com/hyperized/silo/api/proto/csi/v1"
+	"github.com/hyperized/silo/internal/nbdclient"
 )
 
 // defaultFilesystem is used for a mount-type volume whose capability does not
@@ -39,6 +41,12 @@ type VolumeMounter interface {
 	Unmount(ctx context.Context, target string) error
 }
 
+// healthSource reports an attachment's condition; the NBD attacher implements
+// it, and NodeGetVolumeStats surfaces it to the kubelet as a VolumeCondition.
+type healthSource interface {
+	Health(volumePath string) (AttachmentHealth, bool)
+}
+
 // NodeService answers the CSI Node RPCs — the per-node half of the driver,
 // running as a DaemonSet pod beside silod on every node. It attaches a volume
 // over NBD (which takes the volume's lease and fences any prior holder) and
@@ -47,13 +55,20 @@ type VolumeMounter interface {
 type NodeService struct {
 	attacher VolumeAttacher
 	mounter  VolumeMounter
+	health   healthSource
 	nodeID   string
 }
 
 // NewNodeService builds the Node service. nodeID is reported to Kubernetes and
 // keys VolumeAttachment objects to this node, so it must match the node's name.
+// An attacher that also reports health powers NodeGetVolumeStats' volume
+// condition.
 func NewNodeService(nodeID string, attacher VolumeAttacher, mounter VolumeMounter) *NodeService {
-	return &NodeService{attacher: attacher, mounter: mounter, nodeID: nodeID}
+	s := &NodeService{attacher: attacher, mounter: mounter, nodeID: nodeID}
+	if h, ok := attacher.(healthSource); ok {
+		s.health = h
+	}
+	return s
 }
 
 // NodePublishVolume attaches the volume and mounts it at the pod's target path.
@@ -103,10 +118,21 @@ func (s *NodeService) NodeUnpublishVolume(ctx context.Context, req *csiv1.NodeUn
 	return &csiv1.NodeUnpublishVolumeResponse{}, nil
 }
 
-// NodeGetCapabilities reports that the node plugin needs no staging step and
-// no optional features — publish does the whole attach-and-mount.
+// NodeGetCapabilities reports that the node plugin needs no staging step —
+// publish does the whole attach-and-mount — but does serve volume stats with
+// a volume condition, so the kubelet can see an attachment that lost silod.
 func (s *NodeService) NodeGetCapabilities(_ context.Context, _ *csiv1.NodeGetCapabilitiesRequest) (*csiv1.NodeGetCapabilitiesResponse, error) {
-	return &csiv1.NodeGetCapabilitiesResponse{}, nil
+	rpc := func(t csiv1.NodeServiceCapability_RPC_Type) *csiv1.NodeServiceCapability {
+		return &csiv1.NodeServiceCapability{
+			Type: &csiv1.NodeServiceCapability_Rpc{Rpc: &csiv1.NodeServiceCapability_RPC{Type: t}},
+		}
+	}
+	return &csiv1.NodeGetCapabilitiesResponse{
+		Capabilities: []*csiv1.NodeServiceCapability{
+			rpc(csiv1.NodeServiceCapability_RPC_GET_VOLUME_STATS),
+			rpc(csiv1.NodeServiceCapability_RPC_VOLUME_CONDITION),
+		},
+	}, nil
 }
 
 // NodeGetInfo identifies this node to Kubernetes. silo derives placement from
@@ -129,9 +155,39 @@ func (s *NodeService) NodeUnstageVolume(_ context.Context, _ *csiv1.NodeUnstageV
 	return nil, status.Error(codes.Unimplemented, "silo-csi does not stage volumes; the detach happens at NodeUnpublishVolume")
 }
 
-// NodeGetVolumeStats is not implemented yet.
-func (s *NodeService) NodeGetVolumeStats(_ context.Context, _ *csiv1.NodeGetVolumeStatsRequest) (*csiv1.NodeGetVolumeStatsResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "silo-csi does not report per-volume stats yet")
+// NodeGetVolumeStats reports the volume's filesystem usage and — the part the
+// kubelet acts on — its condition: whether the attachment is connected to
+// silod or waiting out a reconnect.
+func (s *NodeService) NodeGetVolumeStats(_ context.Context, req *csiv1.NodeGetVolumeStatsRequest) (*csiv1.NodeGetVolumeStatsResponse, error) {
+	volPath := req.GetVolumeId()
+	target := req.GetVolumePath()
+	if volPath == "" || target == "" {
+		return nil, status.Error(codes.InvalidArgument, "both a volume id and a volume path are required")
+	}
+	if s.health == nil {
+		return nil, status.Error(codes.Unimplemented, "this node plugin's attacher does not track attachment health")
+	}
+	health, ok := s.health.Health(volPath)
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "volume %q is not attached on this node", volPath)
+	}
+	resp := &csiv1.NodeGetVolumeStatsResponse{VolumeCondition: volumeCondition(health)}
+	if usage, err := statfsUsage(target); err == nil {
+		resp.Usage = usage
+	}
+	return resp, nil
+}
+
+// volumeCondition translates an attachment's state into the CSI condition the
+// kubelet publishes as events on the pod's PVC.
+func volumeCondition(health AttachmentHealth) *csiv1.VolumeCondition {
+	if health.State == nbdclient.StateHealthy {
+		return &csiv1.VolumeCondition{Abnormal: false, Message: fmt.Sprintf("connected to silod via %s", health.Device)}
+	}
+	return &csiv1.VolumeCondition{
+		Abnormal: true,
+		Message:  fmt.Sprintf("the connection to silod is down; I/O on %s is paused while it reconnects — check silod on this node if this persists", health.Device),
+	}
 }
 
 // NodeExpandVolume is not implemented; volumes cannot grow in place yet.

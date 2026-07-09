@@ -210,3 +210,59 @@ func TestNamespace_LeaseConvergesAcrossReplicas(t *testing.T) {
 		t.Errorf("converged holder = %q, want on-b (newer HLC wins)", l.Holder)
 	}
 }
+
+func TestNamespace_ReleaseLeaseAtIsCompareAndRelease(t *testing.T) {
+	var clk int64 = 100
+	ns := nsAt("a", &clk)
+	clk++
+	if _, err := ns.CreateVolume("/vol", 4096); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+
+	clk++
+	first, err := ns.AcquireLease("/vol", "node-1")
+	if err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	// The same holder re-acquires — a reconnected client's fresh claim.
+	clk++
+	second, err := ns.AcquireLease("/vol", "node-1")
+	if err != nil {
+		t.Fatalf("re-AcquireLease: %v", err)
+	}
+	if second.At.Compare(first.At) <= 0 {
+		t.Fatalf("re-acquisition should carry a newer stamp: %v then %v", first.At, second.At)
+	}
+
+	// The old connection's teardown must not vacate the live claim.
+	clk++
+	if err := ns.ReleaseLeaseAt("/vol", "node-1", first.At); err != nil {
+		t.Fatalf("stale ReleaseLeaseAt: %v", err)
+	}
+	if l, _ := ns.Lease("/vol"); l.Holder != "node-1" || l.At.Compare(second.At) != 0 {
+		t.Fatalf("lease after stale release = %+v, want the live claim untouched", l)
+	}
+
+	// A mismatched holder is likewise a no-op.
+	clk++
+	if err := ns.ReleaseLeaseAt("/vol", "node-2", second.At); err != nil {
+		t.Fatalf("wrong-holder ReleaseLeaseAt: %v", err)
+	}
+	if l, _ := ns.Lease("/vol"); l.Holder != "node-1" {
+		t.Fatalf("lease after wrong-holder release = %+v, want node-1", l)
+	}
+
+	// The exact acquisition releases cleanly.
+	clk++
+	if err := ns.ReleaseLeaseAt("/vol", "node-1", second.At); err != nil {
+		t.Fatalf("matching ReleaseLeaseAt: %v", err)
+	}
+	if l, _ := ns.Lease("/vol"); l.Holder != "" {
+		t.Fatalf("lease after matching release = %+v, want vacant", l)
+	}
+
+	// Missing volumes still surface an error.
+	if err := ns.ReleaseLeaseAt("/missing", "node-1", second.At); err == nil {
+		t.Fatal("ReleaseLeaseAt on a missing volume should error")
+	}
+}

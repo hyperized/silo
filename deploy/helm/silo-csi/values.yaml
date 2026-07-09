@@ -17,6 +17,18 @@ silod:
   # through. With hostNetwork on the node DaemonSet, 127.0.0.1 reaches the
   # silod running on the same node.
   nbdAddress: "127.0.0.1:10809"
+  # nbdReconnectTimeout is how long a volume's I/O waits for silod to come
+  # back after its connection drops (a rolling restart, an upgrade, a crash)
+  # before erroring. During the wait the I/O is paused; once silod returns,
+  # the node plugin reconnects the volume and the I/O resumes. The default
+  # covers a rolling restart including an image pull.
+  nbdReconnectTimeout: "5m"
+  # nbdRequestTimeout bounds a single block request in the kernel: a request
+  # that exceeds it has its connection retired and is retried on the next
+  # one. This turns a silently hung connection into a quick reconnect, and
+  # bounds how long a shutting-down node can block on an unanswerable write.
+  # The default is far above any healthy request latency. "0" disables it.
+  nbdRequestTimeout: "2m"
   # tls mounts cluster client credentials so the controller talks mTLS to silod.
   # Leave secretName empty to connect insecurely (dev clusters only).
   tls:
@@ -34,6 +46,11 @@ node:
   # hostNetwork lets the node plugin reach the node-local silod over 127.0.0.1
   # and use the host's nbd devices.
   hostNetwork: true
+  # metricsAddress serves Prometheus metrics (attached volumes, reconnects)
+  # and /healthz on each node plugin. Empty disables the listener. With
+  # hostNetwork this binds on the node itself, so keep it firewalled or
+  # scrape-only.
+  metricsAddress: "0.0.0.0:7090"
   # kubeletDir is the kubelet root; override for k0s/k3s/microk8s.
   kubeletDir: /var/lib/kubelet
   tolerations:
@@ -73,8 +90,8 @@ storageClass:
     snapshot-retention: "24h"
     # chunk-size is the copy-on-write extent: the unit silod rewrites on every
     # partial write. For a filesystem-formatted block volume (ext4's 4 KiB
-    # metadata writes) an oversized extent means large write amplification — a
-    # 4 KiB write rewrites, re-encrypts and re-replicates a whole extent — and a
+    # metadata writes) an oversized extent means large write amplification (a
+    # 4 KiB write rewrites, re-encrypts and re-replicates a whole extent) and a
     # correspondingly large transient buffer per in-flight write. The earlier
     # 4Mi default amplified 4 KiB writes ~1000x. 256Ki is a balance: ~16x less
     # amplification and per-write memory than 4Mi, while keeping the (currently

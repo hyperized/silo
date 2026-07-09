@@ -28,7 +28,8 @@ func TestServer_ServesIdentityOverSocket(t *testing.T) {
 	socket := filepath.Join(dir, "s.sock")
 	endpoint := "unix://" + socket
 
-	srv := csi.NewServer(endpoint, nil,
+	srv := csi.NewServer(
+		endpoint, nil,
 		csi.WithIdentity(csi.NewIdentityService("v9")),
 		csi.WithController(csi.NewControllerService(&fakeStore{})),
 		csi.WithNode(csi.NewNodeService("node-1", &fakeAttacher{}, &fakeMounter{})),

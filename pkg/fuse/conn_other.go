@@ -14,6 +14,11 @@ func Mount(mountpoint string) (*DevConn, error) {
 // methods are never reached because Mount always errors.
 type DevConn struct{}
 
+// ReadRequest is unreachable off Linux; see DevConn.
 func (*DevConn) ReadRequest() ([]byte, error) { return nil, fmt.Errorf("fuse: unsupported platform") }
-func (*DevConn) WriteResponse([]byte) error   { return fmt.Errorf("fuse: unsupported platform") }
-func (*DevConn) Close() error                 { return nil }
+
+// WriteResponse is unreachable off Linux; see DevConn.
+func (*DevConn) WriteResponse([]byte) error { return fmt.Errorf("fuse: unsupported platform") }
+
+// Close is unreachable off Linux; see DevConn.
+func (*DevConn) Close() error { return nil }

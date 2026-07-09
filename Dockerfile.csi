@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1.7
 #
 # The silo-csi image: the CSI controller and node plugin in one binary.
-# The node plugin shells out to the host's block tooling, so the runtime image
-# bundles nbd-client (attach), e2fsprogs/xfsprogs (mkfs), and util-linux
-# (mount/umount/blkid). It runs privileged on each node.
+# The node plugin attaches volumes by driving the kernel's NBD interface
+# directly (no nbd-client) and shells out for filesystem tooling, so the
+# runtime image bundles e2fsprogs/xfsprogs (mkfs) and util-linux
+# (mount/umount/blkid); nbd-client is kept for manual operator recovery only.
+# It runs privileged on each node.
 #
 # Build:   docker build -t silo/silo-csi:dev -f Dockerfile.csi .
 
@@ -28,9 +30,10 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # ---- Runtime stage ----------------------------------------------------------
 FROM alpine:3.21
 
-# Host block tooling the node plugin invokes. nbd loads the kernel client;
-# e2fsprogs/xfsprogs provide mkfs.ext4/mkfs.xfs; util-linux provides
-# mount/umount/blkid. ca-certificates lets the controller talk mTLS to silod.
+# Host tooling: e2fsprogs/xfsprogs provide mkfs.ext4/mkfs.xfs; util-linux
+# provides mount/umount/blkid; nbd provides nbd-client for manual recovery
+# only (the attach path drives the kernel directly). ca-certificates lets the
+# controller talk mTLS to silod.
 RUN apk add --no-cache \
         ca-certificates \
         tini \
@@ -41,5 +44,5 @@ RUN apk add --no-cache \
 
 COPY --from=builder /out/silo-csi /usr/local/bin/silo-csi
 
-# Runs as root: the node plugin must mount filesystems and drive nbd-client.
+# Runs as root: the node plugin must mount filesystems and configure NBD devices.
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/silo-csi"]

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hyperized/silo/internal/chunkstore"
+	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/namespace"
 	"github.com/hyperized/silo/internal/nbd"
 )
@@ -64,7 +65,12 @@ func (n *fakeNS) Size(string) (int64, error)                            { return
 func (n *fakeNS) AcquireLease(string, string) (namespace.Lease, error) {
 	return namespace.Lease{}, n.acquireErr
 }
-func (n *fakeNS) ReleaseLease(string, string) error { n.released = true; return n.releaseErr }
+
+func (n *fakeNS) ReleaseLeaseAt(string, string, hlc.Timestamp) error {
+	n.released = true
+	return n.releaseErr
+}
+
 func (n *fakeNS) VolumeInodeID(string) (string, error) {
 	if n.extentErr != nil {
 		return "", n.extentErr

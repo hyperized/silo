@@ -637,8 +637,12 @@ func TestDefaultLoadClusterTLS_ExternalCAWaitsThenLoads(t *testing.T) {
 	}
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		_ = os.WriteFile(caPath, caPEM, 0o600)
+		// Key first: waitForCA returns as soon as the cert exists (the
+		// verifier-only case), so writing the cert last is what makes the
+		// pair complete when the poller wakes. Cert-first raced the poller
+		// into loading a cert-only CA and flaked.
 		_ = os.WriteFile(keyPath, keyPEM, 0o600)
+		_ = os.WriteFile(caPath, caPEM, 0o600)
 	}()
 
 	cfg := testConfig(t)

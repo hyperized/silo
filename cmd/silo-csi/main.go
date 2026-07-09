@@ -6,15 +6,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	namespacev1 "github.com/hyperized/silo/api/proto/silo/namespace/v1"
 	"github.com/hyperized/silo/internal/csi"
+	"github.com/hyperized/silo/internal/exporter"
+	"github.com/hyperized/silo/internal/metrics"
 	"github.com/hyperized/silo/internal/observability"
 )
 
@@ -26,6 +32,24 @@ var version = "dev"
 // signal.NotifyContext so SIGINT/SIGTERM trigger a graceful drain.
 var signalContext = func() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+// newAttacher builds the node plugin's volume attacher; swappable so tests can
+// run node mode on hosts without a Linux NBD stack. The returned closer stops
+// supervision goroutines only — attached devices keep serving I/O across a
+// plugin restart and are re-adopted on start.
+var newAttacher = func(cfg csi.Config, logger *slog.Logger) (csi.VolumeAttacher, func() error, error) {
+	a, err := csi.NewNBDAttacher(
+		cfg.NBDAddr,
+		csi.WithReconnectWindow(cfg.NBDReconnectTimeout),
+		csi.WithRequestTimeout(cfg.NBDRequestTimeout),
+		csi.WithStateDir(cfg.StateDir),
+		csi.WithAttacherLogger(logger),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return a, a.Close, nil
 }
 
 func main() {
@@ -49,6 +73,11 @@ func runMain(stdout, stderr io.Writer) int {
 	slog.SetDefault(logger)
 
 	opts := []csi.ServerOption{csi.WithIdentity(csi.NewIdentityService(version))}
+	exp := exporter.New()
+	exp.Register(metrics.Static("silo_csi", metrics.Metric{
+		Name: "build_info", Help: "Build metadata; the value is always 1.",
+		Kind: metrics.Gauge, Value: 1, Labels: [][2]string{{"version", version}},
+	}))
 
 	if cfg.Mode.RunsController() {
 		conn, err := dialer(cfg.SilodAddr)
@@ -68,23 +97,68 @@ func runMain(stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "silo-csi: %v\n", err)
 			return 1
 		}
-		attacher, err := csi.NewNBDAttacher(cfg.NBDAddr)
+		attacher, closeAttacher, err := newAttacher(cfg, logger)
 		if err != nil {
 			fmt.Fprintf(stderr, "silo-csi: %v\n", err)
 			return 1
 		}
+		defer func() { _ = closeAttacher() }()
+		if src, ok := attacher.(metrics.Source); ok {
+			exp.Register(src)
+		}
 		opts = append(opts, csi.WithNode(csi.NewNodeService(nodeID, attacher, csi.NewHostMounter())))
-		logger.Info("silo-csi node enabled", "node", nodeID, "nbd", cfg.NBDAddr)
+		logger.Info("silo-csi node enabled", "node", nodeID, "nbd", cfg.NBDAddr, "reconnect_timeout", cfg.NBDReconnectTimeout.String(), "request_timeout", cfg.NBDRequestTimeout.String())
 	}
 
 	ctx, cancel := signalContext()
 	defer cancel()
+
+	if cfg.HTTPAddr != "" {
+		stopHTTP, err := serveHTTP(ctx, cfg.HTTPAddr, exp, logger)
+		if err != nil {
+			fmt.Fprintf(stderr, "silo-csi: %v\n", err)
+			return 1
+		}
+		defer stopHTTP()
+	}
 
 	if err := csi.NewServer(cfg.Endpoint, logger, opts...).Serve(ctx); err != nil {
 		logger.Error("silo-csi stopped with an error", "err", err)
 		return 1
 	}
 	return 0
+}
+
+// serveHTTP exposes /metrics and /healthz until ctx ends; the returned stop
+// waits for the listener to wind down.
+func serveHTTP(ctx context.Context, addr string, exp *exporter.Exporter, logger *slog.Logger) (func(), error) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", exp.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("could not bind the metrics listener at %q (%w); set SILO_CSI_HTTP_ADDR to a free host:port, or empty to disable it", addr, err)
+	}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics listener stopped with an error", "err", err)
+		}
+	}()
+	//nolint:gosec // G118: the drain context is deliberately not derived from ctx — ctx is already cancelled when the drain starts, and the drain needs its own five-second budget.
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	logger.Info("metrics served", "addr", ln.Addr().String())
+	return func() { <-done }, nil
 }
 
 // resolveNodeID returns the configured node id, falling back to the host name

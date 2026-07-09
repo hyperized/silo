@@ -26,7 +26,10 @@ type nsVolumes interface {
 	VolumeInodeID(path string) (string, error)
 	Lease(path string) (namespace.Lease, error)
 	AcquireLease(path, holder string) (namespace.Lease, error)
-	ReleaseLease(path, holder string) error
+	// ReleaseLeaseAt is compare-and-release: it only vacates the exact
+	// acquisition this connection made, so tearing down an old connection
+	// can never drop the lease a reconnected client just re-acquired.
+	ReleaseLeaseAt(path, holder string, at hlc.Timestamp) error
 }
 
 // coordChunks adapts the replication coordinator to the volume SDK's Chunks
@@ -76,21 +79,22 @@ func (b *volumeBackend) Open(ctx context.Context, export string) (nbd.Device, fu
 	if size <= 0 {
 		return nil, nil, fmt.Errorf("nbd: volume %q has no size; create it with a size before mounting it", export)
 	}
-	if _, err := b.ns.AcquireLease(export, b.holder); err != nil {
+	lease, err := b.ns.AcquireLease(export, b.holder)
+	if err != nil {
 		return nil, nil, fmt.Errorf("nbd: could not acquire the lease on %q (%w)", export, err)
 	}
 	meta, err := b.metadata(ctx, export)
 	if err != nil {
-		_ = b.ns.ReleaseLease(export, b.holder)
+		_ = b.ns.ReleaseLeaseAt(export, b.holder, lease.At)
 		return nil, nil, err
 	}
 	vol, err := volume.Open(ctx, meta, b.chunks, export, b.holder)
 	if err != nil {
-		_ = b.ns.ReleaseLease(export, b.holder)
+		_ = b.ns.ReleaseLeaseAt(export, b.holder, lease.At)
 		return nil, nil, err
 	}
 	release := func() {
-		if err := b.ns.ReleaseLease(export, b.holder); err != nil {
+		if err := b.ns.ReleaseLeaseAt(export, b.holder, lease.At); err != nil {
 			b.logger.Warn("nbd: releasing the volume lease failed", "export", export, "error", err)
 		}
 	}
