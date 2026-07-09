@@ -29,8 +29,17 @@ Attached volumes survive silod restarts (rolling upgrades, crashes): the node
 plugin watches every attachment and reconnects it the moment silod is back,
 while the kernel holds the volume's I/O. Workloads see a short pause, not an
 error. `silod.nbdReconnectTimeout` (default `5m`) bounds how long I/O waits
-before it fails. The plugin also remembers its attachments on disk, so its own
-restarts (upgrades of this chart) never orphan a mounted volume.
+before it fails, and `silod.nbdRequestTimeout` (default `2m`) bounds a single
+hung request — keep it set; it is also what lets a node with in-use volumes
+shut down instead of hanging on an unanswerable write. The plugin remembers
+its attachments on disk, so its own restarts (upgrades of this chart) never
+orphan a mounted volume.
+
+Each node plugin serves Prometheus metrics and `/healthz` on
+`node.metricsAddress` (default `:7090`): attached volumes, volumes currently
+reconnecting, and completed reconnects — alert on reconnects that no rollout
+explains. Volume health also reaches the kubelet through the CSI volume
+condition.
 
 ## Install
 

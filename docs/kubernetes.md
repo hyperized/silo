@@ -71,8 +71,11 @@ How the pieces fit together:
 2. **The `nbd` kernel module on every node** that will mount volumes:
 
    ```sh
-   modprobe nbd nbds_max=64        # make it persistent via /etc/modules-load.d/
+   modprobe nbd        # load it at boot via /etc/modules-load.d/ (Talos: machine.kernel.modules)
    ```
+
+   No `nbds_max` tuning is needed: the plugin asks the kernel for a device,
+   and the kernel creates more on demand.
 
 3. **Images your cluster can pull.** Build and push them:
 
@@ -114,9 +117,12 @@ kubectl get csinodes -o wide             # the driver should be listed per node
 | `image.repository` / `image.tag` | `ghcr.io/hyperized/silo-csi` / chart appVersion | Point at your registry |
 | `silod.address` | `silo:7000` | silod gRPC `Service` the controller dials |
 | `silod.nbdAddress` | `127.0.0.1:10809` | node-local silod NBD endpoint |
+| `silod.nbdReconnectTimeout` | `5m` | how long a volume's I/O waits for silod to come back (a rolling restart) before erroring |
+| `silod.nbdRequestTimeout` | `2m` | bound on a single block request; turns a hung connection into a quick reconnect. Keep it set |
 | `silod.tls.secretName` | `""` | Secret with `ca.crt`/`client.crt`/`client.key` for mTLS to silod |
 | `node.hostNetwork` | `true` | lets the node plugin reach node-local silod and host nbd devices |
 | `node.kubeletDir` | `/var/lib/kubelet` | override for k3s/microk8s/k0s |
+| `node.metricsAddress` | `0.0.0.0:7090` | per-node `/metrics` + `/healthz` (attached volumes, reconnects); empty disables |
 | `storageClass.create` | `true` | install the `silo` StorageClass |
 | `controller.replicas` | `1` | controller is stateless; scale for availability |
 
@@ -149,6 +155,23 @@ parameters:
 Only `chunk-size` changes behaviour today (it sets the volume's extent size).
 The others are accepted and recorded so manifests written now keep working when
 placement and retention ship.
+
+For a different filesystem, set the standard CSI parameter on a StorageClass:
+`csi.storage.k8s.io/fstype: xfs` (the node plugin image ships `mkfs.ext4` and
+`mkfs.xfs`; ext4 is the default). Raw block volumes (`volumeMode: Block`) are
+supported too — the pod gets the device node itself via `volumeDevices`.
+
+### Behaviour during silod restarts
+
+Attached volumes survive silod restarts (rolling upgrades, crashes): the node
+plugin supervises every attachment and reconnects it the moment silod is
+back, while the kernel holds the volume's I/O — pods see a pause of a couple
+of seconds, not an error. The plugin records its attachments on disk, so its
+own upgrades never orphan a mounted volume, and it reports each volume's
+health through `NodeGetVolumeStats` (usage plus an abnormal condition while a
+volume is reconnecting). Details and bounds: [operations.md — rolling
+upgrades](operations.md#rolling-upgrades); reboot guidance for nodes with
+in-use volumes is there too.
 
 ---
 
@@ -243,8 +266,11 @@ kubectl -n silo-system logs -l app.kubernetes.io/component=node -c silo-csi
   has no NBD server. Confirm `SILO_NBD_ADDR` is set on silod and that
   `silod.nbdAddress` resolves from the node plugin (with `hostNetwork: true`,
   `127.0.0.1:10809` reaches the silod on the same node).
-- `no free /dev/nbd device` → the `nbd` module isn't loaded or `nbds_max` is too
-  low. `modprobe nbd nbds_max=64`.
+- `silod refused to serve export …` right after provisioning → the volume's
+  metadata hasn't reached this node's silod yet (namespace propagation can lag
+  a moment on a fresh volume). The kubelet's retry resolves it by itself.
+- `the kernel's NBD driver is not loaded` → `modprobe nbd` on the node (on
+  Talos, add `nbd` to `machine.kernel.modules`).
 - `mkfs`/`mount` errors → the image is missing block tooling. Use the provided
   `Dockerfile.csi` (it bundles e2fsprogs/xfsprogs/util-linux).
 

@@ -742,6 +742,17 @@ Notable series:
 - `silo_namespace_antientropy_merges_total` and
   `silo_namespace_antientropy_last_merge_age_seconds` — namespace convergence
   activity and lag.
+
+The **CSI node plugin** serves its own series on `SILO_CSI_HTTP_ADDR`
+(`node.metricsAddress` in the Helm chart, default `:7090` per node):
+
+- `silo_csi_nbd_attached_volumes` — volumes attached on the node.
+- `silo_csi_nbd_reconnecting_volumes` — volumes whose connection to silod is
+  down right now; their I/O is paused while the plugin reconnects. **Alert
+  when this is non-zero for longer than a rollout explains.**
+- `silo_csi_nbd_reconnects_total` — completed reconnections. A climbing rate
+  without a silod rollout to explain it means connections are dying for some
+  other reason (network, resource pressure) and deserves a look.
 - `silo_namespace_inodes_reaped_total` — orphaned (unreachable) namespace inodes
   reclaimed after their directory link was removed. Removing a path tombstones
   the link; the inode it pointed at is reaped on the next gossip merge and on the

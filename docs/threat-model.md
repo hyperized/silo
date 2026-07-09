@@ -44,6 +44,10 @@ authorization beyond "is a cluster member" (see [Authorization](#authorization-c
 - **NBD is unauthenticated block I/O** and is opt-in (`SILO_NBD_ADDR`). Treat the
   NBD port as sensitive: bind it to localhost/the node network, not the public
   interface. The CSI node plugin connects to the node-local silod.
+- **Observability listeners are unauthenticated HTTP** — silod's
+  `SILO_HTTP_ADDR` (metrics, health, optional pprof) and the CSI node plugin's
+  `SILO_CSI_HTTP_ADDR` (metrics, health). They expose operational readings,
+  never data or credentials; still, keep them on the node/cluster network.
 
 ### Disk / stolen-media attacker
 

@@ -231,6 +231,7 @@ make build              # ./bin/{silod,siloctl,silo-csi}
 make images             # silo/silod and silo/silo-csi container images
 make test               # unit tests
 make test-integration   # end-to-end against a real silod (build-tag 'integration')
+make test-nbd-kernel    # NBD attach/reconnect against a real kernel (privileged docker)
 make check              # fmt + vet + lint + test
 ```
 
