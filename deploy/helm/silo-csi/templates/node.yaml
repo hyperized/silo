@@ -50,6 +50,12 @@ spec:
               value: {{ .Values.silod.nbdAddress | quote }}
             - name: SILO_CSI_NBD_RECONNECT_TIMEOUT
               value: {{ .Values.silod.nbdReconnectTimeout | quote }}
+            - name: SILO_CSI_NBD_REQUEST_TIMEOUT
+              value: {{ .Values.silod.nbdRequestTimeout | quote }}
+            {{- if .Values.node.metricsAddress }}
+            - name: SILO_CSI_HTTP_ADDR
+              value: {{ .Values.node.metricsAddress | quote }}
+            {{- end }}
             - name: SILO_CSI_NODE_ID
               valueFrom:
                 fieldRef:

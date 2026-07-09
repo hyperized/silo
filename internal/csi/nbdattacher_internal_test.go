@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hyperized/silo/internal/metrics"
 	"github.com/hyperized/silo/internal/nbdclient"
 	"github.com/hyperized/silo/internal/nbdnl"
 )
@@ -627,3 +628,62 @@ var (
 	_ linkWatcher         = (*nbdnl.Watcher)(nil)
 	_ nbdclient.KernelNBD = (*nbdnl.Conn)(nil)
 )
+
+func TestNBDAttacherMetrics(t *testing.T) {
+	dir := t.TempDir()
+	backend := newFakeBackend()
+	a := newTestAttacher(t, backend, dir)
+	ctx := context.Background()
+
+	if a.MetricPrefix() != "silo_csi" {
+		t.Fatalf("prefix = %q", a.MetricPrefix())
+	}
+
+	if _, err := a.Attach(ctx, "/vol/a"); err != nil {
+		t.Fatalf("Attach a: %v", err)
+	}
+	if _, err := a.Attach(ctx, "/vol/b"); err != nil {
+		t.Fatalf("Attach b: %v", err)
+	}
+	sa, sb := backend.session("/vol/a"), backend.session("/vol/b")
+	sa.mu.Lock()
+	sa.state = nbdclient.StateReconnecting
+	sa.mu.Unlock()
+	sb.mu.Lock()
+	sb.reconnects = 3
+	sb.mu.Unlock()
+
+	byName := func(ms []metrics.Metric, name string) float64 {
+		t.Helper()
+		for _, m := range ms {
+			if m.Name == name {
+				return m.Value
+			}
+		}
+		t.Fatalf("metric %q missing", name)
+		return 0
+	}
+	ms := a.CollectMetrics()
+	if v := byName(ms, "nbd_attached_volumes"); v != 2 {
+		t.Fatalf("attached = %v, want 2", v)
+	}
+	if v := byName(ms, "nbd_reconnecting_volumes"); v != 1 {
+		t.Fatalf("reconnecting = %v, want 1", v)
+	}
+	if v := byName(ms, "nbd_reconnects_total"); v != 3 {
+		t.Fatalf("reconnects = %v, want 3", v)
+	}
+
+	// Detaching a session must not lose its reconnect count: the exported
+	// counter may never go backwards.
+	if err := a.Detach(ctx, "/vol/b"); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+	ms = a.CollectMetrics()
+	if v := byName(ms, "nbd_reconnects_total"); v != 3 {
+		t.Fatalf("reconnects after detach = %v, want 3", v)
+	}
+	if v := byName(ms, "nbd_attached_volumes"); v != 1 {
+		t.Fatalf("attached after detach = %v, want 1", v)
+	}
+}

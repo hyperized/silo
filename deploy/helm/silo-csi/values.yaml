@@ -24,6 +24,12 @@ silod:
   # nothing happened. The default comfortably covers a rolling restart
   # including an image pull.
   nbdReconnectTimeout: "5m"
+  # nbdRequestTimeout bounds a single block request in the kernel: a request
+  # that exceeds it has its connection retired and is retried on the next
+  # one. This turns a silently hung connection into a quick reconnect, and
+  # bounds how long a shutting-down node can block on an unanswerable write.
+  # The default is far above any healthy request latency. "0" disables it.
+  nbdRequestTimeout: "2m"
   # tls mounts cluster client credentials so the controller talks mTLS to silod.
   # Leave secretName empty to connect insecurely (dev clusters only).
   tls:
@@ -41,6 +47,11 @@ node:
   # hostNetwork lets the node plugin reach the node-local silod over 127.0.0.1
   # and use the host's nbd devices.
   hostNetwork: true
+  # metricsAddress serves Prometheus metrics (attached volumes, reconnects)
+  # and /healthz on each node plugin. Empty disables the listener. With
+  # hostNetwork this binds on the node itself, so keep it firewalled or
+  # scrape-only.
+  metricsAddress: "0.0.0.0:7090"
   # kubeletDir is the kubelet root; override for k0s/k3s/microk8s.
   kubeletDir: /var/lib/kubelet
   tolerations:

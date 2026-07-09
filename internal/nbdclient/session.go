@@ -135,6 +135,7 @@ type Session struct {
 	state      State
 	size       uint64
 	stopWatch  func()
+	staleConn  net.Conn
 	reconnects atomic.Uint64
 }
 
@@ -144,11 +145,14 @@ func Attach(ctx context.Context, cfg Config) (*Session, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
 	}
-	export, fd, closeConn, err := dialAndNegotiate(ctx, cfg)
+	export, fd, conn, err := dialAndNegotiate(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	defer closeConn()
+	// The kernel takes its own reference on success; on failure there is no
+	// live attachment whose lease a close could disturb. Either way our copy
+	// can go.
+	defer func() { _ = conn.Close() }()
 	index, err := cfg.Kernel.Connect(nbdnl.ConnectConfig{
 		SocketFD:        fd,
 		SizeBytes:       export.Size,
@@ -198,9 +202,11 @@ func newSession(cfg Config, index uint32, size uint64, state State) *Session {
 }
 
 // dialAndNegotiate opens and handshakes one connection, returning the export,
-// the socket fd, and a closer the caller runs once the kernel holds its own
-// reference to the socket.
-func dialAndNegotiate(ctx context.Context, cfg Config) (Export, int, func(), error) {
+// the socket fd, and the connection itself. Once the kernel holds its own
+// reference to the socket the caller closes the returned connection; a
+// caller whose kernel hand-off failed must NOT close it while it holds the
+// volume's newest lease acquisition — see Session.stash.
+func dialAndNegotiate(ctx context.Context, cfg Config) (Export, int, net.Conn, error) {
 	dctx, cancel := context.WithTimeout(ctx, defaultDialTimeout)
 	defer cancel()
 	conn, err := cfg.Dial(dctx, cfg.Addr)
@@ -217,7 +223,7 @@ func dialAndNegotiate(ctx context.Context, cfg Config) (Export, int, func(), err
 		_ = conn.Close()
 		return Export{}, -1, nil, err
 	}
-	return export, fd, func() { _ = conn.Close() }, nil
+	return export, fd, conn, nil
 }
 
 // Kick asks the supervisor to check the connection now — the dead-link
@@ -308,23 +314,32 @@ func (s *Session) reconnect() {
 }
 
 func (s *Session) reconnectOnce() error {
-	export, fd, closeConn, err := dialAndNegotiate(s.ctx, s.cfg)
+	export, fd, conn, err := dialAndNegotiate(s.ctx, s.cfg)
 	if err != nil {
 		return err
 	}
-	defer closeConn()
+	// This negotiation acquired the volume's lease anew, making any
+	// connection stashed by an earlier failed attempt stale — closing it now
+	// only triggers a release silod will ignore.
+	s.closeStale()
 	s.mu.Lock()
 	expected := s.size
 	s.mu.Unlock()
 	if expected != 0 && export.Size != expected {
 		// A different size means this export is no longer the volume this
 		// device was serving; splicing it in would corrupt the filesystem.
+		s.stash(conn)
 		return fmt.Errorf("export %q is now %d bytes where the attached device is %d; refusing to reconnect a changed volume", s.cfg.Export, export.Size, expected)
 	}
 	if err := s.cfg.Kernel.Reconfigure(s.index, fd, s.cfg.IOTimeout, s.cfg.ReconnectWindow); err != nil {
+		// Closing this connection would make silod release the lease this
+		// very attempt just acquired — vacating it under the device's live
+		// I/O. Hold the connection until a later attempt re-acquires.
+		s.stash(conn)
 		return err
 	}
 	s.watch(fd)
+	_ = conn.Close() // the kernel holds its own reference now
 	if expected == 0 {
 		s.mu.Lock()
 		s.size = export.Size
@@ -333,11 +348,35 @@ func (s *Session) reconnectOnce() error {
 	return nil
 }
 
+// stash parks a negotiated connection whose kernel hand-off failed. Its
+// teardown must wait until a newer acquisition exists; the previous stash, by
+// the same rule, is stale now and can close.
+func (s *Session) stash(conn net.Conn) {
+	s.mu.Lock()
+	prev := s.staleConn
+	s.staleConn = conn
+	s.mu.Unlock()
+	if prev != nil {
+		_ = prev.Close()
+	}
+}
+
+func (s *Session) closeStale() {
+	s.mu.Lock()
+	prev := s.staleConn
+	s.staleConn = nil
+	s.mu.Unlock()
+	if prev != nil {
+		_ = prev.Close()
+	}
+}
+
 // Detach stops supervising and disconnects the device. It is idempotent.
 func (s *Session) Detach(context.Context) error {
 	s.cancel()
 	s.wg.Wait()
 	s.unwatch()
+	s.closeStale()
 	s.mu.Lock()
 	alreadyDetached := s.state == StateDetached
 	s.state = StateDetached
@@ -353,7 +392,9 @@ func (s *Session) Detach(context.Context) error {
 }
 
 // Stop ends supervision without touching the device — shutdown of the node
-// plugin process must leave live attachments serving I/O.
+// plugin process must leave live attachments serving I/O. A stashed
+// connection stays open on purpose: the process exiting closes it anyway,
+// and until then it guards the lease it acquired.
 func (s *Session) Stop() {
 	s.cancel()
 	s.wg.Wait()

@@ -41,10 +41,11 @@ type linkWatcher interface {
 // Attachments are recorded on disk so a restarted node plugin resumes
 // supervising the devices it attached earlier, and Detach stays correct.
 type NBDAttacher struct {
-	addr     string
-	window   time.Duration
-	logger   *slog.Logger
-	stateDir string
+	addr      string
+	window    time.Duration
+	ioTimeout time.Duration
+	logger    *slog.Logger
+	stateDir  string
 
 	kernel      nbdclient.KernelNBD
 	closeKernel func() error
@@ -67,6 +68,9 @@ type NBDAttacher struct {
 	store    *attachmentStore
 	watcher  linkWatcher
 	wg       sync.WaitGroup
+	// reconnectsBase preserves the reconnect counts of sessions that have
+	// been detached, so the exported total never goes backwards.
+	reconnectsBase uint64
 }
 
 // NBDAttacherOption configures an NBDAttacher.
@@ -78,6 +82,17 @@ func WithReconnectWindow(d time.Duration) NBDAttacherOption {
 	return func(a *NBDAttacher) {
 		if d > 0 {
 			a.window = d
+		}
+	}
+}
+
+// WithRequestTimeout bounds a single block request in the kernel; a request
+// that exceeds it has its connection retired and is retried on the next one.
+// Zero disables the bound.
+func WithRequestTimeout(d time.Duration) NBDAttacherOption {
+	return func(a *NBDAttacher) {
+		if d >= 0 {
+			a.ioTimeout = d
 		}
 	}
 }
@@ -252,6 +267,7 @@ func (a *NBDAttacher) sessionConfig(volumePath string) nbdclient.Config {
 		Addr:            a.addr,
 		Export:          volumePath,
 		ReconnectWindow: a.window,
+		IOTimeout:       a.ioTimeout,
 		Kernel:          a.kernel,
 		Logger:          a.logger,
 	}
@@ -306,6 +322,7 @@ func (a *NBDAttacher) Detach(ctx context.Context, volumePath string) error {
 		if err := s.Detach(ctx); err != nil {
 			return err
 		}
+		a.reconnectsBase += s.Reconnects()
 		delete(a.sessions, volumePath)
 	} else if rec, ok := a.records[volumePath]; ok && a.configured(rec.Index) {
 		// Recorded but never adopted (a failed resume): disconnect directly.

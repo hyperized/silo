@@ -130,7 +130,7 @@ func readGoReplies(conn net.Conn, export string) (Export, error) {
 			if len(payload) > 0 {
 				detail = ": " + string(payload)
 			}
-			return Export{}, fmt.Errorf("nbdclient: silod refused to serve export %q (reply %#x%s); check that the volume exists and has a size", export, repType, detail)
+			return Export{}, fmt.Errorf("nbdclient: silod refused to serve export %q (reply %#x%s); check that the volume exists and has a size — a just-created volume can take a moment to reach this node, and the attach is retried automatically", export, repType, detail)
 		case repType == repInfo:
 			if len(payload) >= 12 && binary.BigEndian.Uint16(payload[0:2]) == infoExport {
 				result.Size = binary.BigEndian.Uint64(payload[2:10])

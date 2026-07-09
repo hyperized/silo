@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,5 +147,37 @@ func TestResolveNodeID(t *testing.T) {
 	// Empty falls back to the host name, which is always resolvable in tests.
 	if id, err := resolveNodeID(""); err != nil || id == "" {
 		t.Errorf("resolveNodeID(\"\") = (%q, %v), want the host name", id, err)
+	}
+}
+
+func TestRunMain_MetricsListener(t *testing.T) {
+	prev := signalContext
+	t.Cleanup(func() { signalContext = prev })
+	signalContext = cancelledSignal
+	useFakeAttacher(t)
+
+	// A happy path: the listener binds an ephemeral port and winds down with
+	// the server.
+	t.Setenv("SILO_CSI_MODE", "node")
+	t.Setenv("SILO_CSI_NODE_ID", "n")
+	t.Setenv("SILO_CSI_HTTP_ADDR", "127.0.0.1:0")
+	t.Setenv("SILO_CSI_ENDPOINT", "unix://"+shortSocketPath(t))
+	var out, errBuf bytes.Buffer
+	if code := runMain(&out, &errBuf); code != 0 {
+		t.Errorf("code = %d, want 0 (stderr=%q, out=%q)", code, errBuf.String(), out.String())
+	}
+
+	// A port that cannot be bound fails loudly with the env var to fix.
+	blocker, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = blocker.Close() }()
+	t.Setenv("SILO_CSI_HTTP_ADDR", blocker.Addr().String())
+	if code := runMain(&out, &errBuf); code != 1 {
+		t.Errorf("code = %d, want 1 for an unbindable metrics address", code)
+	}
+	if !strings.Contains(errBuf.String(), "SILO_CSI_HTTP_ADDR") {
+		t.Errorf("stderr = %q, want the env var named", errBuf.String())
 	}
 }

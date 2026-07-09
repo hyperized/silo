@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,4 +220,84 @@ func TestDetachSurfacesDisconnectFailure(t *testing.T) {
 	if got := kernel.snapshot().disconnects; got != 0 {
 		t.Fatalf("successful disconnects = %d, want 0 (the only call errored)", got)
 	}
+}
+
+// closeTrackingDialer wraps pipe connections so a test can observe which of
+// them were closed — the lease-guard behaviour hinges on exactly that.
+type closeTrackingDialer struct {
+	mu    sync.Mutex
+	conns []*trackedConn
+	base  func(context.Context, string) (net.Conn, error)
+}
+
+type trackedConn struct {
+	net.Conn
+	closed atomic.Bool
+}
+
+func (c *trackedConn) Close() error {
+	c.closed.Store(true)
+	return c.Conn.Close()
+}
+
+func (d *closeTrackingDialer) dial(ctx context.Context, addr string) (net.Conn, error) {
+	conn, err := d.base(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	tc := &trackedConn{Conn: conn}
+	d.mu.Lock()
+	d.conns = append(d.conns, tc)
+	d.mu.Unlock()
+	return tc, nil
+}
+
+func (d *closeTrackingDialer) unclosed() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	n := 0
+	for _, c := range d.conns {
+		if !c.closed.Load() {
+			n++
+		}
+	}
+	return n
+}
+
+// TestReconfigureFailureKeepsLeaseGuardConnection: a connection whose kernel
+// hand-off failed holds the volume's newest lease acquisition, so it must
+// stay open (its close would vacate the live lease) until a later attempt
+// re-acquires — at which point everything closes.
+func TestReconfigureFailureKeepsLeaseGuardConnection(t *testing.T) {
+	restoreFD := nbdclient.SetSocketFDForTest(func(net.Conn) (int, error) { return 42, nil })
+	defer restoreFD()
+	restoreBackoff := nbdclient.SetBackoffForTest(time.Millisecond, 5*time.Millisecond)
+	defer restoreBackoff()
+
+	kernel := &fakeKernel{index: 2}
+	dialer := &closeTrackingDialer{base: pipeDialer(t, memBackend{size: 1 << 20})}
+	cfg := testConfig(t, kernel, memBackend{size: 1 << 20})
+	cfg.Dial = dialer.dial
+
+	s, err := nbdclient.Attach(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	defer func() { _ = s.Detach(context.Background()) }()
+
+	kernel.setReconfigErr(errors.New("no dead slot"))
+	s.Kick()
+	// While reconfigures keep failing, exactly one negotiated connection must
+	// stay open as the lease guard (each new attempt supersedes the previous).
+	waitFor(t, "a lease-guard connection", func() bool { return dialer.unclosed() == 1 })
+	time.Sleep(20 * time.Millisecond)
+	if got := dialer.unclosed(); got != 1 {
+		t.Fatalf("unclosed connections during failed reconfigures = %d, want exactly 1", got)
+	}
+
+	kernel.setReconfigErr(nil)
+	waitFor(t, "reconnect success", func() bool { return s.Reconnects() >= 1 })
+	// The successful attempt re-acquired the lease and the kernel holds its
+	// own socket reference: every user-space connection can close.
+	waitFor(t, "all connections closed", func() bool { return dialer.unclosed() == 0 })
 }
