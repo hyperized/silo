@@ -26,30 +26,43 @@ the glue between Kubernetes and your silo cluster:
 It does **not** deploy `silod`. The driver connects to a silo cluster you run
 (`silod.address`). See [Prerequisites](#prerequisites).
 
-How the pieces fit together:
+How the pieces fit together. Note that provisioning and data travel separate
+paths: the controller only ever talks to silod over gRPC, while your pod's reads
+and writes go through a kernel NBD device and never touch the CSI driver at all.
 
-```
-   kubectl apply PVC                                   your pods
-          │                                                │
-          ▼                                                ▼  ReadWriteOnce mount
-   ┌──────────────┐   CSI gRPC    ┌───────────────────────────────────┐
-   │  silo-csi    │──────────────▶│  silo-csi node plugin (DaemonSet)  │
-   │  controller  │               │  attaches over NBD, mkfs, mounts   │
-   └──────┬───────┘               └────────────────┬──────────────────┘
-          │ create/snapshot volume                 │ NBD to node-local silod
-          ▼                                         ▼
-   ┌───────────────────────────────────────────────────────────────────┐
-   │            Cluster of identical silod nodes (gossip + CRDT)         │
-   │   chunk store · consistent-hash placement · N-way replication      │
-   └───────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    pvc["PersistentVolumeClaim"]
+    pod["your pod"]
+    kubelet["kubelet"]
+    dev["/dev/nbdX<br/>kernel nbd module"]
+
+    subgraph chart["installed by the silo-csi chart"]
+        ctrl["silo-csi controller (Deployment)<br/>with the provisioner, attacher<br/>and snapshotter sidecars"]
+        nodep["silo-csi node plugin (DaemonSet)<br/>privileged, hostNetwork"]
+    end
+
+    subgraph yours["your silo cluster (not installed by the chart)"]
+        silod["silod on each storage node<br/>chunk store, placement,<br/>N-way replication"]
+    end
+
+    pvc --> ctrl
+    ctrl -->|"CreateVolume, CreateSnapshot<br/>gRPC over mTLS"| silod
+    kubelet -->|"NodeStageVolume<br/>NodePublishVolume"| nodep
+    nodep -->|"attach, mkfs, mount"| dev
+    dev -->|"NBD, taking the volume lease"| silod
+    pod -->|"file I/O"| dev
 ```
 
-- **Provision:** the controller turns a PVC into a silo volume (an extent map).
-- **Attach:** the node plugin opens the volume over NBD from the silod on that
-  node, which **takes the volume's lease and fences any prior holder**, so a pod
-  rescheduled onto a new node takes over its disk without corruption.
-- **Heal:** lose a node and its chunks re-replicate onto survivors in the
-  background; the namespace converges over gossip.
+- **Provision:** the controller turns a PVC into a silo volume, which is an extent
+  map. No data moves.
+- **Attach:** the node plugin opens the volume over NBD from silod, which takes
+  the volume's lease and fences any prior holder. A pod rescheduled onto another
+  node takes over its disk without corrupting it.
+- **Read and write:** the pod's I/O goes to `/dev/nbdX` and straight to silod. The
+  node plugin set the device up and then got out of the way.
+- **Heal:** lose a node and its chunks re-replicate onto the survivors in the
+  background, while the namespace converges over gossip.
 
 ---
 

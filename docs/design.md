@@ -28,6 +28,46 @@ so a split brain cannot corrupt it and snapshots cost nothing.
 CSI bindings are built in-tree, and volumes attach over NBD from the mainline
 kernel, so there is no client to install and little to audit.
 
+## How a volume is stored
+
+A silo volume is not a file. It is a map from extent index to chunk id, and the
+chunks are immutable encrypted blobs that live independently of any volume.
+
+Reading at some offset means finding the extent that offset falls in, looking that
+extent up in the map, and fetching the chunk it names. Left to right below: the
+volume's logical extents (256 KiB each by default), the extent map, and the chunk
+store, where every chunk is immutable, AES-GCM encrypted, and present on all N
+replicas.
+
+```mermaid
+flowchart LR
+    e0["extent 0"] --> k0["0 → rk1-2-0b8c…-0-17"] --> c0["chunk rk1-2-0b8c…-0-17"]
+    e1["extent 1"] --> k1["1 → rk1-2-0b8c…-0-04"] --> c1["chunk rk1-2-0b8c…-0-04"]
+    e2["extent 2"] --> k2["no entry"] --> z["reads as zeroes"]
+    e3["extent 3"] --> k3["3 → rk1-3-9c14…-0-88"] --> c3["chunk rk1-3-9c14…-0-88"]
+```
+
+Four consequences follow from that shape, and most of silo's behaviour is one of
+them:
+
+**Volumes are sparse.** Extent 2 has no entry, so it was never written and reads
+as zeroes. A 10 GiB volume with 40 MiB written costs 40 MiB.
+
+**Snapshots are free.** A snapshot copies the map, not the data. Both maps point
+at the same immutable chunks, and neither can disturb the other.
+
+**Overwrites do not overwrite.** Writing to extent 1 mints a new chunk, replicates
+it, and rebinds the map entry. The chunk it replaced is still on disk, now
+referenced by nothing. Reclaiming those is the chunk garbage collector's job, and
+it is the reason silo has one at all. See
+[operations.md](operations.md#configuration) for `SILO_CHUNK_GC_ENABLE`.
+
+**A chunk id names a writer, not a volume.** The id is the writing node, a random
+per-session identifier, and a counter. Chunks from one volume are scattered across
+many such sets, and a set outlives the session that created it. This is why
+reclamation has to be mark-and-sweep over the live reference set rather than a
+per-volume delete.
+
 ## Capabilities
 
 An ordinary `PersistentVolumeClaim` against the `silo` StorageClass becomes a
