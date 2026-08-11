@@ -27,7 +27,7 @@ silo makes a smaller bet: one component (`silod`), deployed the same way
 everywhere, with as few decisions as possible between you and a working volume.
 You give up features for that: `ReadWriteOnce` volumes, close-to-open FUSE
 coherence, no erasure coding yet (see
-[What works today](../README.md#what-works-today) and
+[design.md](design.md#status) and
 [known-gaps.md](known-gaps.md)). On small synchronous writes you also give up
 some latency, which the rest of this page covers.
 

@@ -36,9 +36,18 @@ type ReplicaProbe interface {
 // highest-priority *holder* — rather than just the ring primary — means
 // healing still happens when the primary was down during the original
 // write and therefore never received the chunk itself.
+//
+// Only referenced chunks are healed. An orphan is on its way out — the chunk GC
+// reclaims it — so re-replicating one is not just wasted work, it actively
+// undoes the GC: a node sweeps an orphan, and the next scrub copies it back from
+// a peer that has not swept yet. With a large backlog the two never settle. The
+// live set comes from the same two reference sources the GC uses, and carries
+// the same completeness caveat, handled in runOnce.
 type Scrubber struct {
 	place    Placement
 	catalog  ChunkCatalog
+	ns       NamespaceRefSource
+	ext      ExtentRefSource
 	probe    ReplicaProbe
 	rf       int
 	interval time.Duration
@@ -47,9 +56,14 @@ type Scrubber struct {
 	// shortfall is the number of chunks this node was responsible for healing
 	// that were under-replicated at the last completed scrub — the operator's
 	// "is my data at full replication?" signal. repairs is the cumulative count
-	// of replicas this node has re-pushed. Both are read by the metrics scrape.
-	shortfall atomic.Int64
-	repairs   atomic.Int64
+	// of replicas this node has re-pushed. skipped is how many local chunks the
+	// last scrub passed over as unreferenced, and incomplete is 1 when it could
+	// not filter at all because its view of the extent maps was partial. All are
+	// read by the metrics scrape.
+	shortfall  atomic.Int64
+	repairs    atomic.Int64
+	skipped    atomic.Int64
+	incomplete atomic.Int64
 
 	stop chan struct{}
 	done chan struct{}
@@ -57,8 +71,9 @@ type Scrubber struct {
 
 // NewScrubber builds a scrubber. rf < 1 clamps to 1 and a non-positive
 // interval falls back to DefaultScrubInterval, so a misconfiguration paces
-// conservatively rather than spinning.
-func NewScrubber(place Placement, catalog ChunkCatalog, probe ReplicaProbe, rf int, interval time.Duration, logger *slog.Logger) *Scrubber {
+// conservatively rather than spinning. ns and ext supply the live reference set
+// that keeps healing off orphaned chunks.
+func NewScrubber(place Placement, catalog ChunkCatalog, ns NamespaceRefSource, ext ExtentRefSource, probe ReplicaProbe, rf int, interval time.Duration, logger *slog.Logger) *Scrubber {
 	if rf < 1 {
 		rf = 1
 	}
@@ -68,6 +83,8 @@ func NewScrubber(place Placement, catalog ChunkCatalog, probe ReplicaProbe, rf i
 	return &Scrubber{
 		place:    place,
 		catalog:  catalog,
+		ns:       ns,
+		ext:      ext,
 		probe:    probe,
 		rf:       rf,
 		interval: interval,
@@ -117,24 +134,45 @@ func (s *Scrubber) Shutdown(ctx context.Context) error {
 	}
 }
 
-// runOnce walks every local chunk once, healing those this node owns.
+// runOnce walks every local chunk once, healing the referenced ones this node
+// owns and passing over the orphans.
 func (s *Scrubber) runOnce(ctx context.Context) {
 	ids, err := s.catalog.List(ctx)
 	if err != nil {
 		s.logger.Warn("scrubber could not list local chunks; will retry next cycle", "error", err)
 		return
 	}
+
+	// On an incomplete view a chunk can look unreferenced here purely because
+	// the map that binds it lives on a node whose copy we do not hold. Healing
+	// an orphan wastes a copy; skipping a live chunk can cost its last replica,
+	// so when in doubt heal everything — the same asymmetry the GC resolves by
+	// abstaining.
+	keep, unaccounted := liveSet(s.ns, s.ext)
+	s.incomplete.Store(0)
+	if unaccounted > 0 {
+		s.incomplete.Store(1)
+		s.logger.Warn("scrubber cannot tell orphaned chunks from live ones: it does not hold the extent maps of every live volume, so it is healing every local chunk this cycle", "unaccounted_volumes", unaccounted)
+	}
+
 	self := s.place.SelfID()
-	var short int64
+	var short, skipped int64
 	for _, id := range ids {
 		if ctx.Err() != nil {
 			return // shutting down mid-cycle; leave the last full count in place
+		}
+		if unaccounted == 0 {
+			if _, live := keep[id]; !live {
+				skipped++
+				continue // orphaned: the GC owns this one
+			}
 		}
 		if s.scrubChunk(ctx, self, id) {
 			short++
 		}
 	}
 	s.shortfall.Store(short)
+	s.skipped.Store(skipped)
 }
 
 // scrubChunk ensures one locally-held chunk reaches its full replica set,
@@ -211,6 +249,8 @@ func (s *Scrubber) CollectMetrics() []metrics.Metric {
 	return []metrics.Metric{
 		{Name: "shortfall_chunks", Help: "Chunks this node is responsible for that were under-replicated at the last scrub.", Kind: metrics.Gauge, Value: float64(s.shortfall.Load()), Labels: labels},
 		{Name: "repairs_total", Help: "Replicas this node has re-pushed to heal under-replication.", Kind: metrics.Counter, Value: float64(s.repairs.Load()), Labels: labels},
+		{Name: "unreferenced_skipped", Help: "Local chunks the last scrub passed over as unreferenced, leaving them to the chunk GC.", Kind: metrics.Gauge, Value: float64(s.skipped.Load()), Labels: labels},
+		{Name: "incomplete_view", Help: "1 when the last scrub could not filter orphans because this node does not hold every live volume's extent map, so it healed everything.", Kind: metrics.Gauge, Value: float64(s.incomplete.Load()), Labels: labels},
 	}
 }
 

@@ -107,14 +107,15 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	if cfg.ExtentScrubInterval != 0 {
 		t.Errorf("ExtentScrubInterval default: got %v, want 0", cfg.ExtentScrubInterval)
 	}
-	// The chunk GC's pacing/grace default to 0 (the GC owns the fallbacks) and it
-	// defaults to a dry run: SILO_CHUNK_GC_ENABLE off so nothing is deleted until
-	// the operator opts in.
+	// The chunk GC's pacing/grace default to 0, so the GC owns those fallbacks.
 	if cfg.ChunkGCInterval != 0 || cfg.ChunkGCGrace != 0 {
 		t.Errorf("chunk GC defaults: got interval=%v grace=%v, want 0/0", cfg.ChunkGCInterval, cfg.ChunkGCGrace)
 	}
-	if cfg.ChunkGCEnable {
-		t.Error("ChunkGCEnable default: got true, want false (dry run)")
+	// Reclamation is on unless an operator turns it off: copy-on-write orphans a
+	// chunk per overwrite and nothing else collects them, so a dry-run default
+	// would be a slow-motion disk-full.
+	if !cfg.ChunkGCEnable {
+		t.Error("ChunkGCEnable default: got false, want true")
 	}
 	// Retention, unlike the scrub interval, defaults to a concrete value:
 	// zero would let GC resurrect deleted entries.
@@ -618,6 +619,46 @@ func TestLoad_BadMaxConcurrentWrites(t *testing.T) {
 	}
 }
 
+func TestLoad_BadChunkGCMaxDeletes(t *testing.T) {
+	_, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":              "n1",
+		"SILO_CHUNK_GC_MAX_DELETES": "as many as it takes",
+		"SILO_ENCRYPTION_KEY":       validBase64Key(t),
+	}))
+	if err == nil || !strings.Contains(err.Error(), "SILO_CHUNK_GC_MAX_DELETES") {
+		t.Errorf("expected chunk-gc max-deletes parse error, got %v", err)
+	}
+}
+
+func TestLoad_ChunkGCMaxDeletes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  string
+		want int
+	}{
+		{"unset leaves the GC's own default in play", "", 0},
+		{"explicit cap", "5000", 5000},
+		{"negative means uncapped", "-1", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{
+				"SILO_NODE_ID":        "n1",
+				"SILO_ENCRYPTION_KEY": validBase64Key(t),
+			}
+			if tc.set != "" {
+				env["SILO_CHUNK_GC_MAX_DELETES"] = tc.set
+			}
+			cfg, err := Load(envMap(env))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.ChunkGCMaxDeletes != tc.want {
+				t.Errorf("ChunkGCMaxDeletes = %d, want %d", cfg.ChunkGCMaxDeletes, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidate(t *testing.T) {
 	base := Config{
 		NodeID:        "n1",
@@ -685,5 +726,19 @@ func TestAdvertiseFallback(t *testing.T) {
 				t.Errorf("advertiseFallback(%q) = %q, want %q", tc.listen, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoad_ChunkGCCanBeSetToDryRun(t *testing.T) {
+	cfg, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":         "n1",
+		"SILO_CHUNK_GC_ENABLE": "false",
+		"SILO_ENCRYPTION_KEY":  validBase64Key(t),
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ChunkGCEnable {
+		t.Error("an explicit SILO_CHUNK_GC_ENABLE=false must give the reporting-only mode")
 	}
 }

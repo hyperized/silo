@@ -10,8 +10,16 @@ import (
 	"time"
 
 	"github.com/hyperized/silo/internal/chunkstore"
+	"github.com/hyperized/silo/internal/crdt"
 	"github.com/hyperized/silo/internal/metrics"
 )
+
+// newTestScrubber builds a scrubber whose live set is exactly what the catalog
+// holds, so nothing is filtered as orphaned. That is the world these cases were
+// written for — the filter itself is covered separately below.
+func newTestScrubber(place Placement, cat *fakeCatalog, probe ReplicaProbe, rf int, interval time.Duration, logger *slog.Logger) *Scrubber {
+	return NewScrubber(place, cat, fakeNSRefs{chunks: cat.ids}, fakeExtRefs{}, probe, rf, interval, logger)
+}
 
 func nopLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
@@ -114,7 +122,7 @@ func (p *fakeProbe) pushCount() int {
 }
 
 func TestNewScrubber_ClampsAndName(t *testing.T) {
-	s := NewScrubber(stubPlace{self: "a"}, &fakeCatalog{}, &fakeProbe{}, 0, 0, nopLogger())
+	s := newTestScrubber(stubPlace{self: "a"}, &fakeCatalog{}, &fakeProbe{}, 0, 0, nopLogger())
 	if s.rf != 1 {
 		t.Errorf("rf clamp: got %d, want 1", s.rf)
 	}
@@ -134,7 +142,7 @@ func TestScrubber_HealsMissingReplicaAsPrimary(t *testing.T) {
 	}
 	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("payload")}}
 	probe := &fakeProbe{present: map[string]bool{key("c:7000", "c1"): true}} // c holds it, b does not
-	s := NewScrubber(place, cat, probe, 3, time.Hour, nopLogger())
+	s := newTestScrubber(place, cat, probe, 3, time.Hour, nopLogger())
 
 	s.runOnce(context.Background())
 
@@ -154,7 +162,7 @@ func TestScrubber_DefersToHigherPriorityHolder(t *testing.T) {
 	}
 	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("payload")}}
 	probe := &fakeProbe{present: map[string]bool{key("a:7000", "c1"): true}} // a (rank 0) holds it
-	s := NewScrubber(place, cat, probe, 3, time.Hour, nopLogger())
+	s := newTestScrubber(place, cat, probe, 3, time.Hour, nopLogger())
 
 	s.runOnce(context.Background())
 
@@ -171,7 +179,7 @@ func TestScrubber_TakesOverWhenHigherPriorityMissing(t *testing.T) {
 	}
 	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("payload")}}
 	probe := &fakeProbe{present: map[string]bool{}} // a does not hold it -> b takes over
-	s := NewScrubber(place, cat, probe, 3, time.Hour, nopLogger())
+	s := newTestScrubber(place, cat, probe, 3, time.Hour, nopLogger())
 
 	s.runOnce(context.Background())
 
@@ -188,7 +196,7 @@ func TestScrubber_SkipsChunkNotReplicatedHere(t *testing.T) {
 	}
 	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("payload")}}
 	probe := &fakeProbe{present: map[string]bool{}}
-	s := NewScrubber(place, cat, probe, 3, time.Hour, nopLogger())
+	s := newTestScrubber(place, cat, probe, 3, time.Hour, nopLogger())
 
 	s.runOnce(context.Background())
 
@@ -200,7 +208,7 @@ func TestScrubber_SkipsChunkNotReplicatedHere(t *testing.T) {
 func TestScrubber_ListErrorIsLoggedNotFatal(t *testing.T) {
 	cat := &fakeCatalog{listErr: errors.New("disk gone")}
 	probe := &fakeProbe{}
-	s := NewScrubber(stubPlace{self: "a"}, cat, probe, 1, time.Hour, nopLogger())
+	s := newTestScrubber(stubPlace{self: "a"}, cat, probe, 1, time.Hour, nopLogger())
 	s.runOnce(context.Background()) // must not panic
 	if probe.pushCount() != 0 {
 		t.Error("a list failure must do no work")
@@ -215,7 +223,7 @@ func TestScrubber_GetErrorAbortsPush(t *testing.T) {
 	}
 	cat := &fakeCatalog{ids: []string{"c1"}, getErr: map[string]error{"c1": errors.New("read failed")}}
 	probe := &fakeProbe{present: map[string]bool{}}
-	s := NewScrubber(place, cat, probe, 2, time.Hour, nopLogger())
+	s := newTestScrubber(place, cat, probe, 2, time.Hour, nopLogger())
 
 	s.runOnce(context.Background())
 
@@ -232,7 +240,7 @@ func TestScrubber_SkipsTargetWithoutDataAddress(t *testing.T) {
 	}
 	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("payload")}}
 	probe := &fakeProbe{present: map[string]bool{}}
-	s := NewScrubber(place, cat, probe, 2, time.Hour, nopLogger())
+	s := newTestScrubber(place, cat, probe, 2, time.Hour, nopLogger())
 
 	s.runOnce(context.Background())
 
@@ -249,7 +257,7 @@ func TestScrubber_StoreErrorIsLoggedNotFatal(t *testing.T) {
 	}
 	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("payload")}}
 	probe := &fakeProbe{present: map[string]bool{}, storeErr: map[string]error{"b:7000": errors.New("peer down")}}
-	s := NewScrubber(place, cat, probe, 2, time.Hour, nopLogger())
+	s := newTestScrubber(place, cat, probe, 2, time.Hour, nopLogger())
 
 	s.runOnce(context.Background()) // must not panic
 	if probe.pushed("b:7000", "c1") {
@@ -261,7 +269,7 @@ func TestScrubber_StopsMidCycleOnCancel(t *testing.T) {
 	place := stubPlace{self: "a", replicas: []string{"a", "b"}, addrs: map[string]string{"a": "a:7000", "b": "b:7000"}}
 	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("payload")}}
 	probe := &fakeProbe{present: map[string]bool{}}
-	s := NewScrubber(place, cat, probe, 2, time.Hour, nopLogger())
+	s := newTestScrubber(place, cat, probe, 2, time.Hour, nopLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -275,7 +283,7 @@ func TestScrubber_StopsMidCycleOnCancel(t *testing.T) {
 func TestScrubber_StartTicksAndShutsDown(t *testing.T) {
 	place := stubPlace{self: "a", replicas: []string{"a"}, addrs: map[string]string{"a": "a:7000"}}
 	cat := &fakeCatalog{ids: nil, listed: make(chan struct{})}
-	s := NewScrubber(place, cat, &fakeProbe{}, 1, time.Millisecond, nopLogger())
+	s := newTestScrubber(place, cat, &fakeProbe{}, 1, time.Millisecond, nopLogger())
 
 	go func() { _ = s.Start() }()
 
@@ -293,7 +301,7 @@ func TestScrubber_StartTicksAndShutsDown(t *testing.T) {
 }
 
 func TestScrubber_ShutdownDeadlineExpires(t *testing.T) {
-	s := NewScrubber(stubPlace{self: "a"}, &fakeCatalog{}, &fakeProbe{}, 1, time.Hour, nopLogger())
+	s := newTestScrubber(stubPlace{self: "a"}, &fakeCatalog{}, &fakeProbe{}, 1, time.Hour, nopLogger())
 	// Never started, so done never closes; an already-expired context must
 	// surface the deadline error rather than block forever.
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
@@ -322,7 +330,7 @@ func TestScrubber_ReplicationMetrics(t *testing.T) {
 	}
 	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("payload")}}
 	probe := &fakeProbe{present: map[string]bool{key("c:7000", "c1"): true}} // b is missing c1
-	s := NewScrubber(place, cat, probe, 3, time.Hour, nopLogger())
+	s := newTestScrubber(place, cat, probe, 3, time.Hour, nopLogger())
 
 	if s.MetricPrefix() != "silo_replication" {
 		t.Errorf("prefix = %q", s.MetricPrefix())
@@ -350,5 +358,117 @@ func TestScrubber_ReplicationMetrics(t *testing.T) {
 	}
 	if got := scrubberMetric(t, s, "repairs_total").Value; got != 1 {
 		t.Errorf("repairs after healing = %v, want a cumulative 1", got)
+	}
+}
+
+// --- live-set filter --------------------------------------------------------
+
+func TestScrubber_SkipsUnreferencedChunks(t *testing.T) {
+	place := stubPlace{
+		self:     "a",
+		replicas: []string{"a", "b"},
+		addrs:    map[string]string{"a": "a:7000", "b": "b:7000"},
+	}
+	cat := &fakeCatalog{
+		ids:  []string{"live1", "orphan1", "orphan2"},
+		data: map[string][]byte{"live1": []byte("x"), "orphan1": []byte("y"), "orphan2": []byte("z")},
+	}
+	probe := &fakeProbe{} // b holds nothing, so everything looks under-replicated
+	// Only live1 is referenced; the two orphans are the GC's to reclaim.
+	s := NewScrubber(place, cat, fakeNSRefs{chunks: []string{"live1"}}, fakeExtRefs{}, probe, 2, time.Hour, nopLogger())
+
+	s.runOnce(context.Background())
+
+	if !probe.pushed("b:7000", "live1") {
+		t.Error("live1 is referenced and under-replicated; it should have been healed")
+	}
+	for _, orphan := range []string{"orphan1", "orphan2"} {
+		if probe.pushed("b:7000", orphan) {
+			t.Errorf("%s is unreferenced; healing it would undo the GC's reclamation", orphan)
+		}
+	}
+	if got := scrubberMetric(t, s, "unreferenced_skipped").Value; got != 2 {
+		t.Errorf("unreferenced_skipped = %v, want 2", got)
+	}
+	// Only the referenced chunk counts toward the replication-health signal.
+	if got := scrubberMetric(t, s, "shortfall_chunks").Value; got != 1 {
+		t.Errorf("shortfall = %v, want 1 (orphans must not inflate it)", got)
+	}
+	if got := scrubberMetric(t, s, "incomplete_view").Value; got != 0 {
+		t.Errorf("incomplete_view = %v, want 0", got)
+	}
+}
+
+func TestScrubber_CountsExtentMapRefsAsLive(t *testing.T) {
+	place := stubPlace{
+		self:     "a",
+		replicas: []string{"a", "b"},
+		addrs:    map[string]string{"a": "a:7000", "b": "b:7000"},
+	}
+	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("x")}}
+	probe := &fakeProbe{}
+	// The namespace names no chunks; c1's only reference is an out-of-band
+	// extent map this node holds. It is live all the same.
+	ext := fakeExtRefs{vols: map[string][]crdt.MapEntry[uint64, string]{
+		"vol-1": {{Key: 0, Value: "c1"}},
+	}}
+	s := NewScrubber(place, cat, fakeNSRefs{volumes: []string{"vol-1"}}, ext, probe, 2, time.Hour, nopLogger())
+
+	s.runOnce(context.Background())
+
+	if !probe.pushed("b:7000", "c1") {
+		t.Error("c1 is bound by a held extent map; it should have been healed")
+	}
+	if got := scrubberMetric(t, s, "unreferenced_skipped").Value; got != 0 {
+		t.Errorf("unreferenced_skipped = %v, want 0", got)
+	}
+}
+
+func TestScrubber_HealsEverythingOnIncompleteView(t *testing.T) {
+	place := stubPlace{
+		self:     "a",
+		replicas: []string{"a", "b"},
+		addrs:    map[string]string{"a": "a:7000", "b": "b:7000"},
+	}
+	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("x")}}
+	probe := &fakeProbe{}
+	// vol-1 is live but this node holds no extent map for it, so c1 could be
+	// referenced by a map it cannot see. Skipping it might cost the last replica.
+	s := NewScrubber(place, cat, fakeNSRefs{volumes: []string{"vol-1"}}, fakeExtRefs{}, probe, 2, time.Hour, nopLogger())
+
+	s.runOnce(context.Background())
+
+	if !probe.pushed("b:7000", "c1") {
+		t.Error("on an incomplete view the scrubber must heal rather than risk dropping a replica")
+	}
+	if got := scrubberMetric(t, s, "incomplete_view").Value; got != 1 {
+		t.Errorf("incomplete_view = %v, want 1", got)
+	}
+	if got := scrubberMetric(t, s, "unreferenced_skipped").Value; got != 0 {
+		t.Errorf("unreferenced_skipped = %v, want 0 when the filter is off", got)
+	}
+}
+
+func TestScrubber_ClearsIncompleteViewOnceMapsArrive(t *testing.T) {
+	place := stubPlace{self: "a", replicas: []string{"a"}, addrs: map[string]string{"a": "a:7000"}}
+	cat := &fakeCatalog{ids: []string{"c1"}, data: map[string][]byte{"c1": []byte("x")}}
+	ns := fakeNSRefs{volumes: []string{"vol-1"}}
+	ext := fakeExtRefs{}
+	s := NewScrubber(place, cat, ns, ext, &fakeProbe{}, 1, time.Hour, nopLogger())
+
+	s.runOnce(context.Background())
+	if got := scrubberMetric(t, s, "incomplete_view").Value; got != 1 {
+		t.Fatalf("incomplete_view before the map lands = %v, want 1", got)
+	}
+
+	// The map replicates in; the blind spot closes and the filter engages.
+	s.ext = fakeExtRefs{vols: map[string][]crdt.MapEntry[uint64, string]{"vol-1": nil}}
+	s.runOnce(context.Background())
+
+	if got := scrubberMetric(t, s, "incomplete_view").Value; got != 0 {
+		t.Errorf("incomplete_view after the map lands = %v, want 0", got)
+	}
+	if got := scrubberMetric(t, s, "unreferenced_skipped").Value; got != 1 {
+		t.Errorf("unreferenced_skipped = %v, want 1 (c1 is bound by nothing)", got)
 	}
 }
