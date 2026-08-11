@@ -201,12 +201,20 @@ type Config struct {
 	// old an unreferenced chunk must be before it is reclaimed (the safety margin
 	// for the write-then-record gap). Both zero means "use the GC's built-in
 	// defaults"; set SILO_CHUNK_GC_INTERVAL / SILO_CHUNK_GC_GRACE (Go durations).
-	// ChunkGCEnable (SILO_CHUNK_GC_ENABLE) actually deletes; left off (the
-	// default) the GC runs as a dry run, reporting reclaimable orphans via metrics
-	// without removing anything so the live-set computation can be validated first.
-	ChunkGCInterval time.Duration
-	ChunkGCGrace    time.Duration
-	ChunkGCEnable   bool
+	// ChunkGCEnable (SILO_CHUNK_GC_ENABLE) actually deletes, and defaults on:
+	// copy-on-write orphans a chunk on every overwrite and nothing else reclaims
+	// them, so a store with the GC in dry run does not hold steady, it fills.
+	// Setting it false gives the reporting-only mode — useful to validate the
+	// live-set computation against a specific store before letting it delete, but
+	// it is a commissioning step rather than somewhere to leave a cluster.
+	// ChunkGCMaxDeletes (SILO_CHUNK_GC_MAX_DELETES) caps reclamations per sweep so
+	// a long-accumulated backlog drains over several sweeps instead of one
+	// unbounded burst of unlinks; 0 means "use the GC's default", negative means
+	// uncapped. Steady-state churn never approaches the cap.
+	ChunkGCInterval   time.Duration
+	ChunkGCGrace      time.Duration
+	ChunkGCEnable     bool
+	ChunkGCMaxDeletes int
 
 	// CRLPath points at a CA-signed certificate revocation list
 	// (SILO_TLS_CRL). When set, silod loads it, verifies it against the
@@ -280,7 +288,7 @@ func Load(env EnvFunc) (*Config, error) {
 		KMSVaultURL:         env("SILO_KMS_VAULT_URL"),
 		KMSKeyName:          env("SILO_KMS_KEY_NAME"),
 		ExtentReplication:   envBoolDefault(env, "SILO_EXTENT_REPLICATION", true),
-		ChunkGCEnable:       envBool(env, "SILO_CHUNK_GC_ENABLE"),
+		ChunkGCEnable:       envBoolDefault(env, "SILO_CHUNK_GC_ENABLE", true),
 		LogLevel:            envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
 		LogFormat:           envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
 		CACertPath:          rawCACert,
@@ -320,6 +328,14 @@ func Load(env EnvFunc) (*Config, error) {
 		return nil, err
 	}
 	cfg.MaxConcurrentWrites = maxWrites
+
+	// 0 leaves the choice to the GC's own default; a negative value is the
+	// operator explicitly asking for no cap.
+	maxGCDeletes, err := envInt(env, "SILO_CHUNK_GC_MAX_DELETES", 0)
+	if err != nil {
+		return nil, err
+	}
+	cfg.ChunkGCMaxDeletes = maxGCDeletes
 
 	scrubInterval, err := envDuration(env, "SILO_SCRUB_INTERVAL")
 	if err != nil {

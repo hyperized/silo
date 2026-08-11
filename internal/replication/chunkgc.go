@@ -27,12 +27,28 @@ const DefaultChunkGCInterval = 10 * time.Minute
 // extent reaper's reap-after guard.
 const DefaultChunkGCGrace = time.Hour
 
+// DefaultChunkGCMaxDeletes caps a single sweep's reclamations when none is
+// configured. It only binds on a backlog: steady-state overwrite churn produces
+// orders of magnitude fewer orphans per interval than this, so a healthy store
+// never reaches the cap, while a store that leaked for weeks drains over a
+// series of sweeps rather than one long burst of unlinks.
+const DefaultChunkGCMaxDeletes = 100_000
+
 // ChunkLister is the node-local chunk store the GC enumerates and prunes.
 // *chunkstore.FileStore satisfies it via List/Stat/Delete.
 type ChunkLister interface {
 	List(ctx context.Context) ([]string, error)
 	Stat(ctx context.Context, id string) (chunkstore.Info, error)
 	Delete(ctx context.Context, id string) error
+}
+
+// BatchDeleter is the optional bulk-reclamation path: unlink without a
+// directory fsync each time, then flush once for the whole batch.
+// *chunkstore.FileStore satisfies it. A store that does not is still correct —
+// the GC falls back to Delete, it just pays a journal commit per chunk.
+type BatchDeleter interface {
+	DeleteNoSync(ctx context.Context, id string) error
+	SyncDir() error
 }
 
 // NamespaceRefSource yields the global half of the live (keep) set: the chunk
@@ -83,55 +99,74 @@ type ExtentRefSource interface {
 // because every node derives the same global live set, a chunk live anywhere is
 // kept everywhere, so replication is preserved.
 type ChunkGC struct {
-	lister   ChunkLister
-	ns       NamespaceRefSource
-	ext      ExtentRefSource
-	nodeID   string
-	grace    time.Duration
-	interval time.Duration
-	enabled  bool
-	logger   *slog.Logger
-	now      func() time.Time
+	lister     ChunkLister
+	ns         NamespaceRefSource
+	ext        ExtentRefSource
+	nodeID     string
+	grace      time.Duration
+	interval   time.Duration
+	enabled    bool
+	maxDeletes int
+	logger     *slog.Logger
+	now        func() time.Time
 
 	// All read by the metrics scrape. orphans is the reclaimable orphan count at
 	// the last completed sweep; reclaimed is cumulative deletions; lastReclaim is
 	// the last sweep's deletions; incomplete is 1 when the last cycle abstained
 	// for an incomplete view; unaccounted is how many live volumes' maps were
-	// missing at the last cycle.
+	// missing at the last cycle; deferred is how many reclaimable orphans the
+	// last sweep left for the next one after spending its delete budget.
 	orphans     atomic.Int64
 	reclaimed   atomic.Int64
 	lastReclaim atomic.Int64
 	incomplete  atomic.Int64
 	unaccounted atomic.Int64
+	deferred    atomic.Int64
 
 	stop chan struct{}
 	done chan struct{}
+}
+
+// ChunkGCOption configures optional GC behaviour at construction.
+type ChunkGCOption func(*ChunkGC)
+
+// WithMaxDeletes caps how many chunks one sweep may reclaim. A backlog larger
+// than the cap drains across consecutive sweeps instead of in a single
+// unbounded burst of unlinks, which keeps a first sweep after a long leak from
+// monopolising the disk the serving path is using. n <= 0 means no cap.
+func WithMaxDeletes(n int) ChunkGCOption {
+	return func(g *ChunkGC) { g.maxDeletes = n }
 }
 
 // NewChunkGC builds a chunk GC. A non-positive grace or interval falls back to
 // the package default, so a misconfiguration paces conservatively rather than
 // sweeping too eagerly or spinning. enabled=false (the default) makes it a dry
 // run that reports but never deletes.
-func NewChunkGC(lister ChunkLister, ns NamespaceRefSource, ext ExtentRefSource, nodeID string, grace, interval time.Duration, enabled bool, logger *slog.Logger) *ChunkGC {
+func NewChunkGC(lister ChunkLister, ns NamespaceRefSource, ext ExtentRefSource, nodeID string, grace, interval time.Duration, enabled bool, logger *slog.Logger, opts ...ChunkGCOption) *ChunkGC {
 	if grace <= 0 {
 		grace = DefaultChunkGCGrace
 	}
 	if interval <= 0 {
 		interval = DefaultChunkGCInterval
 	}
-	return &ChunkGC{
-		lister:   lister,
-		ns:       ns,
-		ext:      ext,
-		nodeID:   nodeID,
-		grace:    grace,
-		interval: interval,
-		enabled:  enabled,
-		logger:   logger,
-		now:      time.Now,
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+	g := &ChunkGC{
+		lister:     lister,
+		ns:         ns,
+		ext:        ext,
+		nodeID:     nodeID,
+		grace:      grace,
+		interval:   interval,
+		enabled:    enabled,
+		maxDeletes: DefaultChunkGCMaxDeletes,
+		logger:     logger,
+		now:        time.Now,
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(g)
+	}
+	return g
 }
 
 // Name identifies the subsystem in silod's lifecycle logs.
@@ -177,24 +212,10 @@ func (g *ChunkGC) Shutdown(ctx context.Context) error {
 // runOnce builds the live set, verifies the view is complete, then sweeps the
 // local store of unreferenced chunks older than the grace window.
 func (g *ChunkGC) runOnce(ctx context.Context) {
-	keep, liveVols := g.ns.LiveChunkRefs()
-	held := make(map[string]struct{})
-	for _, v := range g.ext.Volumes() {
-		held[v] = struct{}{}
-		for _, e := range g.ext.Snapshot(v) {
-			keep[e.Value] = struct{}{}
-		}
-	}
-
 	// Completeness: a live volume whose extent map this node does not hold is a
 	// blind spot — its chunks would look unreferenced here. Abstain rather than
 	// risk reclaiming a chunk an unseen map still binds.
-	var missing int64
-	for v := range liveVols {
-		if _, ok := held[v]; !ok {
-			missing++
-		}
-	}
+	keep, missing := liveSet(g.ns, g.ext)
 	g.unaccounted.Store(missing)
 	if missing > 0 {
 		g.incomplete.Store(1)
@@ -210,10 +231,30 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 		g.logger.Warn("chunk-gc could not list the local chunk store; will retry next cycle", "error", err)
 		return
 	}
+	// Prefer the bulk path when the store offers one: unlink without syncing and
+	// commit the whole sweep with a single directory fsync at the end. A store
+	// that does not implement it still works, one journal commit per chunk.
+	batch, batched := g.lister.(BatchDeleter)
+	remove := g.lister.Delete
+	if batched {
+		remove = batch.DeleteNoSync
+	}
+
 	cutoff := g.now().Add(-g.grace)
-	var orphans, reclaimed int64
+	var orphans, reclaimed, deferred int64
+	flush := func() {
+		if !batched || reclaimed == 0 {
+			return
+		}
+		if err := batch.SyncDir(); err != nil {
+			// The chunks are gone either way; only their durability across a crash
+			// is in question, and a resurrected orphan is reclaimed again next sweep.
+			g.logger.Warn("chunk-gc could not flush the data directory after reclaiming; the removals are not durable until the next sync", "error", err)
+		}
+	}
 	for _, id := range ids {
 		if ctx.Err() != nil {
+			flush()
 			return // shutting down mid-sweep; leave the last full counts in place
 		}
 		if _, live := keep[id]; live {
@@ -227,20 +268,32 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 			continue // within the grace window: a just-written chunk's reference may not have landed
 		}
 		orphans++
-		if g.enabled {
-			if err := g.lister.Delete(ctx, id); err != nil {
-				g.logger.Warn("chunk-gc could not delete an orphaned chunk; will retry next cycle", "chunk", id, "error", err)
-				continue
-			}
-			reclaimed++
+		if !g.enabled {
+			continue
 		}
+		if g.maxDeletes > 0 && reclaimed >= int64(g.maxDeletes) {
+			deferred++ // budget spent; keep counting so the orphan gauge stays honest
+			continue
+		}
+		if err := remove(ctx, id); err != nil {
+			g.logger.Warn("chunk-gc could not delete an orphaned chunk; will retry next cycle", "chunk", id, "error", err)
+			continue
+		}
+		reclaimed++
 	}
+	flush()
 	g.orphans.Store(orphans)
 	g.lastReclaim.Store(reclaimed)
-	if reclaimed > 0 {
+	g.deferred.Store(deferred)
+	switch {
+	case reclaimed > 0:
 		g.reclaimed.Add(reclaimed)
-		g.logger.Info("chunk-gc reclaimed orphaned chunks", "count", reclaimed)
-	} else if orphans > 0 && !g.enabled {
+		if deferred > 0 {
+			g.logger.Info("chunk-gc reclaimed orphaned chunks and hit its per-sweep budget; the rest drain next sweep", "count", reclaimed, "deferred", deferred)
+		} else {
+			g.logger.Info("chunk-gc reclaimed orphaned chunks", "count", reclaimed)
+		}
+	case orphans > 0 && !g.enabled:
 		g.logger.Info("chunk-gc (dry run) found reclaimable orphaned chunks; set SILO_CHUNK_GC_ENABLE to reclaim them", "orphans", orphans)
 	}
 }
@@ -261,5 +314,6 @@ func (g *ChunkGC) CollectMetrics() []metrics.Metric {
 		{Name: "last_reclaimed", Help: "Orphaned chunks reclaimed in the last sweep.", Kind: metrics.Gauge, Value: float64(g.lastReclaim.Load()), Labels: labels},
 		{Name: "incomplete_view", Help: "1 when the last cycle abstained because this node does not hold every live volume's extent map.", Kind: metrics.Gauge, Value: float64(g.incomplete.Load()), Labels: labels},
 		{Name: "unaccounted_volumes", Help: "Live volumes whose extent maps this node could not see at the last cycle.", Kind: metrics.Gauge, Value: float64(g.unaccounted.Load()), Labels: labels},
+		{Name: "deferred_chunks", Help: "Reclaimable orphans the last sweep left behind after spending its per-sweep delete budget.", Kind: metrics.Gauge, Value: float64(g.deferred.Load()), Labels: labels},
 	}
 }

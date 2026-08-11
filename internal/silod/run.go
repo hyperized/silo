@@ -92,8 +92,8 @@ var (
 		}
 		return &grpcSub{srv: transport.NewGRPCServer(cfg.GRPCAddr, tlsCfg, store, coord, ns, logger, opts...)}
 	}
-	newScrubberSubsystem = func(cfg *config.Config, place replication.Placement, catalog replication.ChunkCatalog, probe replication.ReplicaProbe, logger *slog.Logger) subsystem {
-		return replication.NewScrubber(place, catalog, probe, cfg.Replication, cfg.ScrubInterval, logger)
+	newScrubberSubsystem = func(cfg *config.Config, place replication.Placement, catalog replication.ChunkCatalog, ns replication.NamespaceRefSource, ext replication.ExtentRefSource, probe replication.ReplicaProbe, logger *slog.Logger) subsystem {
+		return replication.NewScrubber(place, catalog, ns, ext, probe, cfg.Replication, cfg.ScrubInterval, logger)
 	}
 	newExtentReaperSubsystem = func(cfg *config.Config, live replication.LiveInodeSource, store replication.ExtentReapStore, logger *slog.Logger) subsystem {
 		return replication.NewExtentReaper(live, store, cfg.NodeID, cfg.ExtentReapAfter, cfg.ExtentReapInterval, logger)
@@ -102,7 +102,13 @@ var (
 		return replication.NewExtentScrubber(place, catalog, probe, cfg.Replication, cfg.ExtentScrubInterval, logger)
 	}
 	newChunkGCSubsystem = func(cfg *config.Config, lister replication.ChunkLister, ns replication.NamespaceRefSource, ext replication.ExtentRefSource, logger *slog.Logger) subsystem {
-		return replication.NewChunkGC(lister, ns, ext, cfg.NodeID, cfg.ChunkGCGrace, cfg.ChunkGCInterval, cfg.ChunkGCEnable, logger)
+		var opts []replication.ChunkGCOption
+		// Unset (0) leaves the GC on its own default; anything else — including a
+		// negative "no cap" — is the operator's explicit choice.
+		if cfg.ChunkGCMaxDeletes != 0 {
+			opts = append(opts, replication.WithMaxDeletes(cfg.ChunkGCMaxDeletes))
+		}
+		return replication.NewChunkGC(lister, ns, ext, cfg.NodeID, cfg.ChunkGCGrace, cfg.ChunkGCInterval, cfg.ChunkGCEnable, logger, opts...)
 	}
 	newRebalancerSubsystem = func(cfg *config.Config, members *membership.Membership, logger *slog.Logger) subsystem {
 		return replication.NewRebalancer(members, cfg.DataDir, cfg.ScrubInterval, logger,
@@ -497,7 +503,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	exp.Register(coord)
 	exp.Register(ns)
 
-	scrubberSubsys := newScrubberSubsystem(cfg, router, store, peers, logger)
+	// The scrubber shares the GC's reference sources so it only heals chunks the
+	// cluster still needs; without that it re-replicates the orphans the GC is
+	// busy reclaiming.
+	scrubberSubsys := newScrubberSubsystem(cfg, router, store, ns, extStore, peers, logger)
 	rebalancerSubsys := newRebalancerSubsystem(cfg, members, logger)
 	// The reaper reclaims the extent-map replicas of deleted volumes — the GC
 	// backstop for the synchronous delete fan-out, keyed off the namespace's

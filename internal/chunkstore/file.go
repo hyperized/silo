@@ -179,7 +179,27 @@ func (s *FileStore) Get(_ context.Context, id string) ([]byte, Info, error) {
 
 // Delete removes the chunk file and fsyncs the directory so the removal
 // survives a crash. A missing chunk maps to ErrNotFound.
-func (s *FileStore) Delete(_ context.Context, id string) error {
+func (s *FileStore) Delete(ctx context.Context, id string) error {
+	if err := s.DeleteNoSync(ctx, id); err != nil {
+		return err
+	}
+	return fsyncDir(s.root)
+}
+
+// DeleteNoSync removes the chunk file without fsyncing the directory, leaving
+// that to a later SyncDir. It exists for bulk reclamation: one directory fsync
+// per unlink turns a sweep of a large orphan backlog into millions of journal
+// commits, which on a busy filesystem competes directly with the serving path.
+//
+// Skipping the per-unlink sync is safe precisely because reclamation is
+// idempotent. An unlink lost to a crash leaves the chunk on disk, still
+// unreferenced, and the next sweep reclaims it again. What must never be
+// reordered is a *durable* removal against something that depends on it, and
+// nothing does: the reference is already gone from the extent map before the
+// chunk becomes a reclamation candidate.
+//
+// Use Delete anywhere the removal is part of a request the caller acknowledges.
+func (s *FileStore) DeleteNoSync(_ context.Context, id string) error {
 	if err := ValidateID(id); err != nil {
 		return err
 	}
@@ -189,8 +209,12 @@ func (s *FileStore) Delete(_ context.Context, id string) error {
 		}
 		return fmt.Errorf("could not delete chunk %q (%w); check filesystem permissions on %s", id, err, s.root)
 	}
-	return fsyncDir(s.root)
+	return nil
 }
+
+// SyncDir flushes pending directory changes, making prior DeleteNoSync removals
+// durable in one commit.
+func (s *FileStore) SyncDir() error { return fsyncDir(s.root) }
 
 // Stat returns chunk metadata from the filesystem without reading or
 // decrypting the payload. A missing chunk maps to ErrNotFound.

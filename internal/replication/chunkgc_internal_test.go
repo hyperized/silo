@@ -325,3 +325,192 @@ func TestChunkGC_Metrics(t *testing.T) {
 		}
 	}
 }
+
+// --- batched deletes and the per-sweep budget --------------------------------
+
+// batchingLister is a chunk store that offers the bulk-reclamation path, so the
+// GC should unlink through DeleteNoSync and commit once with SyncDir.
+type batchingLister struct {
+	*fakeChunkLister
+	noSync   []string
+	syncs    int
+	syncErr  error
+	noSyncEr map[string]error
+	onDelete func() // fired after a successful unlink, to drive mid-sweep races
+}
+
+func newBatchingLister(ids ...string) *batchingLister {
+	return &batchingLister{fakeChunkLister: newFakeChunkLister(ids...), noSyncEr: map[string]error{}}
+}
+
+func (b *batchingLister) DeleteNoSync(_ context.Context, id string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := b.noSyncEr[id]; err != nil {
+		return err
+	}
+	b.noSync = append(b.noSync, id)
+	if b.onDelete != nil {
+		b.onDelete()
+	}
+	return nil
+}
+
+func (b *batchingLister) SyncDir() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.syncs++
+	return b.syncErr
+}
+
+func (b *batchingLister) snapNoSync() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.noSync...)
+}
+
+func TestChunkGC_UsesBatchedDeletesAndSyncsOnce(t *testing.T) {
+	lister := newBatchingLister("o1", "o2", "o3")
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog())
+
+	g.runOnce(context.Background())
+
+	if got := lister.snapNoSync(); len(got) != 3 {
+		t.Errorf("DeleteNoSync calls = %v, want all three orphans", got)
+	}
+	if got := lister.snapDeleted(); len(got) != 0 {
+		t.Errorf("the per-unlink Delete path should be unused when batching: %v", got)
+	}
+	if lister.syncs != 1 {
+		t.Errorf("SyncDir calls = %d, want exactly 1 for the sweep", lister.syncs)
+	}
+	if got := gcMetric(t, g, "reclaimed_total").Value; got != 3 {
+		t.Errorf("reclaimed_total = %v, want 3", got)
+	}
+}
+
+func TestChunkGC_SkipsSyncWhenNothingReclaimed(t *testing.T) {
+	// The only chunk is live, so the sweep deletes nothing and has no reason to
+	// touch the filesystem's journal at all.
+	lister := newBatchingLister("live")
+	g := NewChunkGC(lister, fakeNSRefs{chunks: []string{"live"}}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog())
+
+	g.runOnce(context.Background())
+
+	if lister.syncs != 0 {
+		t.Errorf("SyncDir calls = %d, want 0 when nothing was reclaimed", lister.syncs)
+	}
+}
+
+func TestChunkGC_SyncFailureLeavesCountsIntact(t *testing.T) {
+	lister := newBatchingLister("o1")
+	lister.syncErr = errors.New("disk went away")
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog())
+
+	g.runOnce(context.Background())
+
+	// The unlink happened; only its durability is in doubt, and a resurrected
+	// orphan is simply reclaimed again next sweep.
+	if got := gcMetric(t, g, "reclaimed_total").Value; got != 1 {
+		t.Errorf("reclaimed_total = %v, want 1 despite the sync failure", got)
+	}
+}
+
+func TestChunkGC_DryRunNeverDeletesOrSyncs(t *testing.T) {
+	lister := newBatchingLister("o1", "o2")
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, false, quietLog())
+
+	g.runOnce(context.Background())
+
+	if got := lister.snapNoSync(); len(got) != 0 {
+		t.Errorf("dry run deleted %v", got)
+	}
+	if lister.syncs != 0 {
+		t.Errorf("dry run called SyncDir %d times, want 0", lister.syncs)
+	}
+	if got := gcMetric(t, g, "orphan_chunks").Value; got != 2 {
+		t.Errorf("orphan_chunks = %v, want 2 reported without deleting", got)
+	}
+}
+
+func TestChunkGC_BudgetDefersTheRemainder(t *testing.T) {
+	lister := newBatchingLister("o1", "o2", "o3", "o4", "o5")
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog(),
+		WithMaxDeletes(2))
+
+	g.runOnce(context.Background())
+
+	if got := lister.snapNoSync(); len(got) != 2 {
+		t.Errorf("deleted %d chunks, want the 2 the budget allows: %v", len(got), got)
+	}
+	// The gauge still reports the whole backlog, so the budget cannot hide it.
+	if got := gcMetric(t, g, "orphan_chunks").Value; got != 5 {
+		t.Errorf("orphan_chunks = %v, want the full 5", got)
+	}
+	if got := gcMetric(t, g, "deferred_chunks").Value; got != 3 {
+		t.Errorf("deferred_chunks = %v, want 3", got)
+	}
+	if got := gcMetric(t, g, "last_reclaimed").Value; got != 2 {
+		t.Errorf("last_reclaimed = %v, want 2", got)
+	}
+
+	// A second sweep picks up where the first stopped.
+	g.runOnce(context.Background())
+	if got := gcMetric(t, g, "reclaimed_total").Value; got != 4 {
+		t.Errorf("reclaimed_total after two sweeps = %v, want 4", got)
+	}
+}
+
+func TestChunkGC_BudgetDefaultsAndCanBeDisabled(t *testing.T) {
+	g := NewChunkGC(newFakeChunkLister(), fakeNSRefs{}, fakeExtRefs{}, "a", 0, 0, false, quietLog())
+	if g.maxDeletes != DefaultChunkGCMaxDeletes {
+		t.Errorf("maxDeletes = %d, want the default %d", g.maxDeletes, DefaultChunkGCMaxDeletes)
+	}
+
+	lister := newBatchingLister("o1", "o2", "o3")
+	uncapped := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog(),
+		WithMaxDeletes(-1))
+
+	uncapped.runOnce(context.Background())
+
+	if got := lister.snapNoSync(); len(got) != 3 {
+		t.Errorf("a negative cap means uncapped; deleted %v", got)
+	}
+	if got := gcMetric(t, uncapped, "deferred_chunks").Value; got != 0 {
+		t.Errorf("deferred_chunks = %v, want 0 when uncapped", got)
+	}
+}
+
+func TestChunkGC_FlushesWhatItDeletedWhenCancelledMidSweep(t *testing.T) {
+	lister := newBatchingLister("o1", "o2", "o3")
+	ctx, cancel := context.WithCancel(context.Background())
+	// Shut down right after the first unlink, so the sweep unwinds still holding
+	// a deletion it has not committed.
+	lister.onDelete = cancel
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog())
+
+	g.runOnce(ctx)
+
+	if got := lister.snapNoSync(); len(got) != 1 {
+		t.Fatalf("unlinked %v, want the sweep to stop after the first", got)
+	}
+	if lister.syncs != 1 {
+		t.Errorf("SyncDir calls = %d; a sweep cut short must still commit the unlinks it made", lister.syncs)
+	}
+}
+
+func TestChunkGC_FallsBackToPerChunkDeleteWithoutBatching(t *testing.T) {
+	// A store that does not implement BatchDeleter still gets swept, one
+	// journal commit per chunk.
+	lister := newFakeChunkLister("o1", "o2")
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog())
+
+	g.runOnce(context.Background())
+
+	if got := lister.snapDeleted(); len(got) != 2 {
+		t.Errorf("deleted = %v, want both orphans via the Delete path", got)
+	}
+	if got := gcMetric(t, g, "reclaimed_total").Value; got != 2 {
+		t.Errorf("reclaimed_total = %v, want 2", got)
+	}
+}

@@ -472,3 +472,72 @@ func TestGet_DetectsCorruption(t *testing.T) {
 		t.Errorf("Get of tampered chunk: got %v, want decrypt error", err)
 	}
 }
+
+func TestDeleteNoSync_RemovesWithoutSyncing(t *testing.T) {
+	s, dir := newTestStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"chunk-1", "chunk-2"} {
+		if _, err := s.Put(ctx, id, []byte("payload")); err != nil {
+			t.Fatalf("Put %s: %v", id, err)
+		}
+	}
+
+	for _, id := range []string{"chunk-1", "chunk-2"} {
+		if err := s.DeleteNoSync(ctx, id); err != nil {
+			t.Fatalf("DeleteNoSync %s: %v", id, err)
+		}
+	}
+	// One commit for the batch, rather than one per unlink.
+	if err := s.SyncDir(); err != nil {
+		t.Fatalf("SyncDir: %v", err)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), chunkExt) {
+			t.Errorf("residual chunk after DeleteNoSync: %s", e.Name())
+		}
+	}
+	if _, _, err := s.Get(ctx, "chunk-1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Get after DeleteNoSync: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteNoSync_InvalidIDAndNotFound(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	if err := s.DeleteNoSync(ctx, "bad/id"); !errors.Is(err, ErrInvalidID) {
+		t.Errorf("DeleteNoSync invalid id: got %v, want ErrInvalidID", err)
+	}
+	if err := s.DeleteNoSync(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeleteNoSync missing: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestDeleteNoSync_RemoveFailureSurfacesActionable(t *testing.T) {
+	s, dir := newTestStore(t)
+	bogus := filepath.Join(dir, "is-a-dir.chunk")
+	if err := os.MkdirAll(filepath.Join(bogus, "inner"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	err := s.DeleteNoSync(context.Background(), "is-a-dir")
+	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrInvalidID) {
+		t.Fatalf("DeleteNoSync on non-empty dir: got %v, want non-NotFound error", err)
+	}
+	if !strings.Contains(err.Error(), "permissions") {
+		t.Errorf("error should hint at permissions, got %v", err)
+	}
+}
+
+func TestSyncDir_MissingRootSurfacesError(t *testing.T) {
+	s, dir := newTestStore(t)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if err := s.SyncDir(); err == nil {
+		t.Error("SyncDir on a vanished data dir should report the failure, not swallow it")
+	}
+}

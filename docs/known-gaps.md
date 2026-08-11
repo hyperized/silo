@@ -62,10 +62,12 @@ The library covers the **core** opcodes. Deferred:
 - **Retroactive migration / GC off a pressured node.** Disk-pressure steering
   (`SILO_DISK_PRESSURE_STEERING`, default on) stops *new* chunks from landing on
   a near-full node and heals around it, bounded so a quorum of natural replicas
-  is always kept (reads stay correct). What it does **not** do is move or delete
-  the chunks already on the node. silo has no chunk-migration/GC primitive at
-  all (the scrubber only adds replicas, never removes), so a pressured node drains
-  only as old chunks are deleted and new data lands elsewhere, not actively. A
+  is always kept (reads stay correct). What it does **not** do is move the *live*
+  chunks already on the node. Unreferenced ones do go — the chunk GC reclaims them
+  on every node, which on a store that has been overwriting for any length of time
+  is most of the relief available. What is missing is migration: the scrubber only
+  ever adds a replica, never removes one, so a node holding a lot of *referenced*
+  data drains only as that data is deleted and new data lands elsewhere. A
   safe "shed" loop (copy-verify-delete a node's excess chunks) would relieve a
   hot node faster and would also make capacity rebalancing retroactive rather
   than new-data-only; it is roadmapped. Today, for faster relief, add capacity or
