@@ -52,9 +52,14 @@ func TestExtentPeers_ApplyFetchStatRoundTrip(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	has, count, err := peers.Stat(ctx, addr, "vol")
+	has, count, digest, err := peers.Stat(ctx, addr, "vol")
 	if err != nil || !has || count != 2 {
 		t.Fatalf("Stat = (%v,%d,%v), want (true,2,nil)", has, count, err)
+	}
+	// A held map has to come back fingerprinted, or the currency check that
+	// relies on it silently degrades to comparing counts.
+	if len(digest) == 0 {
+		t.Error("Stat returned no digest for a map the peer holds")
 	}
 
 	got, err := peers.Fetch(ctx, addr, "vol")
@@ -69,7 +74,7 @@ func TestExtentPeers_ApplyFetchStatRoundTrip(t *testing.T) {
 	if err := peers.Apply(ctx, addr, "empty", nil, true); err != nil {
 		t.Fatalf("Apply ensure: %v", err)
 	}
-	if has, count, _ := peers.Stat(ctx, addr, "empty"); !has || count != 0 {
+	if has, count, _, _ := peers.Stat(ctx, addr, "empty"); !has || count != 0 {
 		t.Errorf("ensured map Stat = (has=%v,count=%d), want (true,0)", has, count)
 	}
 
@@ -93,7 +98,7 @@ func TestExtentPeers_ApplyFetchStatRoundTrip(t *testing.T) {
 	if err := peers.Delete(ctx, addr, "vol"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if has, _, _ := peers.Stat(ctx, addr, "vol"); has {
+	if has, _, _, _ := peers.Stat(ctx, addr, "vol"); has {
 		t.Error("Stat should report a deleted map as absent")
 	}
 	if err := peers.Delete(ctx, addr, "never-existed"); err != nil {
@@ -113,7 +118,7 @@ func TestExtentPeers_ServerRejectsEmptyVolume(t *testing.T) {
 	if _, err := peers.Fetch(ctx, addr, ""); err == nil {
 		t.Error("Fetch with an empty volume id should error")
 	}
-	if _, _, err := peers.Stat(ctx, addr, ""); err == nil {
+	if _, _, _, err := peers.Stat(ctx, addr, ""); err == nil {
 		t.Error("Stat with an empty volume id should error")
 	}
 	if err := peers.Delete(ctx, addr, ""); err == nil {

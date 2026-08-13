@@ -287,13 +287,26 @@ func TestReconfigureFailureKeepsLeaseGuardConnection(t *testing.T) {
 
 	kernel.setReconfigErr(errors.New("no dead slot"))
 	s.Kick()
-	// While reconfigures keep failing, exactly one negotiated connection must
-	// stay open as the lease guard (each new attempt supersedes the previous).
+	// While reconfigures keep failing, one negotiated connection stays open as the
+	// lease guard and each new attempt supersedes the previous one. Sampling the
+	// count at a single instant races the hand-off: an attempt dials and
+	// negotiates its replacement before closing the connection it supersedes, so
+	// two are legitimately open for that moment, and with a 1-5ms backoff several
+	// attempts land inside any observation window. What has to hold is that the
+	// count stays bounded rather than climbing with every retry, then settles back
+	// to the single guard.
 	waitFor(t, "a lease-guard connection", func() bool { return dialer.unclosed() == 1 })
-	time.Sleep(20 * time.Millisecond)
-	if got := dialer.unclosed(); got != 1 {
-		t.Fatalf("unclosed connections during failed reconfigures = %d, want exactly 1", got)
+	worst := 0
+	for range 40 {
+		if got := dialer.unclosed(); got > worst {
+			worst = got
+		}
+		time.Sleep(time.Millisecond)
 	}
+	if worst > 2 {
+		t.Fatalf("unclosed connections peaked at %d during failed reconfigures; superseded connections are leaking instead of being closed", worst)
+	}
+	waitFor(t, "the connection count to settle back to one guard", func() bool { return dialer.unclosed() == 1 })
 
 	kernel.setReconfigErr(nil)
 	waitFor(t, "reconnect success", func() bool { return s.Reconnects() >= 1 })

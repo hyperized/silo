@@ -1,6 +1,7 @@
 package replication
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -19,20 +20,25 @@ import (
 // needless cross-node Stat traffic on an idle cluster.
 const DefaultExtentScrubInterval = time.Minute
 
-// ExtentCatalog is the scrubber's read view of the local extent-map store:
-// enumerate the volumes whose maps live here and snapshot one to re-push.
-// *extentmap.Store satisfies it via Volumes and Snapshot.
+// ExtentCatalog is the scrubber's read/repair view of the local extent-map
+// store: enumerate the volumes whose maps live here, fingerprint or snapshot one
+// to compare and re-push, and fold a peer's copy back in. *extentmap.Store
+// satisfies it.
 type ExtentCatalog interface {
 	Volumes() []string
 	Snapshot(volumeID string) []crdt.MapEntry[uint64, string]
+	Digest(volumeID string) []byte
+	Merge(volumeID string, entries []crdt.MapEntry[uint64, string])
 }
 
-// ExtentReplicaProbe checks whether a peer holds a volume's extent map and
-// pushes the map if not. *ExtentGRPCPeers satisfies it. The push uses Apply with
-// ensure=true so even an empty map (a created-but-never-written volume) is
-// established on the peer, matching the write path's EnsureMap semantics.
+// ExtentReplicaProbe inspects a peer's copy of a volume's extent map, fetches it
+// when the two disagree, and pushes a copy back. *ExtentGRPCPeers satisfies it.
+// The push uses Apply with ensure=true so even an empty map (a created-but-never
+// -written volume) is established on the peer, matching the write path's
+// EnsureMap semantics.
 type ExtentReplicaProbe interface {
-	Stat(ctx context.Context, addr, volumeID string) (has bool, count int64, err error)
+	Stat(ctx context.Context, addr, volumeID string) (has bool, count int64, digest []byte, err error)
+	Fetch(ctx context.Context, addr, volumeID string) ([]crdt.MapEntry[uint64, string], error)
 	Apply(ctx context.Context, addr, volumeID string, entries []crdt.MapEntry[uint64, string], ensure bool) error
 }
 
@@ -161,33 +167,126 @@ func (s *ExtentScrubber) scrubMap(ctx context.Context, self, volumeID string) (u
 		}
 	}
 
-	var (
-		entries []crdt.MapEntry[uint64, string]
-		loaded  bool
-	)
+	// Two faults to repair here, and they need different treatment. A replica
+	// that holds no copy needs one. A replica that holds a copy which disagrees
+	// with ours needs the two reconciled, and reconciliation has to run in both
+	// directions: each side may hold bindings the other never received, because
+	// the write path acknowledges at a quorum and never revisits the replica that
+	// missed out. Pushing our copy alone would leave that node's own entries
+	// stranded, so pull first, fold everything into the local map, and push the
+	// union back out. The map is a CRDT, so the merges are order-independent and
+	// re-running the whole thing changes nothing.
+	stale := make([]string, 0, len(targets))
+	absent := make([]string, 0, len(targets))
 	for _, t := range targets {
-		if t == self || s.holds(ctx, t, volumeID) {
+		if t == self {
 			continue
 		}
-		// A target that should hold this map does not: it is under-replicated,
-		// whether or not the push below succeeds.
-		underReplicated = true
-		if !loaded {
-			entries = s.catalog.Snapshot(volumeID)
-			loaded = true
+		if !s.holds(ctx, t, volumeID) {
+			absent = append(absent, t)
+			continue
 		}
+		if same, known := s.agrees(ctx, t, volumeID); known && !same {
+			stale = append(stale, t)
+		}
+	}
+	if len(absent) == 0 && len(stale) == 0 {
+		return false
+	}
+	underReplicated = true
+
+	// Remember each diverged peer's bindings as they are folded in, so the push
+	// back can be narrowed to what that peer is actually short of.
+	peerHas := make(map[string]map[uint64]crdt.MapEntry[uint64, string], len(stale))
+	for _, t := range stale {
+		addr, ok := s.place.DataAddr(t)
+		if !ok {
+			continue
+		}
+		peerEntries, err := s.probe.Fetch(ctx, addr, volumeID)
+		if err != nil {
+			s.logger.Warn("extent-scrubber could not fetch a diverged map to reconcile it; will retry next cycle", "volume", volumeID, "peer", t, "error", err)
+			continue
+		}
+		s.catalog.Merge(volumeID, peerEntries)
+		byKey := make(map[uint64]crdt.MapEntry[uint64, string], len(peerEntries))
+		for _, e := range peerEntries {
+			byKey[e.Key] = e
+		}
+		peerHas[t] = byKey
+	}
+
+	entries := s.catalog.Snapshot(volumeID)
+	for _, t := range append(absent, stale...) {
 		addr, ok := s.place.DataAddr(t)
 		if !ok {
 			continue // peer has not advertised a data address yet
 		}
-		if err := s.probe.Apply(ctx, addr, volumeID, entries, true); err != nil {
+		// A peer that already has most of the map only needs the difference. A
+		// peer holding none of it needs all of it.
+		payload := entries
+		if have, ok := peerHas[t]; ok {
+			payload = missingFrom(entries, have)
+		}
+		if err := s.applyInBatches(ctx, addr, volumeID, payload); err != nil {
 			s.logger.Warn("extent-scrubber could not re-replicate a map to a peer; will retry next cycle", "volume", volumeID, "peer", t, "error", err)
 			continue
 		}
 		s.repairs.Add(1)
-		s.logger.Info("extent-scrubber re-replicated an extent map", "volume", volumeID, "peer", t)
+		s.logger.Info("extent-scrubber re-replicated an extent map", "volume", volumeID, "peer", t, "reason", reasonFor(t, stale), "entries", len(payload))
 	}
 	return underReplicated
+}
+
+// maxEntriesPerApply bounds how many bindings ride in one Apply. gRPC refuses a
+// message over 4 MiB by default, and a large volume's map is well past that: at
+// roughly 60 bytes per entry on the wire, a six-figure map serialises to several
+// times the limit, so pushing one wholesale fails every time and the replica
+// never converges. Splitting is safe because the map is a CRDT — each batch
+// merges independently and order does not matter.
+var maxEntriesPerApply = 10_000
+
+// applyInBatches pushes entries to a peer in messages small enough to be
+// accepted. ensure is set on every batch so a peer holding no map at all gets
+// one created, whichever batch arrives first.
+func (s *ExtentScrubber) applyInBatches(ctx context.Context, addr, volumeID string, entries []crdt.MapEntry[uint64, string]) error {
+	if len(entries) == 0 {
+		// Still worth a call: it establishes an empty map on a peer that has none.
+		return s.probe.Apply(ctx, addr, volumeID, nil, true)
+	}
+	for start := 0; start < len(entries); start += maxEntriesPerApply {
+		end := min(start+maxEntriesPerApply, len(entries))
+		if err := s.probe.Apply(ctx, addr, volumeID, entries[start:end], true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// missingFrom returns the entries a peer needs: those it has no binding for at
+// all, and those where its binding differs from ours. An identical binding is
+// left out, which is what keeps a reconciliation push proportional to the
+// divergence rather than to the size of the map.
+func missingFrom(entries []crdt.MapEntry[uint64, string], have map[uint64]crdt.MapEntry[uint64, string]) []crdt.MapEntry[uint64, string] {
+	out := make([]crdt.MapEntry[uint64, string], 0, len(entries))
+	for _, e := range entries {
+		h, ok := have[e.Key]
+		if !ok || h.Value != e.Value || h.TS != e.TS {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// reasonFor labels a repair in the log so an operator can tell a replica that
+// was missing its copy from one whose copy had drifted.
+func reasonFor(node string, stale []string) string {
+	for _, s := range stale {
+		if s == node {
+			return "diverged"
+		}
+	}
+	return "absent"
 }
 
 // holds reports whether node holds volume's map, via an extent Stat on that peer.
@@ -199,8 +298,31 @@ func (s *ExtentScrubber) holds(ctx context.Context, node, volumeID string) bool 
 	if !ok {
 		return false
 	}
-	has, _, err := s.probe.Stat(ctx, addr, volumeID)
+	has, _, _, err := s.probe.Stat(ctx, addr, volumeID)
 	return err == nil && has
+}
+
+// agrees reports whether node's copy of volumeID's map matches the local one,
+// and whether that could be established at all.
+//
+// The digest settles it outright when both sides have one. A peer too old to
+// return a digest leaves the extent count as the fallback, which catches a
+// replica that missed deltas but not two that diverged by an equal number of
+// entries. When neither is available the answer is unknown, and a caller must
+// not read unknown as agreement.
+func (s *ExtentScrubber) agrees(ctx context.Context, node, volumeID string) (same, known bool) {
+	addr, ok := s.place.DataAddr(node)
+	if !ok {
+		return false, false
+	}
+	has, count, digest, err := s.probe.Stat(ctx, addr, volumeID)
+	if err != nil || !has {
+		return false, false
+	}
+	if local := s.catalog.Digest(volumeID); len(local) > 0 && len(digest) > 0 {
+		return bytes.Equal(local, digest), true
+	}
+	return count == int64(len(s.catalog.Snapshot(volumeID))), true
 }
 
 // MetricPrefix namespaces the extent scrubber's readings alongside the extent
@@ -217,4 +339,32 @@ func (s *ExtentScrubber) CollectMetrics() []metrics.Metric {
 		{Name: "scrub_shortfall_maps", Help: "Extent maps this node is responsible for that were under-replicated at the last scrub.", Kind: metrics.Gauge, Value: float64(s.shortfall.Load()), Labels: labels},
 		{Name: "scrub_repairs_total", Help: "Extent-map replicas this node has re-pushed to heal under-replication.", Kind: metrics.Counter, Value: float64(s.repairs.Load()), Labels: labels},
 	}
+}
+
+// MapsConverged reports whether every named volume's extent map agrees across
+// the replicas that should hold it, and names one that does not when the answer
+// is no. It is the chunk GC's guard: a keep set built from a map that has drifted
+// behind its peers omits chunks the cluster still references, and sweeping on
+// that deletes live data.
+//
+// A volume whose agreement cannot be established — an unreachable peer, or one
+// too old to fingerprint its map — counts as not converged. The cost of waiting
+// is a delayed sweep; the cost of guessing is deleted data.
+func (s *ExtentScrubber) MapsConverged(ctx context.Context, volumes map[string]struct{}) (bool, string) {
+	self := s.place.SelfID()
+	for v := range volumes {
+		if ctx.Err() != nil {
+			return false, v
+		}
+		for _, t := range s.place.MetaReplicas(v, s.rf) {
+			if t == self {
+				continue
+			}
+			same, known := s.agrees(ctx, t, v)
+			if !known || !same {
+				return false, v
+			}
+		}
+	}
+	return true, ""
 }

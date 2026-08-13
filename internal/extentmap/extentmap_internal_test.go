@@ -1,6 +1,7 @@
 package extentmap
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"log/slog"
@@ -178,5 +179,80 @@ func skipIfRoot(t *testing.T) {
 	t.Helper()
 	if os.Geteuid() == 0 {
 		t.Skip("permission-based test is meaningless as root")
+	}
+}
+
+func TestDigest_DistinguishesMapsAndIsOrderIndependent(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	ts := func(w int64) hlc.Timestamp { return hlc.Timestamp{Wall: w, Node: "n"} }
+
+	if got := s.Digest("missing"); got != nil {
+		t.Errorf("Digest of an unknown volume = %x, want nil so callers can tell it from an empty map", got)
+	}
+
+	s.Ensure("empty")
+	empty := s.Digest("empty")
+	if len(empty) == 0 {
+		t.Fatal("an empty map must still digest to something, or it reads as absent")
+	}
+
+	s.Set("v", 0, "c0", ts(1))
+	s.Set("v", 5, "c5", ts(2))
+	one := s.Digest("v")
+
+	// Same bindings inserted in the opposite order must agree: replicas have no
+	// reason to enumerate a map the same way.
+	s2, err := Open(t.TempDir(), quiet())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	s2.Set("v", 5, "c5", ts(2))
+	s2.Set("v", 0, "c0", ts(1))
+	if two := s2.Digest("v"); !bytes.Equal(one, two) {
+		t.Errorf("digest depends on insertion order: %x vs %x", one, two)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		apply func(*Store)
+	}{
+		{"an extra binding", func(x *Store) { x.Set("v", 9, "c9", ts(3)) }},
+		{"a rebound chunk", func(x *Store) { x.Set("v", 0, "c0-new", ts(9)) }},
+		{"a newer timestamp", func(x *Store) { x.Set("v", 0, "c0", ts(99)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			x, err := Open(t.TempDir(), quiet())
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			x.Set("v", 0, "c0", ts(1))
+			x.Set("v", 5, "c5", ts(2))
+			tc.apply(x)
+			if bytes.Equal(one, x.Digest("v")) {
+				t.Errorf("%s left the digest unchanged, so divergence would go unnoticed", tc.name)
+			}
+		})
+	}
+}
+
+func TestDigest_SurvivesReload(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	s.Set("v", 3, "c3", hlc.Timestamp{Wall: 7, Node: "n"})
+	before := s.Digest("v")
+
+	reopened, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if after := reopened.Digest("v"); !bytes.Equal(before, after) {
+		t.Errorf("digest changed across a restart: %x -> %x; a restarted node would look diverged", before, after)
 	}
 }

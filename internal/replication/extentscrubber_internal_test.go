@@ -3,6 +3,7 @@ package replication
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -15,8 +16,10 @@ import (
 // their snapshots. listed (when non-nil) is closed on the first Volumes call so
 // a test can await the loop running.
 type fakeExtCatalog struct {
-	vols []string
-	snap map[string][]crdt.MapEntry[uint64, string]
+	mu     sync.Mutex
+	vols   []string
+	snap   map[string][]crdt.MapEntry[uint64, string]
+	merged []string
 
 	listOnce sync.Once
 	listed   chan struct{}
@@ -30,6 +33,44 @@ func (c *fakeExtCatalog) Volumes() []string {
 }
 
 func (c *fakeExtCatalog) Snapshot(v string) []crdt.MapEntry[uint64, string] { return c.snap[v] }
+
+// Digest reports sameDigest so peers agree by default; a test that wants a
+// diverged replica marks it on the peer fake instead.
+func (c *fakeExtCatalog) Digest(v string) []byte {
+	if _, ok := c.snap[v]; !ok && !hasVol(c.vols, v) {
+		return nil
+	}
+	return sameDigest
+}
+
+// Merge records what a reconciliation folded in, and makes it visible to later
+// Snapshot calls so a test can assert the union is what gets pushed back out.
+func (c *fakeExtCatalog) Merge(v string, entries []crdt.MapEntry[uint64, string]) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.snap == nil {
+		c.snap = map[string][]crdt.MapEntry[uint64, string]{}
+	}
+	c.merged = append(c.merged, v)
+	seen := map[uint64]bool{}
+	for _, e := range c.snap[v] {
+		seen[e.Key] = true
+	}
+	for _, e := range entries {
+		if !seen[e.Key] {
+			c.snap[v] = append(c.snap[v], e)
+		}
+	}
+}
+
+func hasVol(xs []string, x string) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
 
 // applies to addr for vol, scanning the shared fakeEpeers record.
 func appliedTo(recs []appliedRec, addr, vol string) (appliedRec, bool) {
@@ -280,5 +321,243 @@ func TestExtentScrubber_Metrics(t *testing.T) {
 	}
 	if got := extScrubMetric(t, s, "scrub_repairs_total").Value; got != 1 {
 		t.Errorf("repairs after healing = %v, want a cumulative 1", got)
+	}
+}
+
+// --- divergence reconciliation ----------------------------------------------
+
+func TestExtentScrubber_ReconcilesDivergedReplicaBothWays(t *testing.T) {
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+	// a holds extent 0; b holds extent 1 and is reachable, so the old presence
+	// check saw nothing wrong. Each side has a binding the other never received,
+	// which is what a quorum ack leaves behind.
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{
+		"v1": {{Key: 0, Value: "c0"}},
+	}}
+	peers := newFakeEpeers()
+	peers.statHas["b:7000"] = true
+	peers.statDiverged["b:7000"] = true
+	peers.fetchRes["b:7000"] = []crdt.MapEntry[uint64, string]{{Key: 1, Value: "c1"}}
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+
+	if !s.scrubMap(context.Background(), "a", "v1") {
+		t.Fatal("a diverged replica should count as under-replicated")
+	}
+
+	// The peer's binding must have been folded in locally, not just overwritten.
+	got := cat.Snapshot("v1")
+	keys := map[uint64]bool{}
+	for _, e := range got {
+		keys[e.Key] = true
+	}
+	if !keys[0] || !keys[1] {
+		t.Errorf("local map = %+v, want the union of both sides", got)
+	}
+	// And b gains what only a had, but only that. Pushing the whole map back
+	// would size the message by the map rather than by the divergence, which on a
+	// large volume overruns gRPC's limit and never lands at all.
+	rec, ok := appliedTo(peers.snapApplied(), "b:7000", "v1")
+	if !ok {
+		t.Fatal("the reconciled map was never pushed back to the diverged replica")
+	}
+	if len(rec.entries) != 1 || rec.entries[0].Key != 0 {
+		t.Errorf("pushed %+v, want only extent 0, the binding b was missing", rec.entries)
+	}
+}
+
+func TestExtentScrubber_LeavesAgreeingReplicasAlone(t *testing.T) {
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{
+		"v1": {{Key: 0, Value: "c0"}},
+	}}
+	peers := newFakeEpeers()
+	peers.statHas["b:7000"] = true // holds it and agrees
+
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+	if s.scrubMap(context.Background(), "a", "v1") {
+		t.Error("a replica that already agrees must not be reported under-replicated")
+	}
+	if len(peers.snapApplied()) != 0 {
+		t.Errorf("nothing should be pushed to an agreeing replica: %+v", peers.snapApplied())
+	}
+	if len(cat.merged) != 0 {
+		t.Errorf("no merge should happen when replicas agree: %v", cat.merged)
+	}
+}
+
+func TestExtentScrubber_FetchFailureLeavesTheMapAlone(t *testing.T) {
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{
+		"v1": {{Key: 0, Value: "c0"}},
+	}}
+	peers := newFakeEpeers()
+	peers.statHas["b:7000"] = true
+	peers.statDiverged["b:7000"] = true
+	peers.fetchErr["b:7000"] = errors.New("peer went away")
+
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+	s.scrubMap(context.Background(), "a", "v1")
+
+	if len(cat.merged) != 0 {
+		t.Errorf("a failed fetch must not merge anything: %v", cat.merged)
+	}
+}
+
+// --- the GC's currency guard -------------------------------------------------
+
+func TestExtentScrubber_MapsConverged(t *testing.T) {
+	vols := map[string]struct{}{"v1": {}}
+	base := func() (*fakeMetaPlace, *fakeExtCatalog) {
+		return &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}},
+			&fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{
+				"v1": {{Key: 0, Value: "c0"}},
+			}}
+	}
+
+	t.Run("agreeing replicas converge", func(t *testing.T) {
+		place, cat := base()
+		peers := newFakeEpeers()
+		peers.statHas["b:7000"] = true
+		s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+		if ok, who := s.MapsConverged(context.Background(), vols); !ok {
+			t.Errorf("MapsConverged = false (%q), want true", who)
+		}
+	})
+
+	t.Run("a diverged replica blocks the sweep", func(t *testing.T) {
+		place, cat := base()
+		peers := newFakeEpeers()
+		peers.statHas["b:7000"] = true
+		peers.statDiverged["b:7000"] = true
+		s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+		ok, who := s.MapsConverged(context.Background(), vols)
+		if ok || who != "v1" {
+			t.Errorf("MapsConverged = (%v,%q), want (false,\"v1\")", ok, who)
+		}
+	})
+
+	t.Run("an unreachable replica counts as not converged", func(t *testing.T) {
+		place, cat := base()
+		peers := newFakeEpeers()
+		peers.statErr["b:7000"] = errors.New("unreachable")
+		s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+		if ok, _ := s.MapsConverged(context.Background(), vols); ok {
+			t.Error("an unreachable replica must not read as agreement: the sweep would run half-blind")
+		}
+	})
+
+	t.Run("cancellation stops the walk", func(t *testing.T) {
+		place, cat := base()
+		peers := newFakeEpeers()
+		peers.statHas["b:7000"] = true
+		s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if ok, _ := s.MapsConverged(ctx, vols); ok {
+			t.Error("a cancelled check must not report convergence")
+		}
+	})
+}
+
+func TestExtentScrubber_SkipsPeersWithNoAdvertisedAddress(t *testing.T) {
+	// A replica that has not advertised a data address yet cannot be probed,
+	// reconciled, or pushed to. It must be passed over rather than crashed on.
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}, noAddr: map[string]bool{"b": true}}
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{
+		"v1": {{Key: 0, Value: "c0"}},
+	}}
+	peers := newFakeEpeers()
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+
+	s.scrubMap(context.Background(), "a", "v1")
+
+	if len(peers.snapApplied()) != 0 {
+		t.Errorf("nothing can be pushed to a peer with no address: %+v", peers.snapApplied())
+	}
+	if ok, _ := s.MapsConverged(context.Background(), map[string]struct{}{"v1": {}}); ok {
+		t.Error("a peer that cannot be reached must not read as agreement")
+	}
+}
+
+func TestExtentScrubber_FallsBackToCountWhenNoDigest(t *testing.T) {
+	// A peer older than the digest field returns none, leaving the extent count
+	// as the only comparison available.
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{
+		"v1": {{Key: 0, Value: "c0"}, {Key: 1, Value: "c1"}},
+	}}
+	peers := newFakeEpeers()
+	peers.statHas["b:7000"] = true
+	peers.noDigest["b:7000"] = true
+	peers.fetchRes["b:7000"] = []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c0"}} // 1 entry vs our 2
+
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+	same, known := s.agrees(context.Background(), "b", "v1")
+	if !known || same {
+		t.Errorf("agrees = (%v,%v), want a known disagreement from the count", same, known)
+	}
+
+	// Matching counts read as agreement, which is the limit of this fallback.
+	peers.fetchRes["b:7000"] = []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c0"}, {Key: 7, Value: "c7"}}
+	if same, known := s.agrees(context.Background(), "b", "v1"); !known || !same {
+		t.Errorf("agrees = (%v,%v), want equal counts to read as agreement", same, known)
+	}
+}
+
+func TestExtentScrubber_SplitsLargeMapsAcrossApplies(t *testing.T) {
+	// A big volume's map does not fit in one gRPC message: at roughly 60 bytes
+	// per binding, six figures of entries is several times the 4 MiB default, so
+	// a single Apply is rejected outright and the replica never converges. This
+	// is what a real 40 GiB volume did.
+	restore := maxEntriesPerApply
+	maxEntriesPerApply = 100
+	defer func() { maxEntriesPerApply = restore }()
+
+	entries := make([]crdt.MapEntry[uint64, string], 250)
+	for i := range entries {
+		entries[i] = crdt.MapEntry[uint64, string]{Key: uint64(i), Value: fmt.Sprintf("c%d", i)}
+	}
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{"v1": entries}}
+	peers := newFakeEpeers() // b holds nothing, so the whole map has to travel
+
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+	s.scrubMap(context.Background(), "a", "v1")
+
+	applied := peers.snapApplied()
+	total := 0
+	for _, r := range applied {
+		if r.addr != "b:7000" {
+			continue
+		}
+		if len(r.entries) > maxEntriesPerApply {
+			t.Errorf("one Apply carried %d entries, over the %d cap", len(r.entries), maxEntriesPerApply)
+		}
+		total += len(r.entries)
+	}
+	if total != len(entries) {
+		t.Errorf("delivered %d of %d entries across %d messages", total, len(entries), len(applied))
+	}
+	if len(applied) < 3 {
+		t.Errorf("250 entries at a cap of 100 should take 3 messages, got %d", len(applied))
+	}
+}
+
+func TestExtentScrubber_EstablishesAnEmptyMapOnAPeerThatHasNone(t *testing.T) {
+	// A created-but-never-written volume still needs its (empty) map on every
+	// replica, so the push happens even with nothing to send.
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{"v1": {}}}
+	peers := newFakeEpeers()
+
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+	s.scrubMap(context.Background(), "a", "v1")
+
+	rec, ok := appliedTo(peers.snapApplied(), "b:7000", "v1")
+	if !ok {
+		t.Fatal("an empty map must still be established on a replica that has none")
+	}
+	if !rec.ensure {
+		t.Error("the push must set ensure, or the peer creates nothing")
 	}
 }

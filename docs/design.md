@@ -62,6 +62,15 @@ referenced by nothing. Reclaiming those is the chunk garbage collector's job, an
 it is the reason silo has one at all. See
 [operations.md](operations.md#configuration) for `SILO_CHUNK_GC_ENABLE`.
 
+**Replicas of a map must agree before anything is reclaimed.** The extent write
+path acknowledges once a majority of a volume's replicas have the delta, so the
+replica that missed out keeps a copy that looks healthy while lacking bindings
+its peers have. Reads resolve against the local map, and reclamation decides what
+is unreferenced from it, so a copy that has quietly drifted is both a source of
+zero-filled reads and a way to delete live data. The extent scrubber reconciles
+divergent copies in both directions, and the chunk GC waits for that to finish
+rather than sweeping on a view it cannot trust.
+
 **A chunk id names a writer, not a volume.** The id is the writing node, a random
 per-session identifier, and a counter. Chunks from one volume are scattered across
 many such sets, and a set outlives the session that created it. This is why

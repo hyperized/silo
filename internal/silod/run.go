@@ -101,8 +101,8 @@ var (
 	newExtentScrubberSubsystem = func(cfg *config.Config, place replication.MetaPlacement, catalog replication.ExtentCatalog, probe replication.ExtentReplicaProbe, logger *slog.Logger) subsystem {
 		return replication.NewExtentScrubber(place, catalog, probe, cfg.Replication, cfg.ExtentScrubInterval, logger)
 	}
-	newChunkGCSubsystem = func(cfg *config.Config, lister replication.ChunkLister, ns replication.NamespaceRefSource, ext replication.ExtentRefSource, logger *slog.Logger) subsystem {
-		var opts []replication.ChunkGCOption
+	newChunkGCSubsystem = func(cfg *config.Config, lister replication.ChunkLister, ns replication.NamespaceRefSource, ext replication.ExtentRefSource, agree replication.ExtentAgreement, logger *slog.Logger) subsystem {
+		opts := []replication.ChunkGCOption{replication.WithExtentAgreement(agree)}
 		// Unset (0) leaves the GC on its own default; anything else — including a
 		// negative "no cap" — is the operator's explicit choice.
 		if cfg.ChunkGCMaxDeletes != 0 {
@@ -423,7 +423,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		}
 	}
 
-	logger.Info("silo starting",
+	logger.Info(
+		"silo starting",
 		"version", version,
 		"node_id", cfg.NodeID,
 		"grpc_addr", cfg.GRPCAddr,
@@ -520,9 +521,13 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// The chunk GC reclaims orphaned chunks by mark-and-sweep: it builds the live
 	// (keep) set from the namespace's global refs (manifests + in-namespace
 	// extents) and the locally-held out-of-band extent maps, then prunes the local
-	// chunk store of what neither references. It defaults to a dry run (reporting
-	// reclaimable orphans via metrics) until SILO_CHUNK_GC_ENABLE is set.
-	chunkGCSubsys := newChunkGCSubsystem(cfg, store, ns, extStore, logger)
+	// chunk store of what neither references. Reclamation is on unless
+	// SILO_CHUNK_GC_ENABLE is cleared, which leaves it reporting reclaimable
+	// orphans via metrics without deleting.
+	// The GC asks the extent scrubber whether this node's maps agree with its
+	// replicas' before it sweeps: a map that quietly missed a quorum write makes
+	// live chunks look orphaned.
+	chunkGCSubsys := newChunkGCSubsystem(cfg, store, ns, extStore, asExtentAgreement(extScrubberSubsys), logger)
 	// The scrubber, rebalancer, reaper, and GC expose replication/capacity
 	// metrics; surface them to Prometheus when the concrete subsystem implements
 	// metrics.Source (the production ones do; a test fake may not).
@@ -582,7 +587,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	defer cancel()
 	for _, sub := range subs {
 		if err := sub.Shutdown(shutdownCtx); err != nil {
-			logger.Error("subsystem did not shut down cleanly",
+			logger.Error(
+				"subsystem did not shut down cleanly",
 				"subsystem", sub.Name(),
 				"err", err,
 			)
@@ -693,5 +699,15 @@ To mint another token later, restart silod with SILO_PRINT_BOOTSTRAP_TOKEN=1.
 ========================================================================
 
 `, plaintext, fp, plaintext, cfg.BootstrapAdvertise, fp)
+	return nil
+}
+
+// asExtentAgreement exposes the extent scrubber's map-agreement check to the
+// chunk GC. A test may swap in a fake subsystem that does not implement it, in
+// which case the GC keeps its older behaviour of trusting the local maps.
+func asExtentAgreement(sub subsystem) replication.ExtentAgreement {
+	if a, ok := sub.(replication.ExtentAgreement); ok {
+		return a
+	}
 	return nil
 }

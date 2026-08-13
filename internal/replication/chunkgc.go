@@ -70,13 +70,28 @@ type ExtentRefSource interface {
 	Snapshot(volumeID string) []crdt.MapEntry[uint64, string]
 }
 
+// ExtentAgreement reports whether this node's extent maps match the other
+// replicas'. The GC needs it because holding a map is not the same as holding a
+// current one: the write path acknowledges at a quorum, so a replica can miss
+// deltas and keep serving a copy that looks perfectly healthy. A keep set built
+// from a map like that omits chunks the cluster still references, and sweeping
+// on it deletes live data.
+//
+// Divergence is a transient state the extent scrubber repairs, so the GC waits
+// rather than treating it as an error. *ExtentScrubber satisfies this.
+type ExtentAgreement interface {
+	// MapsConverged reports whether every volume's map agrees across its
+	// replicas, and names one that does not when the answer is no.
+	MapsConverged(ctx context.Context, volumes map[string]struct{}) (converged bool, disagreeing string)
+}
+
 // ChunkGC reclaims orphaned chunks — chunks no live volume or file references
 // anymore — by mark-and-sweep. On a paced loop it builds the cluster's live
 // (keep) set from the two reference kinds (file manifests + in-namespace extents
 // from the global namespace; out-of-band extent maps held locally), then deletes
 // the local chunks that set excludes.
 //
-// Two guards keep a sweep from ever reclaiming a live chunk:
+// Three guards keep a sweep from ever reclaiming a live chunk:
 //
 //   - Completeness. A chunk is referenced from extent maps that are sharded
 //     across nodes; a node holds only some of them. So before sweeping, the GC
@@ -88,14 +103,21 @@ type ExtentRefSource interface {
 //     the view is always complete. A future revision can fetch missing maps from
 //     peers instead of abstaining.)
 //
+//   - Currency. Holding a map is not the same as holding the current one. The
+//     extent write path acknowledges at a quorum, so a replica can miss deltas and
+//     serve a copy that looks healthy while lacking bindings its peers have. Before
+//     sweeping, the GC checks its maps agree with the other replicas' and waits for
+//     the extent scrubber to reconcile them if they do not.
+//
 //   - Grace. A chunk newer than the grace window is never reclaimed, covering the
 //     write-then-record gap where a freshly stored chunk's reference has not yet
 //     been recorded.
 //
-// Reclamation is also gated on an explicit enable flag: until it is set the GC
-// runs as a dry run, reporting how many chunks it would reclaim (the
-// orphan_chunks gauge) so an operator can confirm the live-set computation
-// against real data before any deletion. Each node sweeps only its own store;
+// Reclamation is on unless an operator turns it off. Clearing the enable flag
+// gives a dry run that reports how many chunks would be reclaimed (the
+// orphan_chunks gauge) without removing any, which is how the live-set
+// computation gets confirmed against a particular store before it is trusted to
+// delete. Each node sweeps only its own store;
 // because every node derives the same global live set, a chunk live anywhere is
 // kept everywhere, so replication is preserved.
 type ChunkGC struct {
@@ -107,6 +129,7 @@ type ChunkGC struct {
 	interval   time.Duration
 	enabled    bool
 	maxDeletes int
+	agreement  ExtentAgreement
 	logger     *slog.Logger
 	now        func() time.Time
 
@@ -115,13 +138,16 @@ type ChunkGC struct {
 	// the last sweep's deletions; incomplete is 1 when the last cycle abstained
 	// for an incomplete view; unaccounted is how many live volumes' maps were
 	// missing at the last cycle; deferred is how many reclaimable orphans the
-	// last sweep left for the next one after spending its delete budget.
+	// last sweep left for the next one after spending its delete budget;
+	// diverged is 1 when the last cycle abstained because this node's extent
+	// maps disagreed with its peers'.
 	orphans     atomic.Int64
 	reclaimed   atomic.Int64
 	lastReclaim atomic.Int64
 	incomplete  atomic.Int64
 	unaccounted atomic.Int64
 	deferred    atomic.Int64
+	diverged    atomic.Int64
 
 	stop chan struct{}
 	done chan struct{}
@@ -136,6 +162,14 @@ type ChunkGCOption func(*ChunkGC)
 // monopolising the disk the serving path is using. n <= 0 means no cap.
 func WithMaxDeletes(n int) ChunkGCOption {
 	return func(g *ChunkGC) { g.maxDeletes = n }
+}
+
+// WithExtentAgreement gives the GC a way to check that this node's extent maps
+// match the other replicas' before it sweeps. silod always supplies one. A GC
+// built without it keeps the older behaviour of trusting the local maps, which
+// is safe only where those maps cannot lag — in tests, or on a single node.
+func WithExtentAgreement(a ExtentAgreement) ChunkGCOption {
+	return func(g *ChunkGC) { g.agreement = a }
 }
 
 // NewChunkGC builds a chunk GC. A non-positive grace or interval falls back to
@@ -226,6 +260,23 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 	}
 	g.incomplete.Store(0)
 
+	// Currency: holding a map is not the same as holding the current one. The
+	// write path acknowledges at a quorum, so a replica can miss deltas and go on
+	// serving a copy that looks healthy. Sweeping on a keep set built from a map
+	// like that deletes chunks the other replicas still reference, so wait for
+	// the extent scrubber to reconcile them instead.
+	if g.agreement != nil {
+		converged, disagreeing := g.agreement.MapsConverged(ctx, liveVolumes(g.ns))
+		if !converged {
+			g.diverged.Store(1)
+			g.orphans.Store(0)
+			g.lastReclaim.Store(0)
+			g.logger.Warn("chunk-gc is skipping this sweep: this node's extent maps disagree with its replicas, so its view of what is still referenced may be short", "volume", disagreeing)
+			return
+		}
+	}
+	g.diverged.Store(0)
+
 	ids, err := g.lister.List(ctx)
 	if err != nil {
 		g.logger.Warn("chunk-gc could not list the local chunk store; will retry next cycle", "error", err)
@@ -315,5 +366,6 @@ func (g *ChunkGC) CollectMetrics() []metrics.Metric {
 		{Name: "incomplete_view", Help: "1 when the last cycle abstained because this node does not hold every live volume's extent map.", Kind: metrics.Gauge, Value: float64(g.incomplete.Load()), Labels: labels},
 		{Name: "unaccounted_volumes", Help: "Live volumes whose extent maps this node could not see at the last cycle.", Kind: metrics.Gauge, Value: float64(g.unaccounted.Load()), Labels: labels},
 		{Name: "deferred_chunks", Help: "Reclaimable orphans the last sweep left behind after spending its per-sweep delete budget.", Kind: metrics.Gauge, Value: float64(g.deferred.Load()), Labels: labels},
+		{Name: "diverged_maps", Help: "1 when the last cycle abstained because this node's extent maps disagreed with its replicas'.", Kind: metrics.Gauge, Value: float64(g.diverged.Load()), Labels: labels},
 	}
 }

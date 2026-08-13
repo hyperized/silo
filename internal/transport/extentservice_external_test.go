@@ -41,6 +41,17 @@ func (f *fakeES) Ensure(vol string)                                   { f.ensure
 func (f *fakeES) Snapshot(vol string) []crdt.MapEntry[uint64, string] { return f.snap[vol] }
 func (f *fakeES) Has(vol string) bool                                 { return f.has[vol] }
 func (f *fakeES) Len(vol string) int                                  { return f.length[vol] }
+
+// Digest stands in for a real fingerprint: any volume the fake knows about gets
+// a stable non-nil value, and an unknown one gets nil, which is the distinction
+// the service is expected to pass through.
+func (f *fakeES) Digest(vol string) []byte {
+	if !f.has[vol] {
+		return nil
+	}
+	return []byte("digest-" + vol)
+}
+
 func (f *fakeES) Delete(vol string) error {
 	if f.deleteErr != nil {
 		return f.deleteErr

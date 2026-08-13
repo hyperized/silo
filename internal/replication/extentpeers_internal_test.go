@@ -27,7 +27,7 @@ func TestExtentGRPCPeers_DialError(t *testing.T) {
 	if _, err := p.Fetch(ctx, "x:1", "vol"); err == nil {
 		t.Error("Fetch should fail when the peer client cannot be created")
 	}
-	if _, _, err := p.Stat(ctx, "x:1", "vol"); err == nil {
+	if _, _, _, err := p.Stat(ctx, "x:1", "vol"); err == nil {
 		t.Error("Stat should fail when the peer client cannot be created")
 	}
 	if err := p.Delete(ctx, "x:1", "vol"); err == nil {

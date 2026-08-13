@@ -26,6 +26,7 @@ type ExtentStore interface {
 	Merge(volumeID string, entries []crdt.MapEntry[uint64, string])
 	Ensure(volumeID string)
 	Snapshot(volumeID string) []crdt.MapEntry[uint64, string]
+	Digest(volumeID string) []byte
 	Has(volumeID string) bool
 	Len(volumeID string) int
 	Delete(volumeID string) error
@@ -80,15 +81,18 @@ func (s *ExtentService) Get(req *extentv1.GetRequest, stream extentv1.ExtentMap_
 	return nil
 }
 
-// Stat reports whether this node holds the volume's map and its extent count —
-// the probe a warming serving node and the extent scrubber use.
+// Stat reports whether this node holds the volume's map, its extent count, and
+// a digest of its bindings — the probe a warming serving node, the extent
+// scrubber, and the chunk GC use. The digest lets a caller tell an identical
+// replica from a diverged one without fetching either.
 func (s *ExtentService) Stat(_ context.Context, req *extentv1.StatRequest) (*extentv1.StatResponse, error) {
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "extent: a volume id is required")
 	}
 	return &extentv1.StatResponse{
-		Has:   s.store.Has(req.GetVolumeId()),
-		Count: int64(s.store.Len(req.GetVolumeId())),
+		Has:    s.store.Has(req.GetVolumeId()),
+		Count:  int64(s.store.Len(req.GetVolumeId())),
+		Digest: s.store.Digest(req.GetVolumeId()),
 	}, nil
 }
 

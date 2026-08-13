@@ -40,7 +40,7 @@ type ExtentStore interface {
 type ExtentPeers interface {
 	Apply(ctx context.Context, addr, volumeID string, entries []crdt.MapEntry[uint64, string], ensure bool) error
 	Fetch(ctx context.Context, addr, volumeID string) ([]crdt.MapEntry[uint64, string], error)
-	Stat(ctx context.Context, addr, volumeID string) (has bool, count int64, err error)
+	Stat(ctx context.Context, addr, volumeID string) (has bool, count int64, digest []byte, err error)
 	Delete(ctx context.Context, addr, volumeID string) error
 }
 
@@ -178,7 +178,7 @@ func (c *ExtentCoordinator) Warm(ctx context.Context, volumeID string) error {
 			unreachable++
 			continue
 		}
-		has, _, err := c.peers.Stat(ctx, addr, volumeID)
+		has, _, _, err := c.peers.Stat(ctx, addr, volumeID)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("peer %s: %w", target, err))
 			unreachable++

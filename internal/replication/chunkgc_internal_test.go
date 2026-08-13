@@ -514,3 +514,106 @@ func TestChunkGC_FallsBackToPerChunkDeleteWithoutBatching(t *testing.T) {
 		t.Errorf("reclaimed_total = %v, want 2", got)
 	}
 }
+
+// --- the currency guard ------------------------------------------------------
+
+// fakeAgreement stands in for the extent scrubber's map-agreement check.
+type fakeAgreement struct {
+	converged bool
+	who       string
+	calls     int
+	sawVols   map[string]struct{}
+}
+
+func (f *fakeAgreement) MapsConverged(_ context.Context, vols map[string]struct{}) (bool, string) {
+	f.calls++
+	f.sawVols = vols
+	return f.converged, f.who
+}
+
+// This is the regression the guard exists for. A node whose extent map quietly
+// missed a quorum write holds a keep set that is short a few bindings, so chunks
+// the other replicas still reference look like orphans. Sweeping on that view
+// deleted live data on a real cluster; the sweep has to wait instead.
+func TestChunkGC_AbstainsWhileExtentMapsDisagree(t *testing.T) {
+	lister := newBatchingLister("still-referenced-elsewhere")
+	ns := fakeNSRefs{volumes: []string{"v1"}}
+	ext := fakeExtRefs{vols: map[string][]crdt.MapEntry[uint64, string]{"v1": nil}}
+	agree := &fakeAgreement{converged: false, who: "v1"}
+	g := NewChunkGC(lister, ns, ext, "a", time.Hour, time.Hour, true, quietLog(),
+		WithExtentAgreement(agree))
+
+	g.runOnce(context.Background())
+
+	if got := lister.snapNoSync(); len(got) != 0 {
+		t.Fatalf("deleted %v while the maps disagreed; this is the live-data-loss path", got)
+	}
+	if got := gcMetric(t, g, "diverged_maps").Value; got != 1 {
+		t.Errorf("diverged_maps = %v, want 1", got)
+	}
+	if got := gcMetric(t, g, "orphan_chunks").Value; got != 0 {
+		t.Errorf("orphan_chunks = %v, want 0: a count from a short keep set would mislead", got)
+	}
+	if agree.calls != 1 {
+		t.Errorf("agreement checked %d times, want once per sweep", agree.calls)
+	}
+	if _, ok := agree.sawVols["v1"]; !ok {
+		t.Errorf("the guard was asked about %v, want the namespace's live volumes", agree.sawVols)
+	}
+}
+
+func TestChunkGC_SweepsOnceMapsAgree(t *testing.T) {
+	lister := newBatchingLister("orphan")
+	agree := &fakeAgreement{converged: true}
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog(),
+		WithExtentAgreement(agree))
+
+	g.runOnce(context.Background())
+
+	if got := lister.snapNoSync(); len(got) != 1 {
+		t.Errorf("reclaimed %v, want the orphan once the maps agree", got)
+	}
+	if got := gcMetric(t, g, "diverged_maps").Value; got != 0 {
+		t.Errorf("diverged_maps = %v, want 0", got)
+	}
+}
+
+func TestChunkGC_WithoutAnAgreementSourceKeepsSweeping(t *testing.T) {
+	// A single-node store has no peers to disagree with, and the tests above
+	// cover the guarded path; leaving the option unset must not wedge the sweep.
+	lister := newBatchingLister("orphan")
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog())
+
+	g.runOnce(context.Background())
+
+	if got := lister.snapNoSync(); len(got) != 1 {
+		t.Errorf("reclaimed %v, want the orphan", got)
+	}
+	if got := gcMetric(t, g, "diverged_maps").Value; got != 0 {
+		t.Errorf("diverged_maps = %v, want 0", got)
+	}
+}
+
+// The completeness guard runs before the currency one: a node missing a map
+// entirely has a bigger problem than one whose copy drifted, and checking
+// agreement for a map it does not hold is meaningless.
+func TestChunkGC_IncompleteViewTakesPrecedenceOverDivergence(t *testing.T) {
+	lister := newBatchingLister("orphan")
+	ns := fakeNSRefs{volumes: []string{"v1", "v2"}}
+	ext := fakeExtRefs{vols: map[string][]crdt.MapEntry[uint64, string]{"v1": nil}}
+	agree := &fakeAgreement{converged: false, who: "v2"}
+	g := NewChunkGC(lister, ns, ext, "a", time.Hour, time.Hour, true, quietLog(),
+		WithExtentAgreement(agree))
+
+	g.runOnce(context.Background())
+
+	if got := gcMetric(t, g, "incomplete_view").Value; got != 1 {
+		t.Errorf("incomplete_view = %v, want 1", got)
+	}
+	if agree.calls != 0 {
+		t.Errorf("agreement was checked %d times; the sweep should have abstained before that", agree.calls)
+	}
+	if len(lister.snapNoSync()) != 0 {
+		t.Error("nothing may be reclaimed on an incomplete view")
+	}
+}

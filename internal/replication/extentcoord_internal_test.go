@@ -146,20 +146,22 @@ type appliedRec struct {
 }
 
 type fakeEpeers struct {
-	mu        sync.Mutex
-	applyErr  map[string]error
-	statHas   map[string]bool
-	statErr   map[string]error
-	fetchRes  map[string][]crdt.MapEntry[uint64, string]
-	fetchErr  map[string]error
-	deleteErr map[string]error
-	applied   []appliedRec
-	deleted   []appliedRec
-	applyCh   chan struct{} // one signal per Apply call so tests can await fan-out
+	mu           sync.Mutex
+	applyErr     map[string]error
+	statHas      map[string]bool
+	statErr      map[string]error
+	statDiverged map[string]bool
+	noDigest     map[string]bool // peer predates the digest field
+	fetchRes     map[string][]crdt.MapEntry[uint64, string]
+	fetchErr     map[string]error
+	deleteErr    map[string]error
+	applied      []appliedRec
+	deleted      []appliedRec
+	applyCh      chan struct{} // one signal per Apply call so tests can await fan-out
 }
 
 func newFakeEpeers() *fakeEpeers {
-	return &fakeEpeers{applyErr: map[string]error{}, statHas: map[string]bool{}, statErr: map[string]error{}, fetchRes: map[string][]crdt.MapEntry[uint64, string]{}, fetchErr: map[string]error{}, deleteErr: map[string]error{}, applyCh: make(chan struct{}, 64)}
+	return &fakeEpeers{applyErr: map[string]error{}, statHas: map[string]bool{}, statErr: map[string]error{}, statDiverged: map[string]bool{}, noDigest: map[string]bool{}, fetchRes: map[string][]crdt.MapEntry[uint64, string]{}, fetchErr: map[string]error{}, deleteErr: map[string]error{}, applyCh: make(chan struct{}, 64)}
 }
 
 func (p *fakeEpeers) Delete(_ context.Context, addr, vol string) error {
@@ -211,12 +213,29 @@ func (p *fakeEpeers) Fetch(_ context.Context, addr, _ string) ([]crdt.MapEntry[u
 	return p.fetchRes[addr], nil
 }
 
-func (p *fakeEpeers) Stat(_ context.Context, addr, _ string) (bool, int64, error) {
+func (p *fakeEpeers) Stat(_ context.Context, addr, _ string) (bool, int64, []byte, error) {
 	if err := p.statErr[addr]; err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
-	return p.statHas[addr], int64(len(p.fetchRes[addr])), nil
+	// Peers agree with the local catalog unless a test says otherwise, so cases
+	// about presence are not perturbed by the currency check layered over it.
+	digest := sameDigest
+	switch {
+	case p.noDigest[addr]:
+		digest = nil
+	case p.statDiverged[addr]:
+		digest = otherDigest
+	}
+	return p.statHas[addr], int64(len(p.fetchRes[addr])), digest, nil
 }
+
+// sameDigest and otherDigest stand in for real fingerprints in the fakes: the
+// catalog reports sameDigest, so a peer reports the same value unless a test
+// marks it diverged.
+var (
+	sameDigest  = []byte("same")
+	otherDigest = []byte("other")
+)
 
 // --- tests ------------------------------------------------------------------
 

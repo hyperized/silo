@@ -54,7 +54,7 @@ is the quick reference.
 | `SILO_EXTENT_SCRUB_INTERVAL` | `1m` | Extent-map scrubber cadence: re-replicates an idle volume's extent map to its full replica set after a node loss (the metadata analog of `SILO_SCRUB_INTERVAL`, which heals chunks). The synchronous write-path fan-out only keeps replicas in step while writes flow; a volume written once and then left idle would otherwise stay under-replicated after a later node loss. |
 | `SILO_CHUNK_GC_INTERVAL` | `10m` | Chunk garbage-collector sweep cadence. The GC reclaims chunks no live volume or file references anymore (whole-volume deletes and copy-on-write overwrite orphans) by mark-and-sweep over the cluster's live reference set. |
 | `SILO_CHUNK_GC_GRACE` | `1h` | How old an unreferenced chunk must be before the GC reclaims it. This is the safety margin for the write-then-record gap (a chunk is stored just before its reference is recorded). Keep it well above write latency plus gossip/HLC skew. |
-| `SILO_CHUNK_GC_ENABLE` | `false` | Actually delete. Left off (the default) the GC is a **dry run**: it computes the live set and reports the reclaimable orphan count (`silo_chunkgc_orphan_chunks`) without removing anything, so you can validate the computation against real data before enabling deletion. Dry run is a commissioning step, not a resting state — copy-on-write overwrites orphan chunks continuously, and no other mechanism reclaims them. |
+| `SILO_CHUNK_GC_ENABLE` | `true` | Actually delete. On by default: copy-on-write overwrites orphan chunks continuously and no other mechanism reclaims them, so a store with reclamation off does not hold steady, it fills. Set it `false` for the reporting-only **dry run**, which computes the live set and reports `silo_chunkgc_orphan_chunks` without removing anything. Dry run is worth using to validate the computation against a particular store, but it is a commissioning step rather than a resting state. A sweep also waits while this node's extent maps disagree with their replicas (`silo_chunkgc_diverged_maps`), since a keep set built from a map that missed a write omits chunks the cluster still references. |
 | `SILO_CHUNK_GC_MAX_DELETES` | `100000` | Cap on reclamations per sweep. Only binds on a backlog: it keeps the first sweep after a long-running leak from turning into one unbounded burst of unlinks against the disk the serving path is using, draining across consecutive sweeps instead. `silo_chunkgc_deferred_chunks` reports what a sweep left behind. Negative = no cap. |
 
 ### Encryption (at rest)
@@ -788,7 +788,10 @@ The **CSI node plugin** serves its own series on `SILO_CSI_HTTP_ADDR`
   on a cluster whose replication factor covers every node; a persistent non-zero
   means the GC is abstaining and not reclaiming on that node.
   `silo_chunkgc_deferred_chunks` is what a sweep left for the next one after
-  spending `SILO_CHUNK_GC_MAX_DELETES`. Non-zero for a stretch is the backlog
+  spending `SILO_CHUNK_GC_MAX_DELETES`. `silo_chunkgc_diverged_maps` is 1 when a
+  node skipped a sweep because its extent maps disagreed with its replicas'; a
+  brief 1 while the extent scrubber reconciles them is normal, a persistent one
+  means reconciliation is not completing and the GC is reclaiming nothing there. Non-zero for a stretch is the backlog
   draining as intended; non-zero forever means orphans are being created faster
   than the cap reclaims them, so raise the cap or shorten the interval.
 - `silo_replication_unreferenced_skipped` and `silo_replication_incomplete_view`:
