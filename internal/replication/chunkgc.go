@@ -113,10 +113,11 @@ type ExtentAgreement interface {
 //     write-then-record gap where a freshly stored chunk's reference has not yet
 //     been recorded.
 //
-// Reclamation is also gated on an explicit enable flag: until it is set the GC
-// runs as a dry run, reporting how many chunks it would reclaim (the
-// orphan_chunks gauge) so an operator can confirm the live-set computation
-// against real data before any deletion. Each node sweeps only its own store;
+// Reclamation is on unless an operator turns it off. Clearing the enable flag
+// gives a dry run that reports how many chunks would be reclaimed (the
+// orphan_chunks gauge) without removing any, which is how the live-set
+// computation gets confirmed against a particular store before it is trusted to
+// delete. Each node sweeps only its own store;
 // because every node derives the same global live set, a chunk live anywhere is
 // kept everywhere, so replication is preserved.
 type ChunkGC struct {

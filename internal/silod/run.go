@@ -521,8 +521,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// The chunk GC reclaims orphaned chunks by mark-and-sweep: it builds the live
 	// (keep) set from the namespace's global refs (manifests + in-namespace
 	// extents) and the locally-held out-of-band extent maps, then prunes the local
-	// chunk store of what neither references. It defaults to a dry run (reporting
-	// reclaimable orphans via metrics) until SILO_CHUNK_GC_ENABLE is set.
+	// chunk store of what neither references. Reclamation is on unless
+	// SILO_CHUNK_GC_ENABLE is cleared, which leaves it reporting reclaimable
+	// orphans via metrics without deleting.
 	// The GC asks the extent scrubber whether this node's maps agree with its
 	// replicas' before it sweeps: a map that quietly missed a quorum write makes
 	// live chunks look orphaned.
