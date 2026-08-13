@@ -3,6 +3,7 @@ package replication
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -352,13 +353,15 @@ func TestExtentScrubber_ReconcilesDivergedReplicaBothWays(t *testing.T) {
 	if !keys[0] || !keys[1] {
 		t.Errorf("local map = %+v, want the union of both sides", got)
 	}
-	// And the union pushed back, so b gains what only a had.
+	// And b gains what only a had, but only that. Pushing the whole map back
+	// would size the message by the map rather than by the divergence, which on a
+	// large volume overruns gRPC's limit and never lands at all.
 	rec, ok := appliedTo(peers.snapApplied(), "b:7000", "v1")
 	if !ok {
 		t.Fatal("the reconciled map was never pushed back to the diverged replica")
 	}
-	if len(rec.entries) != 2 {
-		t.Errorf("pushed %d entries, want both sides' bindings", len(rec.entries))
+	if len(rec.entries) != 1 || rec.entries[0].Key != 0 {
+		t.Errorf("pushed %+v, want only extent 0, the binding b was missing", rec.entries)
 	}
 }
 
@@ -498,5 +501,63 @@ func TestExtentScrubber_FallsBackToCountWhenNoDigest(t *testing.T) {
 	peers.fetchRes["b:7000"] = []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c0"}, {Key: 7, Value: "c7"}}
 	if same, known := s.agrees(context.Background(), "b", "v1"); !known || !same {
 		t.Errorf("agrees = (%v,%v), want equal counts to read as agreement", same, known)
+	}
+}
+
+func TestExtentScrubber_SplitsLargeMapsAcrossApplies(t *testing.T) {
+	// A big volume's map does not fit in one gRPC message: at roughly 60 bytes
+	// per binding, six figures of entries is several times the 4 MiB default, so
+	// a single Apply is rejected outright and the replica never converges. This
+	// is what a real 40 GiB volume did.
+	restore := maxEntriesPerApply
+	maxEntriesPerApply = 100
+	defer func() { maxEntriesPerApply = restore }()
+
+	entries := make([]crdt.MapEntry[uint64, string], 250)
+	for i := range entries {
+		entries[i] = crdt.MapEntry[uint64, string]{Key: uint64(i), Value: fmt.Sprintf("c%d", i)}
+	}
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{"v1": entries}}
+	peers := newFakeEpeers() // b holds nothing, so the whole map has to travel
+
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+	s.scrubMap(context.Background(), "a", "v1")
+
+	applied := peers.snapApplied()
+	total := 0
+	for _, r := range applied {
+		if r.addr != "b:7000" {
+			continue
+		}
+		if len(r.entries) > maxEntriesPerApply {
+			t.Errorf("one Apply carried %d entries, over the %d cap", len(r.entries), maxEntriesPerApply)
+		}
+		total += len(r.entries)
+	}
+	if total != len(entries) {
+		t.Errorf("delivered %d of %d entries across %d messages", total, len(entries), len(applied))
+	}
+	if len(applied) < 3 {
+		t.Errorf("250 entries at a cap of 100 should take 3 messages, got %d", len(applied))
+	}
+}
+
+func TestExtentScrubber_EstablishesAnEmptyMapOnAPeerThatHasNone(t *testing.T) {
+	// A created-but-never-written volume still needs its (empty) map on every
+	// replica, so the push happens even with nothing to send.
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{"v1": {}}}
+	peers := newFakeEpeers()
+
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+	s.scrubMap(context.Background(), "a", "v1")
+
+	rec, ok := appliedTo(peers.snapApplied(), "b:7000", "v1")
+	if !ok {
+		t.Fatal("an empty map must still be established on a replica that has none")
+	}
+	if !rec.ensure {
+		t.Error("the push must set ensure, or the peer creates nothing")
 	}
 }

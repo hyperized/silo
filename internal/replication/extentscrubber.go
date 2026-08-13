@@ -195,6 +195,9 @@ func (s *ExtentScrubber) scrubMap(ctx context.Context, self, volumeID string) (u
 	}
 	underReplicated = true
 
+	// Remember each diverged peer's bindings as they are folded in, so the push
+	// back can be narrowed to what that peer is actually short of.
+	peerHas := make(map[string]map[uint64]crdt.MapEntry[uint64, string], len(stale))
 	for _, t := range stale {
 		addr, ok := s.place.DataAddr(t)
 		if !ok {
@@ -206,6 +209,11 @@ func (s *ExtentScrubber) scrubMap(ctx context.Context, self, volumeID string) (u
 			continue
 		}
 		s.catalog.Merge(volumeID, peerEntries)
+		byKey := make(map[uint64]crdt.MapEntry[uint64, string], len(peerEntries))
+		for _, e := range peerEntries {
+			byKey[e.Key] = e
+		}
+		peerHas[t] = byKey
 	}
 
 	entries := s.catalog.Snapshot(volumeID)
@@ -214,14 +222,60 @@ func (s *ExtentScrubber) scrubMap(ctx context.Context, self, volumeID string) (u
 		if !ok {
 			continue // peer has not advertised a data address yet
 		}
-		if err := s.probe.Apply(ctx, addr, volumeID, entries, true); err != nil {
+		// A peer that already has most of the map only needs the difference. A
+		// peer holding none of it needs all of it.
+		payload := entries
+		if have, ok := peerHas[t]; ok {
+			payload = missingFrom(entries, have)
+		}
+		if err := s.applyInBatches(ctx, addr, volumeID, payload); err != nil {
 			s.logger.Warn("extent-scrubber could not re-replicate a map to a peer; will retry next cycle", "volume", volumeID, "peer", t, "error", err)
 			continue
 		}
 		s.repairs.Add(1)
-		s.logger.Info("extent-scrubber re-replicated an extent map", "volume", volumeID, "peer", t, "reason", reasonFor(t, stale))
+		s.logger.Info("extent-scrubber re-replicated an extent map", "volume", volumeID, "peer", t, "reason", reasonFor(t, stale), "entries", len(payload))
 	}
 	return underReplicated
+}
+
+// maxEntriesPerApply bounds how many bindings ride in one Apply. gRPC refuses a
+// message over 4 MiB by default, and a large volume's map is well past that: at
+// roughly 60 bytes per entry on the wire, a six-figure map serialises to several
+// times the limit, so pushing one wholesale fails every time and the replica
+// never converges. Splitting is safe because the map is a CRDT — each batch
+// merges independently and order does not matter.
+var maxEntriesPerApply = 10_000
+
+// applyInBatches pushes entries to a peer in messages small enough to be
+// accepted. ensure is set on every batch so a peer holding no map at all gets
+// one created, whichever batch arrives first.
+func (s *ExtentScrubber) applyInBatches(ctx context.Context, addr, volumeID string, entries []crdt.MapEntry[uint64, string]) error {
+	if len(entries) == 0 {
+		// Still worth a call: it establishes an empty map on a peer that has none.
+		return s.probe.Apply(ctx, addr, volumeID, nil, true)
+	}
+	for start := 0; start < len(entries); start += maxEntriesPerApply {
+		end := min(start+maxEntriesPerApply, len(entries))
+		if err := s.probe.Apply(ctx, addr, volumeID, entries[start:end], true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// missingFrom returns the entries a peer needs: those it has no binding for at
+// all, and those where its binding differs from ours. An identical binding is
+// left out, which is what keeps a reconciliation push proportional to the
+// divergence rather than to the size of the map.
+func missingFrom(entries []crdt.MapEntry[uint64, string], have map[uint64]crdt.MapEntry[uint64, string]) []crdt.MapEntry[uint64, string] {
+	out := make([]crdt.MapEntry[uint64, string], 0, len(entries))
+	for _, e := range entries {
+		h, ok := have[e.Key]
+		if !ok || h.Value != e.Value || h.TS != e.TS {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // reasonFor labels a repair in the log so an operator can tell a replica that
