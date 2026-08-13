@@ -14,9 +14,11 @@ package extentmap
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -139,6 +141,51 @@ func (s *Store) Len(volumeID string) int {
 		return m.Len()
 	}
 	return 0
+}
+
+// emptyMapSalt keeps an empty map's digest away from zero, so a peer that
+// returns an all-zero digest by accident does not read as agreeing with one.
+const emptyMapSalt = 0x5110000000000001
+
+// Digest returns a fingerprint of volume's bindings, or nil if the volume is
+// unknown. Two replicas holding the same map produce the same digest; any
+// difference in the set of (index, chunk, timestamp) triples changes it.
+//
+// It exists so replicas can discover that their copies disagree without
+// shipping the copies. A map is small next to the data it addresses but not
+// small in absolute terms — a 40 GiB volume's map runs to six figures of
+// entries — so comparing contents outright on every scrub cycle would cost far
+// more than the divergence it is looking for.
+//
+// The fold is XOR over per-entry hashes, which makes the result independent of
+// iteration order. That is the one property this needs, since two replicas have
+// no reason to enumerate a map in the same order.
+func (s *Store) Digest(volumeID string) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.maps[volumeID]
+	if !ok {
+		return nil
+	}
+	var acc uint64
+	var buf [8]byte
+	for _, e := range m.Entries() {
+		h := fnv.New64a()
+		binary.BigEndian.PutUint64(buf[:], e.Key)
+		_, _ = h.Write(buf[:])
+		_, _ = h.Write([]byte(e.Value))
+		// Reinterpreting the wall clock's bits is the point: the digest only has
+		// to be stable and collision-resistant, not arithmetically meaningful.
+		binary.BigEndian.PutUint64(buf[:], uint64(e.TS.Wall)) // #nosec G115
+		_, _ = h.Write(buf[:])
+		binary.BigEndian.PutUint64(buf[:], uint64(e.TS.Logical)) // #nosec G115
+		_, _ = h.Write(buf[:])
+		_, _ = h.Write([]byte(e.TS.Node))
+		acc ^= h.Sum64()
+	}
+	out := make([]byte, 8)
+	binary.BigEndian.PutUint64(out, acc^emptyMapSalt)
+	return out
 }
 
 // Snapshot returns volume's extent bindings, sorted by index for a stable wire

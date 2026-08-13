@@ -1115,7 +1115,8 @@ func TestNamespaceSyncExt_RoundTrips(t *testing.T) {
 }
 
 func TestRun_NamespaceOpenFailure(t *testing.T) {
-	installFakes(t,
+	installFakes(
+		t,
 		newFakeSubsystem("http", nil, nil, true),
 		newFakeSubsystem("grpc", nil, nil, true),
 		newFakeSubsystem("bootstrap", nil, nil, true),
@@ -1129,5 +1130,17 @@ func TestRun_NamespaceOpenFailure(t *testing.T) {
 	err := Run(context.Background(), testConfig(t), discardLogger(), io.Discard, "v0")
 	if err == nil || !strings.Contains(err.Error(), "namespace state") {
 		t.Errorf("got %v, want a namespace-open failure", err)
+	}
+}
+
+func TestAsExtentAgreement(t *testing.T) {
+	// The real extent scrubber supplies the GC's currency guard.
+	if got := asExtentAgreement(replication.NewExtentScrubber(nil, nil, nil, 1, time.Hour, discardLogger())); got == nil {
+		t.Error("the extent scrubber should satisfy ExtentAgreement")
+	}
+	// A test double that does not is tolerated: the GC falls back to trusting
+	// its local maps rather than refusing to start.
+	if got := asExtentAgreement(newFakeSubsystem("stand-in", nil, nil, true)); got != nil {
+		t.Errorf("a subsystem without the check should yield nil, got %T", got)
 	}
 }

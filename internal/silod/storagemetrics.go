@@ -50,7 +50,8 @@ func (m *storageMetrics) CollectMetrics() []metrics.Metric {
 	labels := [][2]string{{"node", m.nodeID}}
 	out := make([]metrics.Metric, 0, 4)
 	if u, err := m.measure(m.dataDir); err == nil {
-		out = append(out,
+		out = append(
+			out,
 			metrics.Metric{Name: "capacity_bytes", Help: "Total bytes of the filesystem backing the data directory.", Kind: metrics.Gauge, Value: float64(u.CapacityBytes), Labels: labels},
 			metrics.Metric{Name: "used_bytes", Help: "Used bytes of the filesystem backing the data directory.", Kind: metrics.Gauge, Value: float64(u.UsedBytes), Labels: labels},
 			metrics.Metric{Name: "available_bytes", Help: "Available bytes of the filesystem backing the data directory.", Kind: metrics.Gauge, Value: float64(u.AvailableBytes), Labels: labels},

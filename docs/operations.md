@@ -788,7 +788,10 @@ The **CSI node plugin** serves its own series on `SILO_CSI_HTTP_ADDR`
   on a cluster whose replication factor covers every node; a persistent non-zero
   means the GC is abstaining and not reclaiming on that node.
   `silo_chunkgc_deferred_chunks` is what a sweep left for the next one after
-  spending `SILO_CHUNK_GC_MAX_DELETES`. Non-zero for a stretch is the backlog
+  spending `SILO_CHUNK_GC_MAX_DELETES`. `silo_chunkgc_diverged_maps` is 1 when a
+  node skipped a sweep because its extent maps disagreed with its replicas'; a
+  brief 1 while the extent scrubber reconciles them is normal, a persistent one
+  means reconciliation is not completing and the GC is reclaiming nothing there. Non-zero for a stretch is the backlog
   draining as intended; non-zero forever means orphans are being created faster
   than the cap reclaims them, so raise the cap or shorten the interval.
 - `silo_replication_unreferenced_skipped` and `silo_replication_incomplete_view`:

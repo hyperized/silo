@@ -70,6 +70,11 @@ message StatRequest {
 message StatResponse {
   bool has = 1;
   int64 count = 2;
+  // Order-independent fingerprint of the map's bindings, so replicas can find
+  // out that their copies disagree without shipping them. Empty when the peer
+  // does not hold the map, or is too old to compute one. Callers must read
+  // empty as "unknown" and fall back to comparing count, never as "agrees".
+  bytes digest = 3;
 }
 
 message DeleteRequest {

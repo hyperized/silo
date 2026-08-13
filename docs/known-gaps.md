@@ -52,6 +52,12 @@ The library covers the **core** opcodes. Deferred:
   add a wrapped-DEK cache in `internal/crypto`, then expose
   `silo_crypto_datakey_cache_{hits,misses}_total`. (The *cluster*-key source is
   done: static/file/AWS-KMS/GCP-KMS/Azure-KV. This is the per-chunk DEK cache.)
+- **Equal-count divergence against a pre-digest peer.** Replicas compare extent
+  maps by digest, which settles the question outright. A peer too old to return
+  one leaves the extent count as the only fallback, and that misses two copies
+  that drifted by the same number of entries. This closes once every node in a
+  cluster runs a version that reports a digest, so it only matters mid-upgrade.
+
 - **Replication "queue depth" metric.** Today the equivalent health signal is
   `silo_replication_shortfall_chunks` (under-replicated count). A true
   in-flight re-replication queue gauge would require instrumenting the

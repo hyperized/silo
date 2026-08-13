@@ -14,6 +14,13 @@ package replication
 // build lives here rather than in either of them. They differ only in what they
 // do when the view is incomplete: the GC abstains, the scrubber falls back to
 // healing everything.
+// liveVolumes returns only the live volume inode ids, for callers that ask a
+// question per volume rather than build the whole keep set.
+func liveVolumes(ns NamespaceRefSource) map[string]struct{} {
+	_, volumes := ns.LiveChunkRefs()
+	return volumes
+}
+
 func liveSet(ns NamespaceRefSource, ext ExtentRefSource) (keep map[string]struct{}, unaccounted int64) {
 	// LiveChunkRefs hands back a fresh map, so writing the extent refs into it is
 	// safe — it is not the namespace's own state.

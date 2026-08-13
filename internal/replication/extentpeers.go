@@ -102,20 +102,22 @@ func (p *ExtentGRPCPeers) Fetch(ctx context.Context, addr, volumeID string) ([]c
 	return out, nil
 }
 
-// Stat asks addr whether it holds volumeID's map and how many extents it has —
-// the warming and repair probe.
-func (p *ExtentGRPCPeers) Stat(ctx context.Context, addr, volumeID string) (bool, int64, error) {
+// Stat asks addr whether it holds volumeID's map, how many extents it has, and
+// a digest of its bindings — the warming and repair probe. The digest is empty
+// when the peer does not hold the map or predates the field, so callers must
+// read empty as unknown rather than as agreement.
+func (p *ExtentGRPCPeers) Stat(ctx context.Context, addr, volumeID string) (bool, int64, []byte, error) {
 	cli, err := p.client(addr)
 	if err != nil {
-		return false, 0, err
+		return false, 0, nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, extentPeerTimeout)
 	defer cancel()
 	resp, err := cli.Stat(ctx, &extentv1.StatRequest{VolumeId: volumeID})
 	if err != nil {
-		return false, 0, fmt.Errorf("replication: could not stat the extent map of volume %q on peer %s (%w)", volumeID, addr, err)
+		return false, 0, nil, fmt.Errorf("replication: could not stat the extent map of volume %q on peer %s (%w)", volumeID, addr, err)
 	}
-	return resp.GetHas(), resp.GetCount(), nil
+	return resp.GetHas(), resp.GetCount(), resp.GetDigest(), nil
 }
 
 // Delete asks addr to remove volumeID's map from its local store — the per-peer
