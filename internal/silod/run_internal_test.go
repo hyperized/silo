@@ -521,7 +521,7 @@ func TestRun_ServesHealthAndMetricsWhileRunning(t *testing.T) {
 		t.Fatal("server did not become reachable within 2s")
 	}
 
-	resp, err := http.Get(url + "/healthz")
+	resp, err := noKeepAliveClient.Get(url + "/healthz")
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
@@ -1084,10 +1084,20 @@ func freeTCPPort(t *testing.T) string {
 	return addr[i+1:]
 }
 
+// noKeepAliveClient is used by tests that shut the HTTP server down
+// afterwards. With keep-alives on, the transport can dial a spare connection
+// that never carries a request; the server keeps that in StateNew, and
+// http.Server.Shutdown only treats StateNew as idle after 5s, which outlasts
+// the tests' shutdown deadline.
+var noKeepAliveClient = &http.Client{
+	Transport: &http.Transport{DisableKeepAlives: true},
+	Timeout:   2 * time.Second,
+}
+
 func waitForServer(url string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := noKeepAliveClient.Get(url)
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode < 300 {

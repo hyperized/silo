@@ -38,7 +38,9 @@ func (f *fakeNamespaceOps) Remove(path string) error {
 	}
 	return f.err
 }
+
 func (f *fakeNamespaceOps) VolumeInodeID(string) (string, error) { return f.volInodeID, f.volInodeErr }
+
 func (f *fakeNamespaceOps) List(string) ([]namespace.ResolvedEntry, error) {
 	return f.entries, f.err
 }
