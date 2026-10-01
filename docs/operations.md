@@ -813,9 +813,13 @@ The **CSI node plugin** serves its own series on `SILO_CSI_HTTP_ADDR`
 
 The data-key cache hit-rate metric is pending the cache itself (silod currently
 unwraps per-chunk keys on demand; the cache is a later optimisation).
-- `silo_hlc_peer_clock_skew_seconds` and `silo_hlc_clock_skew_alerts_total`:
-  rising values mean a node's clock is drifting; investigate NTP before write
-  ordering is affected.
+- `silo_hlc_peer_clock_skew_seconds{peer}`: this node's clock skew to each
+  peer, taken from the peer's send time on every gossip round (positive means
+  the peer is ahead). It includes one-way gossip latency, so a healthy cluster
+  sits a few milliseconds below zero. Peers not heard from for 5 minutes drop
+  out. `silo_hlc_clock_skew_alerts_total` counts readings past
+  `SILO_MAX_CLOCK_SKEW`; a rising count means a node's clock is drifting, so
+  investigate NTP before write ordering is affected.
 - `silo_build_info`: build/version, one series per node.
 
 - `silo_backup_runs_total` / `silo_backup_failures_total` / `silo_backup_last_chunks`:

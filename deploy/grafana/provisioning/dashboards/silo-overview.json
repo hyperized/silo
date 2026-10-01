@@ -1859,7 +1859,7 @@
           "expr": "silo_hlc_peer_clock_skew_seconds{node=~\"$node\"}",
           "refId": "A",
           "range": true,
-          "legendFormat": "{{node}}"
+          "legendFormat": "{{node}} to {{peer}}"
         }
       ],
       "gridPos": {

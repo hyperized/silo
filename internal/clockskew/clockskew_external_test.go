@@ -90,21 +90,88 @@ func TestMonitor_WarnIntervalZeroKeepsDefault(t *testing.T) {
 	}
 }
 
+const skewHelp = "Clock skew to a peer, measured from its gossip send time on receipt; positive means the peer is ahead of this node. Includes one-way gossip latency."
+
+func skewSeries(peer string, v float64) metrics.Metric {
+	return metrics.Metric{Name: "peer_clock_skew_seconds", Help: skewHelp, Kind: metrics.Gauge, Value: v, Labels: [][2]string{{"peer", peer}}}
+}
+
+func alertsSeries(v float64) metrics.Metric {
+	return metrics.Metric{Name: "clock_skew_alerts_total", Help: "Times a peer's clock exceeded the configured skew threshold.", Kind: metrics.Counter, Value: v}
+}
+
 func TestMonitor_CollectMetrics(t *testing.T) {
 	now := time.Unix(6_000, 0)
 	m := clockskew.New(500*time.Millisecond, discardLogger(), clockskew.WithNow(func() time.Time { return now }))
-	m.Observe("p", now.Add(2*time.Second).UnixNano()) // 2s ahead -> last=2s, one alert
+	m.Observe("p", now.Add(2*time.Second).UnixNano()) // 2s ahead -> one alert
 
 	if m.MetricPrefix() != "silo_hlc" {
 		t.Errorf("prefix = %q, want silo_hlc", m.MetricPrefix())
 	}
 	got := m.CollectMetrics()
+	want := []metrics.Metric{skewSeries("p", 2), alertsSeries(1)}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CollectMetrics = %+v, want %+v", got, want)
+	}
+}
+
+func TestMonitor_CollectMetricsPerPeerSorted(t *testing.T) {
+	now := time.Unix(7_000, 0)
+	m := clockskew.New(time.Second, discardLogger(), clockskew.WithNow(func() time.Time { return now }))
+	m.Observe("node-c", now.Add(-30*time.Millisecond).UnixNano())
+	m.Observe("node-a", now.Add(10*time.Millisecond).UnixNano())
+	m.Observe("node-b", now.Add(-5*time.Millisecond).UnixNano())
+	m.Observe("node-a", now.Add(20*time.Millisecond).UnixNano()) // replaces the earlier node-a reading
+
+	got := m.CollectMetrics()
 	want := []metrics.Metric{
-		{Name: "peer_clock_skew_seconds", Help: "Last observed clock skew to a peer; positive means the peer is ahead of this node.", Kind: metrics.Gauge, Value: 2},
-		{Name: "clock_skew_alerts_total", Help: "Times a peer's clock exceeded the configured skew threshold.", Kind: metrics.Counter, Value: 1},
+		skewSeries("node-a", 0.02),
+		skewSeries("node-b", -0.005),
+		skewSeries("node-c", -0.03),
+		alertsSeries(0),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("CollectMetrics = %+v, want %+v", got, want)
+	}
+}
+
+func TestMonitor_DropsStalePeers(t *testing.T) {
+	now := time.Unix(8_000, 0)
+	m := clockskew.New(time.Second, discardLogger(),
+		clockskew.WithNow(func() time.Time { return now }),
+		clockskew.WithStaleAfter(time.Minute),
+	)
+	m.Observe("gone", now.UnixNano())
+	now = now.Add(30 * time.Second)
+	m.Observe("live", now.UnixNano())
+
+	now = now.Add(45 * time.Second) // "gone" last seen 75s ago, "live" 45s ago
+	got := m.CollectMetrics()
+	want := []metrics.Metric{skewSeries("live", 0), alertsSeries(0)}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("CollectMetrics = %+v, want %+v", got, want)
+	}
+
+	// Pruned for good: a later scrape inside "gone"'s old window does not revive it.
+	if got := m.CollectMetrics(); len(got) != 2 {
+		t.Errorf("second scrape returned %d metrics, want 2", len(got))
+	}
+}
+
+func TestMonitor_StaleAfterNonPositiveKeepsDefault(t *testing.T) {
+	now := time.Unix(9_000, 0)
+	m := clockskew.New(time.Second, discardLogger(),
+		clockskew.WithNow(func() time.Time { return now }),
+		clockskew.WithStaleAfter(0),
+	)
+	m.Observe("p", now.UnixNano())
+	now = now.Add(clockskew.DefaultStaleAfter) // exactly at the edge: still kept
+	if got := m.CollectMetrics(); len(got) != 2 {
+		t.Fatalf("at the default window edge got %d metrics, want 2", len(got))
+	}
+	now = now.Add(time.Nanosecond)
+	if got := m.CollectMetrics(); len(got) != 1 {
+		t.Errorf("past the default window got %d metrics, want 1", len(got))
 	}
 }
 

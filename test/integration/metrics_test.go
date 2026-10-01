@@ -10,8 +10,9 @@ import (
 )
 
 // TestMetrics_ExporterServesSiloMetrics confirms the exporter is wired into the
-// running daemon: /metrics serves build info and the clock-skew metrics that
-// the skew monitor feeds.
+// running daemon: /metrics serves build info and the clock-skew alert counter.
+// The per-peer skew gauge only appears once a peer has gossiped, so a lone
+// node does not export it.
 func TestMetrics_ExporterServesSiloMetrics(t *testing.T) {
 	node := startSilod(t)
 	defer node.teardown()
@@ -29,7 +30,6 @@ func TestMetrics_ExporterServesSiloMetrics(t *testing.T) {
 
 	for _, want := range []string{
 		"silo_build_info{",
-		"silo_hlc_peer_clock_skew_seconds",
 		"silo_hlc_clock_skew_alerts_total",
 	} {
 		if !strings.Contains(out, want) {

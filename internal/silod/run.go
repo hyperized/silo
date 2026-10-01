@@ -448,10 +448,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// rides the gossip anti-entropy exchange to converge with peers, and a
 	// background sweep reclaims tombstones older than the retention window.
 	// The sweep stops when ctx is cancelled on shutdown.
-	// The skew monitor compares peer-issued HLC timestamps (seen as peer
-	// state arrives over anti-entropy) against this node's clock, warning and
-	// counting an alert when a peer runs ahead beyond the threshold — the
-	// early signal of broken time sync, which silently corrupts write order.
+	// The skew monitor compares each peer's gossip send time against this
+	// node's clock on receipt, warning and counting an alert when a peer runs
+	// ahead beyond the threshold: the early signal of broken time sync, which
+	// silently corrupts write order.
 	skew := clockskew.New(cfg.MaxClockSkew, logger)
 	clock := hlc.New(cfg.NodeID)
 	ns, err := newNamespace(clock, filepath.Join(cfg.DataDir, "namespace.json"), logger, namespace.WithPeerClockObserver(skew.Observe))
