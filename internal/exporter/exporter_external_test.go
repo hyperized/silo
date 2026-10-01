@@ -120,3 +120,34 @@ func TestExporter_RendersHistogram(t *testing.T) {
 		}
 	}
 }
+
+func TestExporter_OneHelpAndTypePerFamily(t *testing.T) {
+	e := exporter.New()
+	e.Register(dynSource{prefix: "silo_hlc", collect: func() []metrics.Metric {
+		return []metrics.Metric{
+			{Name: "peer_clock_skew_seconds", Help: "Skew.", Kind: metrics.Gauge, Value: 0.1, Labels: [][2]string{{"peer", "a"}}},
+			{Name: "peer_clock_skew_seconds", Help: "Skew.", Kind: metrics.Gauge, Value: -0.2, Labels: [][2]string{{"peer", "b"}}},
+			{Name: "clock_skew_alerts_total", Help: "Alerts.", Kind: metrics.Counter, Value: 0},
+		}
+	}})
+
+	var b strings.Builder
+	e.Render(&b)
+	out := b.String()
+	// Prometheus rejects a second TYPE line for the same family.
+	if n := strings.Count(out, "# TYPE silo_hlc_peer_clock_skew_seconds "); n != 1 {
+		t.Errorf("TYPE lines for the skew family = %d, want 1\n%s", n, out)
+	}
+	if n := strings.Count(out, "# HELP silo_hlc_peer_clock_skew_seconds "); n != 1 {
+		t.Errorf("HELP lines for the skew family = %d, want 1\n%s", n, out)
+	}
+	for _, want := range []string{
+		`silo_hlc_peer_clock_skew_seconds{peer="a"} 0.1`,
+		`silo_hlc_peer_clock_skew_seconds{peer="b"} -0.2`,
+		"# TYPE silo_hlc_clock_skew_alerts_total counter",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("render missing %q\n%s", want, out)
+		}
+	}
+}

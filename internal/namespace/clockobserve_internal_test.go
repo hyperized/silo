@@ -1,7 +1,9 @@
 package namespace
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/hyperized/silo/internal/crdt"
 	"github.com/hyperized/silo/internal/hlc"
@@ -9,90 +11,114 @@ import (
 
 func ts(node string, wall int64) hlc.Timestamp { return hlc.Timestamp{Wall: wall, Node: node} }
 
-func TestObservePeerClocks_PicksHighestForeignTimestamp(t *testing.T) {
+func TestObservePeerClocks(t *testing.T) {
 	const self = "me"
-	var gotNode string
-	var gotWall int64
-	calls := 0
-	n := New(hlc.New(self), WithPeerClockObserver(func(node string, wall int64) {
-		gotNode, gotWall = node, wall
-		calls++
-	}))
-
-	// Every timestamp-bearing field carries a foreign timestamp; one Add tag
-	// is from self with the largest wall of all, to prove self is skipped.
-	w := wireNamespace{Inodes: []wireInode{
-		{
-			ID: "d", Type: Dir,
-			ACLTS: ts("peer-b", 50),
-			Adds: []crdt.ElementTags[Entry]{{
-				Elem: Entry{Name: "f", Inode: "x"},
-				Tags: []hlc.Timestamp{ts("peer-a", 100), ts(self, 9999)},
-			}},
-			Removes: []crdt.ElementTombstones[Entry]{{
-				Elem:       Entry{Name: "g", Inode: "y"},
-				Tombstones: []crdt.Tombstone{{Add: ts("peer-a", 120), At: ts("peer-c", 200)}},
-			}},
-		},
-		{
-			ID: "f", Type: File,
-			ManifestAdds: []crdt.ElementTags[string]{{Elem: "c0", Tags: []hlc.Timestamp{ts("peer-a", 150)}}},
-			ManifestRemoves: []crdt.ElementTombstones[string]{{
-				Elem:       "c0",
-				Tombstones: []crdt.Tombstone{{Add: ts("peer-a", 160), At: ts("peer-d", 175)}},
-			}},
-		},
-		{
-			ID: "v", Type: Volume, ExtentSize: 4096,
-			Extents:     []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c", TS: ts("peer-e", 250)}},
-			LeaseHolder: "peer-f",
-			LeaseTS:     ptr(ts("peer-f", 300)),
-		},
+	// Mutation timestamps from other nodes, some far in the future. None of
+	// them may feed the observer: only the sender's send time does.
+	inodes := []wireInode{{
+		ID: "d", Type: Dir,
+		ACLTS: ts("peer-b", 9_000),
+		Adds: []crdt.ElementTags[Entry]{{
+			Elem: Entry{Name: "f", Inode: "x"},
+			Tags: []hlc.Timestamp{ts("peer-c", 99_999)},
+		}},
 	}}
 
-	n.observePeerClocks(w)
+	for _, tc := range []struct {
+		name     string
+		from     string
+		sentAt   int64
+		wantCall bool
+	}{
+		{name: "peer send time is reported", from: "peer-a", sentAt: 1_234, wantCall: true},
+		{name: "no sender (pre-upgrade peer)", from: "", sentAt: 1_234},
+		{name: "no send time (pre-upgrade peer)", from: "peer-a", sentAt: 0},
+		{name: "own snapshot echoed back", from: self, sentAt: 1_234},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotNode string
+			var gotWall int64
+			calls := 0
+			n := New(hlc.New(self), WithPeerClockObserver(func(node string, wall int64) {
+				gotNode, gotWall = node, wall
+				calls++
+			}))
 
-	if calls != 1 {
-		t.Fatalf("observer calls = %d, want 1", calls)
-	}
-	// The highest foreign wall is 300 (peer-f, the volume lease), beating the
-	// self tag at 9999, the extent at 250, and the tombstone at 200.
-	if gotNode != "peer-f" || gotWall != 300 {
-		t.Errorf("observed (%s, %d), want (peer-f, 300)", gotNode, gotWall)
-	}
-}
+			n.observePeerClocks(wireNamespace{From: tc.from, SentAt: tc.sentAt, Inodes: inodes})
 
-func ptr(t hlc.Timestamp) *hlc.Timestamp { return &t }
-
-func TestObservePeerClocks_NoForeignTimestampNoCall(t *testing.T) {
-	const self = "me"
-	called := false
-	n := New(hlc.New(self), WithPeerClockObserver(func(string, int64) { called = true }))
-
-	// Only this node's own tag and an unset (empty-node) tag — both skipped.
-	w := wireNamespace{Inodes: []wireInode{{
-		ID: "d", Type: Dir,
-		Adds: []crdt.ElementTags[Entry]{{Elem: Entry{Name: "f"}, Tags: []hlc.Timestamp{ts(self, 1), {}}}},
-	}}}
-
-	n.observePeerClocks(w)
-	if called {
-		t.Error("observer fired with no foreign timestamps present")
+			if !tc.wantCall {
+				if calls != 0 {
+					t.Errorf("observer called %d times, want 0", calls)
+				}
+				return
+			}
+			if calls != 1 || gotNode != tc.from || gotWall != tc.sentAt {
+				t.Errorf("observed calls=%d (%s, %d), want 1 (%s, %d)", calls, gotNode, gotWall, tc.from, tc.sentAt)
+			}
+		})
 	}
 }
 
 func TestObservePeerClocks_GuardsNilObserverAndNilClock(t *testing.T) {
-	foreign := wireNamespace{Inodes: []wireInode{{ID: "d", Type: Dir, ACLTS: ts("peer", 1)}}}
+	w := wireNamespace{From: "peer", SentAt: 1}
 
 	// No observer registered: nothing to do, must not panic.
-	New(hlc.New("me")).observePeerClocks(foreign)
+	New(hlc.New("me")).observePeerClocks(w)
 
 	// Observer set but the namespace has no clock (only Merge sources are
 	// clock-less, and those never reach here, but the guard keeps it safe).
 	called := false
 	n := New(nil, WithPeerClockObserver(func(string, int64) { called = true }))
-	n.observePeerClocks(foreign)
+	n.observePeerClocks(w)
 	if called {
 		t.Error("observer fired despite a nil clock")
+	}
+}
+
+func decodeWire(t *testing.T, b []byte) wireNamespace {
+	t.Helper()
+	var w wireNamespace
+	if err := json.Unmarshal(b, &w); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return w
+}
+
+func TestGossipSnapshot_StampsSenderAndSendTime(t *testing.T) {
+	prev := nsTimeNow
+	t.Cleanup(func() { nsTimeNow = prev })
+	sent := time.Unix(1_700_000_000, 42)
+	nsTimeNow = func() time.Time { return sent }
+
+	n := New(hlc.New("me"))
+	if _, err := n.Mkdir("/d"); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	gossip, err := n.GossipSnapshot()
+	if err != nil {
+		t.Fatalf("GossipSnapshot: %v", err)
+	}
+	if w := decodeWire(t, gossip); w.From != "me" || w.SentAt != sent.UnixNano() {
+		t.Errorf("gossip snapshot from=%q sent_at=%d, want me/%d", w.From, w.SentAt, sent.UnixNano())
+	}
+
+	// The persisted form stays free of wall-clock noise.
+	persisted, err := n.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if w := decodeWire(t, persisted); w.From != "" || w.SentAt != 0 {
+		t.Errorf("persisted snapshot from=%q sent_at=%d, want both empty", w.From, w.SentAt)
+	}
+}
+
+func TestGossipSnapshot_ClocklessNamespaceHasNoSender(t *testing.T) {
+	b, err := New(nil).GossipSnapshot()
+	if err != nil {
+		t.Fatalf("GossipSnapshot: %v", err)
+	}
+	if w := decodeWire(t, b); w.From != "" || w.SentAt != 0 {
+		t.Errorf("clock-less snapshot from=%q sent_at=%d, want both empty", w.From, w.SentAt)
 	}
 }

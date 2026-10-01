@@ -151,8 +151,8 @@ type Namespace struct {
 	path   string
 	logger *slog.Logger
 
-	// peerClock, when set, is called with the highest foreign timestamp seen
-	// in each peer snapshot so a skew monitor can compare it to local time.
+	// peerClock, when set, is called with the sender's physical send time
+	// from each peer snapshot so a skew monitor can compare it to local time.
 	peerClock func(node string, wall int64)
 
 	mu     sync.Mutex
@@ -174,8 +174,9 @@ var nsTimeNow = time.Now
 type Option func(*Namespace)
 
 // WithPeerClockObserver registers a callback invoked, on each peer snapshot
-// merged over the wire, with the highest timestamp issued by another node —
-// the hook a clock-skew monitor uses to compare peer clocks against this one.
+// merged over the wire, with the sending node's id and the wall clock reading
+// (unix nanoseconds) it took when it built the snapshot. A clock-skew monitor
+// compares that reading against this node's clock on receipt.
 func WithPeerClockObserver(observe func(node string, wall int64)) Option {
 	return func(n *Namespace) { n.peerClock = observe }
 }
@@ -985,7 +986,14 @@ func (n *Namespace) snapshot() map[string]*Inode {
 // anti-entropy. It carries full inode state — ACL register plus the
 // directory OR-Set's add/remove tags — which is enough for Merge to
 // reconcile two replicas.
+//
+// From and SentAt are set only on gossip snapshots: the sender's node id and
+// its physical clock at the moment it built the snapshot. They feed the skew
+// monitor and play no part in Merge. Persisted and backup snapshots leave
+// them empty so namespace.json stays free of wall-clock noise.
 type wireNamespace struct {
+	From   string      `json:"from,omitempty"`
+	SentAt int64       `json:"sent_at,omitempty"`
 	Inodes []wireInode `json:"inodes"`
 }
 
@@ -1027,10 +1035,19 @@ func (n *Namespace) Snapshot() ([]byte, error) {
 func (n *Namespace) GossipSnapshot() ([]byte, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return n.snapshotLocked(false)
+	w := n.wireLocked(false)
+	if n.clock != nil {
+		w.From = n.clock.Node()
+		w.SentAt = nsTimeNow().UnixNano()
+	}
+	return marshalNamespace(w)
 }
 
 func (n *Namespace) snapshotLocked(includeExtents bool) ([]byte, error) {
+	return marshalNamespace(n.wireLocked(includeExtents))
+}
+
+func (n *Namespace) wireLocked(includeExtents bool) wireNamespace {
 	w := wireNamespace{Inodes: make([]wireInode, 0, len(n.inodes))}
 	for _, in := range n.inodes {
 		wi := wireInode{ID: in.ID, Type: in.Type, ACLValue: in.ACL.Value, ACLTS: in.ACL.TS}
@@ -1054,7 +1071,7 @@ func (n *Namespace) snapshotLocked(includeExtents bool) ([]byte, error) {
 		}
 		w.Inodes = append(w.Inodes, wi)
 	}
-	return marshalNamespace(w)
+	return w
 }
 
 // MergeBytes decodes a peer's snapshot and merges it. Because Merge is
@@ -1101,59 +1118,27 @@ func (n *Namespace) CollectMetrics() []metrics.Metric {
 	return out
 }
 
-// observePeerClocks reports the highest timestamp issued by another node in a
-// peer snapshot to the registered observer. It is the skew-monitor seam:
-// scanning the wire form (rather than the merged CRDT) keeps it on the receive
-// path and out of the local mutation path. Timestamps this node issued itself
-// are skipped — comparing our clock to our own past says nothing about skew.
+// observePeerClocks reports the sender's send-time clock reading to the
+// registered observer.
+//
+// An earlier version took the newest foreign HLC timestamp found anywhere in
+// the snapshot instead. Those timestamps only move when somebody writes, so on
+// an idle cluster the "skew" fell by one second per second, and since the
+// snapshot also carries state relayed from third nodes the value was not even
+// attributable to the sender. The send time is fresh on every gossip round and
+// always belongs to the sender. What remains in the reading is one-way gossip
+// latency, which biases it slightly negative (peer looks a little behind).
+//
+// Snapshots without a send time (older peers mid-upgrade) and snapshots that
+// claim to come from this node are not observed.
 func (n *Namespace) observePeerClocks(w wireNamespace) {
 	if n.peerClock == nil || n.clock == nil {
 		return
 	}
-	self := n.clock.Node()
-	var top hlc.Timestamp
-	consider := func(ts hlc.Timestamp) {
-		if ts.Node == "" || ts.Node == self {
-			return
-		}
-		if top.Before(ts) {
-			top = ts
-		}
+	if w.From == "" || w.SentAt == 0 || w.From == n.clock.Node() {
+		return
 	}
-	for _, wi := range w.Inodes {
-		consider(wi.ACLTS)
-		for _, a := range wi.Adds {
-			for _, t := range a.Tags {
-				consider(t)
-			}
-		}
-		for _, a := range wi.ManifestAdds {
-			for _, t := range a.Tags {
-				consider(t)
-			}
-		}
-		for _, r := range wi.Removes {
-			for _, tb := range r.Tombstones {
-				consider(tb.Add)
-				consider(tb.At)
-			}
-		}
-		for _, r := range wi.ManifestRemoves {
-			for _, tb := range r.Tombstones {
-				consider(tb.Add)
-				consider(tb.At)
-			}
-		}
-		for _, e := range wi.Extents {
-			consider(e.TS)
-		}
-		if wi.LeaseTS != nil {
-			consider(*wi.LeaseTS)
-		}
-	}
-	if !top.IsZero() {
-		n.peerClock(top.Node, top.Wall)
-	}
+	n.peerClock(w.From, w.SentAt)
 }
 
 // fromWire rebuilds a clock-less namespace from its wire form. It is only

@@ -39,15 +39,24 @@ func (e *Exporter) Register(s metrics.Source) {
 // Render writes every registered source's metrics as Prometheus exposition
 // text, namespacing each metric with its source's prefix. Values are pulled
 // from the sources at call time, so a scrape always reflects current state.
+//
+// A source may return several series under one name (one per label set). The
+// text format allows a single HELP/TYPE pair per metric family, so those lines
+// are written only for the first series of each name; a source must keep a
+// family's series adjacent.
 func (e *Exporter) Render(w io.Writer) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	for _, s := range e.sources {
 		prefix := s.MetricPrefix()
+		prev := ""
 		for _, m := range s.CollectMetrics() {
 			name := prefix + "_" + m.Name
-			fmt.Fprintf(w, "# HELP %s %s\n", name, m.Help)
-			fmt.Fprintf(w, "# TYPE %s %s\n", name, kindString(m.Kind))
+			if name != prev {
+				fmt.Fprintf(w, "# HELP %s %s\n", name, m.Help)
+				fmt.Fprintf(w, "# TYPE %s %s\n", name, kindString(m.Kind))
+				prev = name
+			}
 			if m.Kind == metrics.Histogram {
 				renderHistogram(w, name, m)
 				continue
