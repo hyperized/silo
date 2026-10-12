@@ -153,8 +153,9 @@ window; it touches every node.
 
 After a hard reset, silod may log at startup that the local copy of a volume's
 extent map was damaged and has been moved aside. The damaged file is kept as
-`<DATA_DIR>/extents/<id>.emap.json.corrupt` (the log line names the volume and
-the exact file). The node then rebuilds that map by
+`<DATA_DIR>/extents/<id>.emap.json.corrupt`, and when the damage was in the
+map's log, the log is kept beside it as `<id>.emap.log.corrupt` (the log line
+names the volume and the exact files). The node then rebuilds that map by
 merging the copy held by **every** replica of the volume, and refuses to serve
 the volume until it has. This holds across restarts: as long as the `.corrupt`
 file exists and no rebuilt map sits beside it, silod treats the volume as damaged
@@ -170,7 +171,7 @@ shutdown at an old checkpoint.
    nodes, until `siloctl status` lists every node.
 2. Retry the attach. Once every replica answers, silod logs that it rebuilt the
    map and the volume serves again.
-3. Delete the `.corrupt` file once the volume serves. Keep it if you want to
+3. Delete the `.corrupt` files once the volume serves. Keep it if you want to
    report the failure; it holds the damaged bytes as found. Once the map is
    rebuilt, a leftover `.corrupt` file no longer blocks anything.
 

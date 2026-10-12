@@ -861,6 +861,28 @@ writes immutable chunk files, so under sustained writes most of its RSS is
 reclaimable page cache (`inactive_file`), not live heap. A multi-GB RSS with a
 small heap is normal and not a leak.
 
+### Extent-map files on disk
+
+Each node keeps the extent maps of the volumes it replicates under
+`<SILO_DATA_DIR>/extents/`. Files are named after the volume id, base64url
+encoded, so `<id>` below is that encoding:
+
+| File | What it is | May an operator delete it? |
+|---|---|---|
+| `<id>.emap.json` | The map's snapshot | **No.** Removing it while its log exists makes the next boot treat the volume as damaged and rebuild it from every replica. Removing it with no log drops this node's copy entirely. |
+| `<id>.emap.log` | Writes since the snapshot, appended and fsynced one record per write; emptied when the snapshot is rewritten (every 4 MiB of log) and at every start | **No.** It holds acknowledged writes the snapshot does not have yet. A size of zero is normal. |
+| `<id>.emap.json.tmp`, `<id>.emap.log.tmp` | Left by a snapshot write a crash interrupted | Yes. silod removes them at the next start. |
+| `<id>.emap.json.corrupt`, `<id>.emap.log.corrupt` | A damaged snapshot or log, moved aside for inspection | Yes, once the volume serves again. While no rebuilt `<id>.emap.json` sits beside them they keep the volume flagged for a rebuild across restarts. See the [runbook](runbook.md). |
+
+A log that ends in a record cut short by a crash is normal after a hard reset:
+silod replays up to that record, which was never acknowledged, logs a warning
+and carries on. Damage anywhere else in the log is treated like a damaged
+snapshot.
+
+The reaper (`SILO_EXTENT_REAP_AFTER`) judges a map's age by the newer of its
+snapshot and its log, so a volume that is still being written is never mistaken
+for an orphan because its snapshot is old.
+
 ---
 
 ## Troubleshooting

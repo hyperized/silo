@@ -133,7 +133,8 @@ The data plane has two benchmark layers now:
   remote-fetch hot path without the mTLS + network cost), and the volume
   block-I/O layer over a real encrypted chunk store (the NBD per-extent
   cost: copy-on-write + AES-GCM seal + fsync per extent for writes;
-  GetChunk + AES-GCM open per extent for reads).
+  GetChunk + AES-GCM open per extent for reads), and the extent map's per-write
+  persist (one 16-extent `SetBatch` into a 40 GiB volume's map).
 - `make bench-cluster` runs end-to-end benchmarks against a real 3-node silod
   cluster spawned by the integration scaffold: quorum write fan-out, local +
   cross-node reads (`SILO_REPLICATION=1` to force every Get through
@@ -184,6 +185,16 @@ What's still open:
 - **fsync-per-`Put`** (file + dir) is synchronous on the write path, which is
   correct for crash consistency. Batching multiple chunk writes behind one fsync would raise
   throughput at the cost of a wider durability window; not planned.
+- **End-to-end write throughput is still unmeasured in-tree.** Up to v0.14.0
+  every replica rewrote a volume's whole extent map as JSON on every chunk
+  write. On a production cluster (3 nodes, NVMe, 1 GbE) that showed as a 74 ms
+  average `silo_chunk_write_latency_seconds` against 2 ms disk writes at 24%
+  busy, 23% of silod's CPU in `encoding/json`, and 3 to 9 MB/s for sequential
+  writers. The extent map now appends to a log instead (see
+  [performance.md](performance.md#measured-baseline)), but the end-to-end
+  number on that cluster after the fix has not been re-measured, and
+  `make bench-cluster` does not cover the NBD write path through the extent
+  map.
 - **No perf-regression gate in CI yet.** Both bench targets run on demand; a
   comparison harness that fails CI on a regression past a threshold is the
   obvious next step but is not wired.
