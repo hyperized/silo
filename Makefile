@@ -168,8 +168,8 @@ test-nbd-kernel: ## Run the NBD attach/reconnect test against a real kernel (pri
 	  golang:1.25-alpine \
 	  go test -tags integration -count=1 -run TestKernel -v ./internal/nbdclient/
 
-bench: ## Run the data-plane benchmarks (crypto, chunk store, placement, peers, volume).
-	@go test -run '^$$' -bench=. -benchmem ./internal/crypto/... ./internal/chunkstore/... ./internal/placement/... ./internal/replication/... ./internal/volume/...
+bench: ## Run the data-plane benchmarks (crypto, chunk store, placement, peers, volume, extent map).
+	@go test -run '^$$' -bench=. -benchmem ./internal/crypto/... ./internal/chunkstore/... ./internal/placement/... ./internal/replication/... ./internal/volume/... ./internal/extentmap/...
 
 bench-cluster: ## Run end-to-end cluster benchmarks (spawns 3 real silod processes; build-tag 'integration').
 	@go test -run='^$$' -bench='^BenchmarkCluster' -benchmem -timeout=10m -tags=integration ./test/integration/...
@@ -192,6 +192,7 @@ fuzz: ## Fuzz the parse/merge/placement boundaries on demand (override: make fuz
 	@go test -run='^$$' -fuzz='^FuzzConfigLoad$$' -fuzztime=$(FUZZTIME) ./internal/config/
 	@go test -run='^$$' -fuzz='^FuzzLoadAuthConfig$$' -fuzztime=$(FUZZTIME) ./cmd/siloctl/
 	@go test -run='^$$' -fuzz='^FuzzChunkIDAlwaysValid$$' -fuzztime=$(FUZZTIME) ./internal/writer/
+	@go test -run='^$$' -fuzz='^FuzzReplayLog$$' -fuzztime=$(FUZZTIME) ./internal/extentmap/
 
 proto: ## Regenerate protobuf and gRPC code. Requires Docker; uses bufbuild/buf.
 	@if ! docker info >/dev/null 2>&1; then \

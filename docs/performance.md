@@ -41,8 +41,16 @@ When a client writes a chunk over NBD:
 2. Two or three nodes (your choice via `SILO_REPLICATION`) receive a copy.
 3. Each of those nodes writes the chunk to disk **and forces it to physical
    storage** before answering "done".
-4. silod tells the client OK only after a majority of that chunk's replicas have
-   done so.
+4. The volume's extent map, on each node of the volume's replica set, rebinds
+   the extent to the new chunk. That is one small record appended to the
+   volume's map log and fsynced: a few hundred bytes for a 16-extent write,
+   whatever the size of the volume. Once a volume's log reaches 4 MiB (a few
+   thousand writes), the write that would cross it rewrites the volume's whole
+   map as a snapshot instead, which costs time in proportion to the volume
+   (tens of milliseconds for a fully written 40 GiB volume) and empties the
+   log.
+5. silod tells the client OK only after a majority of that chunk's replicas,
+   and a majority of the extent map's, have done so.
 
 Once silod says the write succeeded, the data is on real disk on multiple
 machines. There is no background work to drain and no in-flight state to recover.
@@ -98,3 +106,19 @@ consistent-hash placement locator (`internal/placement`). The placement locator
 is flat from 3 to 200 nodes (~3 µs, one allocation per lookup), so cluster size
 is not a write-path cost. Cluster-level and end-to-end throughput benchmarks are
 not yet automated; see [known-gaps.md](known-gaps.md#performance-measured-floor-deferred-follow-ups).
+
+The extent map (`internal/extentmap`) is benchmarked too.
+`BenchmarkSetBatchPersist` makes one 16-extent write durable in a fully mapped
+40 GiB volume (160,000 extents at 256 KiB). Up to v0.14.0 every write rewrote
+the volume's whole map as JSON with three fsyncs, so the cost grew with the
+volume; it now appends one record and fsyncs once.
+
+| `BenchmarkSetBatchPersist` | Per write | Allocated per write |
+|---|---|---|
+| v0.14.0 (whole map as JSON per write) | 54 ms | 57 to 113 MB |
+| append-only log | 2.6 ms | 2.3 KB |
+
+Apple M2 Pro, APFS, Go 1.27. The 2.6 ms is that machine's cost of one append
+plus a full flush to the drive (`F_FULLFSYNC`), so the log adds nothing
+measurable on top of the fsync. The figure includes the occasional snapshot
+rewrite, spread over the writes between two of them.

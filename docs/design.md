@@ -72,11 +72,14 @@ divergent copies in both directions, and the chunk GC waits for that to finish
 rather than sweeping on a view it cannot trust.
 
 **A damaged local map is rebuilt from every replica, never from one.** Each node
-saves its maps under `<DATA_DIR>/extents/` with a write, fsync, rename and
-directory fsync, so a crash leaves the old map or the new one. A replica only
-counts toward a write's majority once its copy is on disk. If a map file still
-fails to load (a disk fault, or a file written before this was in place), the
-node moves it to `<file>.corrupt` and will not serve the volume until it has
+saves its maps under `<DATA_DIR>/extents/` as a snapshot plus an append-only
+log: a write appends a checksummed record to the log and fsyncs it, and the
+snapshot is rewritten (write, fsync, rename, directory fsync) only when the log
+has grown. A crash leaves the map as of the last completed write, because a
+record cut short at the end of the log was never acknowledged. A replica only
+counts toward a write's majority once its copy is on disk. If a map still fails
+to load (a disk fault, or a file written before this was in place), the node
+moves it to `<file>.corrupt` and will not serve the volume until it has
 merged the copy of every replica. The merge keeps the newest binding of each
 extent, so the result is at least as new as anything this node wrote. Rebuilding
 from whichever replica answers first could hand back an older copy, which then
