@@ -46,17 +46,28 @@ const corruptSuffix = ".corrupt"
 var marshal = json.Marshal
 
 // Store holds the extent maps for the volumes whose replica set includes this
-// node, keyed by volume inode id. It is safe for concurrent use. When opened
-// with a directory it persists each volume's map to <dir>/<id>.emap.json so
-// that a crash leaves either the previous or the new map on disk, and reloads
-// them on the next Open; an empty directory means in-memory only (the maps are
-// still recoverable from peer replicas).
+// node, keyed by volume inode id. It is safe for concurrent use. An empty
+// directory means in-memory only (the maps are still recoverable from peer
+// replicas).
+//
+// When opened with a directory, each volume has a snapshot, <dir>/<id>.emap.json,
+// and an append-only log beside it, <dir>/<id>.emap.log. A write appends one
+// small record to the log and fsyncs it, so the cost of a write follows the
+// size of the write, not the size of the volume. Once the log grows past a
+// threshold the next write rewrites the snapshot and empties the log instead.
+// Open loads each snapshot and replays its log on top.
 type Store struct {
-	dir    string
-	logger *slog.Logger
+	dir            string
+	logger         *slog.Logger
+	compactBytes   int64
+	compactRecords int
 
 	mu   sync.Mutex
 	maps map[string]*crdt.LWWMap[uint64, string]
+	// logs tracks the on-disk state of each volume whose snapshot exists.
+	logs map[string]*logState
+	// recBuf is reused to encode log records; s.mu guards it.
+	recBuf []byte
 	// lost holds the volumes whose persisted map could not be loaded at Open.
 	// Such a volume may hold newer bindings than any single peer, so the serve
 	// path must consult every replica before trusting what it has.
@@ -68,7 +79,14 @@ func New(logger *slog.Logger) *Store {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Store{logger: logger, maps: map[string]*crdt.LWWMap[uint64, string]{}, lost: map[string]struct{}{}}
+	return &Store{
+		logger:         logger,
+		compactBytes:   defaultCompactBytes,
+		compactRecords: defaultCompactRecords,
+		maps:           map[string]*crdt.LWWMap[uint64, string]{},
+		logs:           map[string]*logState{},
+		lost:           map[string]struct{}{},
+	}
 }
 
 // Open returns a store backed by dir: it creates dir if missing, loads every
@@ -79,9 +97,19 @@ func New(logger *slog.Logger) *Store {
 // beside it flags its volume lost again on the next Open, so a restart before
 // the rebuild does not forget the damage. Temp files left by an interrupted
 // write are removed. A nil logger defaults to slog.Default.
-func Open(dir string, logger *slog.Logger) (*Store, error) {
+//
+// Each volume's log is replayed on top of its snapshot and, when it held
+// anything, folded into a fresh snapshot, so a restart leaves every log empty.
+// A log that ends in a record cut short by a crash is replayed up to that
+// record, which was never acknowledged. A log damaged anywhere else is moved
+// aside with its snapshot and the volume is rebuilt from its replicas, as for a
+// damaged snapshot.
+func Open(dir string, logger *slog.Logger, opts ...Option) (*Store, error) {
 	s := New(logger)
 	s.dir = dir
+	for _, opt := range opts {
+		opt(s)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("extentmap: could not create the data directory at %s (%w); check it is writable", dir, err)
 	}
@@ -108,10 +136,11 @@ func (s *Store) Set(volumeID string, index uint64, chunkID string, ts hlc.Timest
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.getOrCreateLocked(volumeID).Set(index, chunkID, ts)
-	return s.persistLocked(volumeID)
+	return s.persistLocked(volumeID, []crdt.MapEntry[uint64, string]{{Key: index, Value: chunkID, TS: ts}})
 }
 
-// SetBatch binds many extents of volume in one acquisition + one persist. All
+// SetBatch binds many extents of volume in one acquisition + one fsynced log
+// append. All
 // updates share ts. indexes and chunkIDs are positionally paired; their lengths
 // must match. An empty batch is a successful no-op (no persist).
 //
@@ -128,10 +157,12 @@ func (s *Store) SetBatch(volumeID string, indexes []uint64, chunkIDs []string, t
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.getOrCreateLocked(volumeID)
+	delta := make([]crdt.MapEntry[uint64, string], len(indexes))
 	for i, idx := range indexes {
 		m.Set(idx, chunkIDs[i], ts)
+		delta[i] = crdt.MapEntry[uint64, string]{Key: idx, Value: chunkIDs[i], TS: ts}
 	}
-	return s.persistLocked(volumeID)
+	return s.persistLocked(volumeID, delta)
 }
 
 // Get returns the chunk id backing the extent at index of volume and whether it
@@ -234,7 +265,11 @@ func (s *Store) Merge(volumeID string, entries []crdt.MapEntry[uint64, string]) 
 	defer s.mu.Unlock()
 	m := s.getOrCreateLocked(volumeID)
 	m.Import(entries)
-	return s.persistLocked(volumeID)
+	// The log takes entries as given, including any that lost to a newer local
+	// binding. Replay applies them with the same LWW rule, so they lose there
+	// too, and filtering them here would need the timestamps LWWMap keeps to
+	// itself.
+	return s.persistLocked(volumeID, entries)
 }
 
 // Ensure creates an empty map for volume if none exists and persists it, so a
@@ -248,7 +283,7 @@ func (s *Store) Ensure(volumeID string) error {
 		return nil
 	}
 	s.getOrCreateLocked(volumeID)
-	return s.persistLocked(volumeID)
+	return s.persistLocked(volumeID, nil)
 }
 
 // Lost reports whether volume's persisted map was found damaged or unreadable
@@ -270,11 +305,10 @@ func (s *Store) ClearLost(volumeID string) {
 	delete(s.lost, volumeID)
 }
 
-// Delete drops volume's map from memory and removes its persisted file, its
-// lost flag and any .corrupt copy, so a removed volume's extent map does not
-// outlive it on this node. It is
-// idempotent: deleting an unknown volume, or one with no file on disk, is a
-// no-op. The delete path calls it directly on a volume's replica set; the GC
+// Delete drops volume's map from memory and removes its snapshot, its log, its
+// lost flag and any .corrupt copies, so a removed volume's extent map does not
+// outlive it on this node. It is idempotent: deleting an unknown volume, or one
+// with no files on disk, is a no-op. The delete path calls it directly on a volume's replica set; the GC
 // reaper calls it via Reap for any copy the direct delete missed.
 func (s *Store) Delete(volumeID string) error {
 	s.mu.Lock()
@@ -283,8 +317,8 @@ func (s *Store) Delete(volumeID string) error {
 }
 
 // Reap deletes every map this node holds whose volume id is NOT in live and
-// whose persisted file was last modified before reapBefore, returning the ids
-// it reaped (sorted). It is the GC backstop for the delete path: a volume
+// whose snapshot and log were both last modified before reapBefore, returning
+// the ids it reaped (sorted). It is the GC backstop for the delete path: a volume
 // removed from the namespace is absent from live, so its orphaned extent-map
 // copies are reclaimed here once they are old enough that the removal has surely
 // propagated. The age guard is what keeps a freshly-created volume whose
@@ -309,10 +343,11 @@ func (s *Store) Reap(live map[string]struct{}, reapBefore time.Time) ([]string, 
 		if _, ok := live[id]; ok {
 			continue
 		}
-		fi, err := s.statForAgeLocked(id)
+		modTime, err := s.modTimeForAgeLocked(id)
 		if errors.Is(err, os.ErrNotExist) {
-			// The file is already gone; drop the stale in-memory entry too.
+			// The files are already gone; drop the stale in-memory entry too.
 			delete(s.maps, id)
+			delete(s.logs, id)
 			delete(s.lost, id)
 			reaped = append(reaped, id)
 			continue
@@ -321,7 +356,7 @@ func (s *Store) Reap(live map[string]struct{}, reapBefore time.Time) ([]string, 
 			errs = append(errs, fmt.Errorf("extentmap: could not stat the map of volume %q to judge its age (%w)", id, err))
 			continue
 		}
-		if !fi.ModTime().Before(reapBefore) {
+		if !modTime.Before(reapBefore) {
 			continue // too young: the removal may not have propagated to us yet
 		}
 		if err := s.deleteLocked(id); err != nil {
@@ -349,28 +384,65 @@ func (s *Store) knownLocked() []string {
 	return ids
 }
 
-// statForAgeLocked stats volume's map file, falling back to its .corrupt copy
-// when no map has been written since the damaged one was moved aside.
-func (s *Store) statForAgeLocked(volumeID string) (os.FileInfo, error) {
-	fi, err := os.Stat(s.filename(volumeID))
+// modTimeForAgeLocked returns when volume's map last changed on disk: the newer
+// of its snapshot and its log, since a write now touches only the log. When
+// neither exists it falls back to the .corrupt copies left after damage, and it
+// returns os.ErrNotExist when there is nothing at all.
+func (s *Store) modTimeForAgeLocked(volumeID string) (time.Time, error) {
+	snap, log := s.filename(volumeID), s.logPath(volumeID)
+	t, err := newestModTime(snap, log)
 	if errors.Is(err, os.ErrNotExist) {
-		return os.Stat(s.filename(volumeID) + corruptSuffix)
+		return newestModTime(snap+corruptSuffix, log+corruptSuffix)
 	}
-	return fi, err
+	return t, err
+}
+
+// newestModTime returns the latest modification time among the paths that
+// exist, or os.ErrNotExist when none does.
+func newestModTime(paths ...string) (time.Time, error) {
+	var (
+		newest time.Time
+		found  bool
+	)
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return time.Time{}, err
+		}
+		found = true
+		if fi.ModTime().After(newest) {
+			newest = fi.ModTime()
+		}
+	}
+	if !found {
+		return time.Time{}, os.ErrNotExist
+	}
+	return newest, nil
 }
 
 // deleteLocked removes volume from the in-memory set and its lost flag and, for
-// a disk-backed store, deletes its persisted file, any stale temp file left by
-// an interrupted write, and any .corrupt copy. A missing file is not an error,
-// so the operation is idempotent.
+// a disk-backed store, deletes its log, snapshot, any stale temp files left by
+// an interrupted write, and any .corrupt copies. A missing file is not an
+// error, so the operation is idempotent.
+//
+// The log goes first. A crash part way through then leaves at worst the
+// snapshot alone, a whole map that the reaper judges by age as before, and never
+// a log without its snapshot, which would read as damage.
 func (s *Store) deleteLocked(volumeID string) error {
 	delete(s.maps, volumeID)
+	delete(s.logs, volumeID)
 	delete(s.lost, volumeID)
 	if s.dir == "" {
 		return nil
 	}
-	base := s.filename(volumeID)
-	for _, path := range []string{base, base + atomicfile.TempSuffix, base + corruptSuffix} {
+	log, snap := s.logPath(volumeID), s.filename(volumeID)
+	for _, path := range []string{
+		log, log + atomicfile.TempSuffix, log + corruptSuffix,
+		snap, snap + atomicfile.TempSuffix, snap + corruptSuffix,
+	} {
 		if err := removeIfExists(path); err != nil {
 			return err
 		}
@@ -412,26 +484,11 @@ func (s *Store) getOrCreateLocked(volumeID string) *crdt.LWWMap[uint64, string] 
 // node id is filename-safe. Loading reads the id from inside the file and only
 // decodes the name when the content is too damaged to say which volume it was.
 func (s *Store) filename(volumeID string) string {
-	return filepath.Join(s.dir, base64.RawURLEncoding.EncodeToString([]byte(volumeID))+fileSuffix)
+	return filepath.Join(s.dir, encodeVolumeID(volumeID)+fileSuffix)
 }
 
-// persistLocked writes volume's map to disk for disk-backed stores and returns
-// any failure. The map has already changed in memory by the time this runs, so
-// the caller decides what a failure means; replication must not count this
-// node's copy as durable.
-func (s *Store) persistLocked(volumeID string) error {
-	if s.dir == "" {
-		return nil
-	}
-	m := s.maps[volumeID]
-	b, err := marshal(wireMap{VolumeID: volumeID, Entries: m.Entries()})
-	if err == nil {
-		err = atomicfile.Write(s.filename(volumeID), b, 0o600)
-	}
-	if err != nil {
-		return fmt.Errorf("extentmap: the extent map of volume %q changed in memory but could not be saved under %s (%w); check free space and permissions on that directory", volumeID, s.dir, err)
-	}
-	return nil
+func encodeVolumeID(volumeID string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(volumeID))
 }
 
 // loadLocked reads every persisted map under s.dir into memory. A file that
@@ -443,16 +500,19 @@ func (s *Store) loadLocked() error {
 		return fmt.Errorf("extentmap: could not read the data directory at %s (%w)", s.dir, err)
 	}
 	corrupt := map[string]string{} // volume id -> path of its .corrupt file
+	var logs []string
 	for _, e := range ents {
 		name := e.Name()
 		switch {
 		case e.IsDir():
-		case strings.HasSuffix(name, fileSuffix+atomicfile.TempSuffix):
+		case hasStoreSuffix(name, atomicfile.TempSuffix):
 			s.removeStaleTemp(name)
-		case strings.HasSuffix(name, fileSuffix+corruptSuffix):
+		case hasStoreSuffix(name, corruptSuffix):
 			s.noteCorrupt(name, corrupt)
 		case strings.HasSuffix(name, fileSuffix) && len(name) > len(fileSuffix):
 			s.loadFileLocked(name)
+		case strings.HasSuffix(name, logSuffix) && len(name) > len(logSuffix):
+			logs = append(logs, name)
 		}
 	}
 	// Resolved after the loop because a rebuilt map may sort after its .corrupt
@@ -460,7 +520,17 @@ func (s *Store) loadLocked() error {
 	for volumeID, path := range corrupt {
 		s.flagLeftoverCorruptLocked(volumeID, path)
 	}
+	// Logs go last: replay needs every snapshot loaded and every lost flag set.
+	for _, name := range logs {
+		s.replayLogLocked(name)
+	}
 	return nil
+}
+
+// hasStoreSuffix reports whether name is a snapshot or log file name followed by
+// extra, such as a temp or .corrupt suffix.
+func hasStoreSuffix(name, extra string) bool {
+	return strings.HasSuffix(name, fileSuffix+extra) || strings.HasSuffix(name, logSuffix+extra)
 }
 
 // noteCorrupt records the volume a .corrupt file from an earlier boot belongs to.
@@ -521,6 +591,12 @@ func (s *Store) loadFileLocked(name string) {
 	m := crdt.NewLWWMap[uint64, string]()
 	m.Import(wm.Entries)
 	s.maps[wm.VolumeID] = m
+	// A snapshot under some other name (copied in by hand) is not where the log
+	// expects it. Leaving the volume untracked makes the first save write one
+	// that is, so its log never ends up without a snapshot beside it.
+	if name == encodeVolumeID(wm.VolumeID)+fileSuffix {
+		s.logs[wm.VolumeID] = &logState{}
+	}
 }
 
 // markUnreadableLocked flags the volume of a map file that exists but could not
@@ -559,9 +635,11 @@ func (s *Store) quarantineLocked(name string, parseErr error) {
 		"volume", volumeID, "file", dst, "error", parseErr)
 }
 
-// volumeFromFilename recovers the volume id encoded in a map file's name.
+// volumeFromFilename recovers the volume id encoded in a snapshot or log file's
+// name.
 func volumeFromFilename(name string) (string, bool) {
-	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSuffix(name, fileSuffix))
+	name = strings.TrimSuffix(strings.TrimSuffix(name, fileSuffix), logSuffix)
+	raw, err := base64.RawURLEncoding.DecodeString(name)
 	if err != nil || len(raw) == 0 {
 		return "", false
 	}
