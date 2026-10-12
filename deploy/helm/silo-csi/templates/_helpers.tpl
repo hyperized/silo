@@ -19,7 +19,7 @@ csi.silo.hyperized.net
 app.kubernetes.io/name: {{ include "silo-csi.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- end -}}
 
 {{/* The silo-csi image reference, defaulting the tag to the chart appVersion. */}}
