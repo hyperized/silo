@@ -34,7 +34,7 @@ is the quick reference.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SILO_SEEDS` | *(empty)* | Comma-separated peer **gossip** addresses (port 7100), e.g. `silo-0:7100,silo-1:7100` |
+| `SILO_SEEDS` | *(empty)* | Comma-separated peer **gossip** addresses (port 7100), e.g. `silo-0:7100,silo-1:7100`. Used at startup and again whenever the node sees fewer than `SILO_REPLICATION`-1 alive peers. Without seeds a node that loses its peers cannot rejoin by itself |
 | `SILO_DOMAIN` | *(empty)* | DNS SRV fallback: resolves `_silo._tcp.<domain>` when seeds are empty |
 
 ### Storage & replication
@@ -259,7 +259,13 @@ The wiring that makes a multi-node cluster work:
   IP, not `0.0.0.0`).
 - **Seeds point at gossip ports.** `SILO_SEEDS` lists peers' **gossip**
   addresses (7100 by default), not the data port. One reachable seed is enough
-  to join; gossip discovers the rest.
+  to join; gossip discovers the rest. Seeds are not only for startup: a node
+  that sees fewer than `SILO_REPLICATION`-1 alive peers retries its seeds with
+  backoff until the missing peers are back, so list more than one.
+- **Failure detection is deliberately slow.** A peer that stops answering is
+  marked suspect after one failed probe, dead after 30 seconds without a
+  refutation, and forgotten 10 minutes after that. A kubelet restart or a short
+  network blip does not empty the membership table.
 - **Shared encryption key.** Every node uses the same cluster encryption key
   (file or KMS source). The key belongs to the cluster, not to any one node.
 
@@ -743,6 +749,11 @@ Notable series:
 - `silo_gossip_members{state}`: members seen by SWIM state.
   `silo_gossip_last_sync_age_seconds`: gossip lag (climbs when a node is
   isolated).
+- `silo_gossip_isolated`: 1 while the node sees fewer alive peers than it
+  needs (`SILO_REPLICATION`-1, at least 1) and is retrying its seeds.
+  `silo_gossip_rejoin_attempts_total`: seed dials made to get back in after
+  losing peers (the startup join is not counted). If `isolated` stays at 1,
+  check `SILO_SEEDS` and that the seeds' gossip ports are reachable.
 - `silo_gossip_protocol_version`, `silo_gossip_incompatible_messages_total`,
   `silo_gossip_newer_protocol_messages_total`: rolling-upgrade signals (see
   [Rolling upgrades](#rolling-upgrades)).

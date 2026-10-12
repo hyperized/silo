@@ -297,3 +297,37 @@ func TestGossip_DefaultsCover(t *testing.T) {
 		t.Error("MaxMessageBytes should be > 0")
 	}
 }
+
+// A node that has not started its join loop is not retrying anything, so
+// the isolation gauge must read 0, and both rejoin series must be present
+// so dashboards can plot them from the first scrape.
+func TestGossip_ExposesRejoinMetrics(t *testing.T) {
+	shared := newSharedTLS(t)
+	m, err := membership.New("alpha", "alpha:7100", "alpha:7000")
+	if err != nil {
+		t.Fatalf("membership.New: %v", err)
+	}
+	s, err := gossip.New(m, gossip.Options{
+		Addr:      "127.0.0.1:0",
+		Seeds:     []string{"beta:7100"},
+		MinPeers:  2,
+		ServerTLS: shared.server(),
+		ClientTLS: shared.client(),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("gossip.New: %v", err)
+	}
+	got := map[string]float64{}
+	for _, mt := range s.CollectMetrics() {
+		got[mt.Name] = mt.Value
+	}
+	for _, name := range []string{"isolated", "rejoin_attempts_total"} {
+		v, ok := got[name]
+		switch {
+		case !ok:
+			t.Errorf("metric %s missing", name)
+		case v != 0:
+			t.Errorf("metric %s = %v before Start, want 0", name, v)
+		}
+	}
+}

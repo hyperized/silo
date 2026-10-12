@@ -133,6 +133,7 @@ var (
 			Addr:      cfg.GossipAddr,
 			Advertise: cfg.GossipAdvertise,
 			Seeds:     cfg.Seeds,
+			MinPeers:  cfg.Replication - 1,
 			ServerTLS: serverTLS,
 			ClientTLS: clientTLS,
 			Extension: ext,

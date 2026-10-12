@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,9 +21,9 @@ import (
 
 // Defaults are surfaced as constants because they are read by both the
 // subsystem constructor and the silod config validator (which exposes
-// them in error messages). Picked to match well-cited SWIM defaults
-// while keeping convergence under five seconds in the three-node
-// docker-compose setup.
+// them in error messages). Probing follows well-cited SWIM defaults so
+// a joining node converges within seconds; the failure-detection
+// timeouts are stretched for a storage system (see each constant).
 const (
 	// DefaultProbeInterval is how often the prober probes one Alive peer.
 	DefaultProbeInterval = time.Second
@@ -35,17 +36,18 @@ const (
 	// every probe round into a flood.
 	DefaultIndirectK = 3
 	// DefaultSuspectTimeout is how long a Suspect entry has to be
-	// refuted before it transitions to Dead. Short enough that failed
-	// peers are caught fast, long enough that a slow GC or paused VM
-	// has a fair chance to refute.
-	DefaultSuspectTimeout = 5 * time.Second
+	// refuted before it transitions to Dead. A storage node has to ride
+	// out a kubelet restart, a long GC pause or a short network blip
+	// without declaring its peers dead, so this is deliberately much
+	// longer than the few seconds SWIM papers use.
+	DefaultSuspectTimeout = 30 * time.Second
 	// DefaultDeadRetention is how long Dead entries are kept before
-	// being pruned. Long enough that gossip rumours about the dead
-	// peer have time to settle across the cluster before the table
-	// forgets it (otherwise a slow peer learns about the death from
-	// one peer, only to be re-introduced by another that hadn't
-	// converged yet).
-	DefaultDeadRetention = time.Minute
+	// being pruned, and how long remembered gossip events live in the
+	// piggyback ring. Long enough that a brief outage does not empty
+	// the membership table, and that rumours about a death settle on
+	// every peer before any of them forgets the node. The seed rejoin
+	// loop is the backstop for a node that does lose every peer.
+	DefaultDeadRetention = 10 * time.Minute
 	// DefaultAntiEntropyInterval is how often we sync our full table
 	// with one random peer. Anti-entropy is the safety net under
 	// piggybacked gossip — anything that fell off the piggyback bus
@@ -85,6 +87,12 @@ type Options struct {
 	AntiEntropyInterval time.Duration
 	Timeout             time.Duration
 	PiggybackCap        int
+	// MinPeers is how many Alive peers this node needs before it stops
+	// retrying its seeds. Zero or negative means 1, so the rejoin loop
+	// only fires when the node has lost every peer. silod sets it to
+	// SILO_REPLICATION-1 so a node that sees fewer peers than a full
+	// replica set keeps looking for the missing ones.
+	MinPeers int
 
 	// ServerTLS is the mTLS config used when accepting inbound gossip
 	// connections — symmetric with ClientTLS because every peer is both
@@ -156,9 +164,17 @@ type Subsystem struct {
 	// it is breached. Both feed the metrics scrape.
 	syncSendFailures atomic.Int64
 	lastExtBytes     atomic.Int64
+
+	// isolated is set by the rejoin loop while the node sees fewer than
+	// MinPeers Alive peers. rejoinAttempts counts seed dials made while
+	// isolated after the node had joined once, so a scrape can tell a
+	// node that is fighting its way back from one still booting.
+	isolated       atomic.Bool
+	rejoinAttempts atomic.Int64
 }
 
-// timeNow is the clock the gossip metrics read; overridable in tests.
+// timeNow is the clock the gossip metrics and the piggyback expiry read;
+// overridable in tests.
 var timeNow = time.Now
 
 // classifyProto is the protocol-compatibility check applied to every inbound
@@ -256,6 +272,9 @@ func withDefaults(o Options) Options {
 	if o.PiggybackCap <= 0 {
 		o.PiggybackCap = DefaultPiggybackCap
 	}
+	if o.MinPeers <= 0 {
+		o.MinPeers = 1
+	}
 	return o
 }
 
@@ -297,7 +316,7 @@ func (s *Subsystem) CollectMetrics() []metrics.Metric {
 	for _, n := range s.members.Members() {
 		counts[n.State]++
 	}
-	out := make([]metrics.Metric, 0, 5)
+	out := make([]metrics.Metric, 0, 12)
 	for _, st := range []membership.State{membership.StateAlive, membership.StateSuspect, membership.StateDead, membership.StateLeft} {
 		out = append(out, metrics.Metric{
 			Name:   "members",
@@ -346,6 +365,18 @@ func (s *Subsystem) CollectMetrics() []metrics.Metric {
 			Kind:  metrics.Gauge,
 			Value: float64(s.lastExtBytes.Load()),
 		},
+		metrics.Metric{
+			Name:  "isolated",
+			Help:  "1 when this node sees fewer alive peers than it needs and is retrying its seeds; 0 otherwise.",
+			Kind:  metrics.Gauge,
+			Value: boolGauge(s.isolated.Load()),
+		},
+		metrics.Metric{
+			Name:  "rejoin_attempts_total",
+			Help:  "Seed dials this node made to rejoin the cluster after losing its peers (the startup join is not counted).",
+			Kind:  metrics.Counter,
+			Value: float64(s.rejoinAttempts.Load()),
+		},
 	)
 	return out
 }
@@ -361,7 +392,8 @@ func (s *Subsystem) Addr() string {
 }
 
 // Start binds the gossip listener and launches the prober, the
-// anti-entropy loop, and the seed-join attempt. Returns nil on
+// anti-entropy loop, and, when seeds are configured, the seed join loop
+// that also brings the node back after it loses its peers. Returns nil on
 // graceful Shutdown. Blocking call; silod runs it in a goroutine.
 func (s *Subsystem) Start() error {
 	ln, err := net.Listen("tcp", s.opts.Addr)
@@ -393,6 +425,8 @@ func (s *Subsystem) Start() error {
 	if len(s.opts.Seeds) > 0 {
 		s.wg.Add(1)
 		go s.joinLoop()
+	} else {
+		s.logger.Info("gossip has no seeds; this node waits for peers to dial it and cannot rejoin by itself if it loses them. Set SILO_SEEDS to the other nodes' gossip addresses on any multi-node cluster")
 	}
 
 	<-s.stopCh
@@ -482,19 +516,53 @@ func (s *Subsystem) remember(events ...membership.Event) {
 	}
 }
 
+// forget drops every remembered event about ids. Called when those ids
+// are pruned: a ring that still carried their last Alive or Suspect
+// event would hand the node back to peers that already pruned it, and
+// they would probe it, kill it and prune it again on every round.
+func (s *Subsystem) forget(ids ...string) {
+	if len(ids) == 0 {
+		return
+	}
+	drop := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		drop[id] = struct{}{}
+	}
+	s.piggybackMu.Lock()
+	defer s.piggybackMu.Unlock()
+	s.piggyback = slices.DeleteFunc(s.piggyback, func(ev membership.Event) bool {
+		_, gone := drop[ev.ID]
+		return gone
+	})
+}
+
 // piggybackSnapshot returns a copy of the current piggyback slice for
 // attaching to an outbound message. The slice is returned by value so
 // the caller can mutate or shorten it without affecting the canonical
-// ring.
+// ring. Events older than DeadRetention are dropped from the ring first;
+// a peer that missed them by then has had anti-entropy to catch up.
 func (s *Subsystem) piggybackSnapshot() []membership.Event {
 	s.piggybackMu.Lock()
 	defer s.piggybackMu.Unlock()
+	cutoff := timeNow().Add(-s.opts.DeadRetention)
+	s.piggyback = slices.DeleteFunc(s.piggyback, func(ev membership.Event) bool {
+		// A zero At means some path forgot to stamp the event; keep it
+		// rather than silently losing news. The count cap still bounds it.
+		return !ev.At.IsZero() && ev.At.Before(cutoff)
+	})
 	if len(s.piggyback) == 0 {
 		return nil
 	}
 	out := make([]membership.Event, len(s.piggyback))
 	copy(out, s.piggyback)
 	return out
+}
+
+func boolGauge(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // selfEnvelope builds the sender fields for an outbound message from

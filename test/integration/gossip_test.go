@@ -305,12 +305,12 @@ func TestGossip_FailureDetectionAndRejoin(t *testing.T) {
 	}
 
 	// Kill gamma. The other two should mark it Suspect, then Dead
-	// within SuspectTimeout (5s default) + probe slack.
+	// within SuspectTimeout (30s default) + probe slack.
 	c.kill()
 	if err := waitForState(a, "gamma", "suspect", 10*time.Second); err != nil {
 		t.Fatalf("alpha did not mark gamma suspect: %v\n%s", err, a.readLog())
 	}
-	if err := waitForState(a, "gamma", "dead", 15*time.Second); err != nil {
+	if err := waitForState(a, "gamma", "dead", 45*time.Second); err != nil {
 		t.Fatalf("alpha did not mark gamma dead: %v", err)
 	}
 

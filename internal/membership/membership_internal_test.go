@@ -75,6 +75,23 @@ func TestApply_MergeRules(t *testing.T) {
 			wantInc:    1,
 		},
 		{
+			name:       "insert unknown suspect peer",
+			ev:         Event{ID: "p1", Address: "h:1", State: StateSuspect, Incarnation: 2},
+			wantChange: true,
+			wantState:  StateSuspect,
+			wantInc:    2,
+		},
+		{
+			name:       "unknown dead peer not inserted",
+			ev:         Event{ID: "p1", Address: "h:1", State: StateDead, Incarnation: 3},
+			wantChange: false,
+		},
+		{
+			name:       "unknown left peer not inserted",
+			ev:         Event{ID: "p1", Address: "h:1", State: StateLeft, Incarnation: 3},
+			wantChange: false,
+		},
+		{
 			name:       "higher incarnation supersedes",
 			initial:    Node{ID: "p1", Address: "h:1", State: StateSuspect, Incarnation: 5},
 			ev:         Event{ID: "p1", Address: "h:1", State: StateAlive, Incarnation: 6},
@@ -376,5 +393,23 @@ func TestMembership_ConcurrentApplyIsRaceFree(t *testing.T) {
 	}
 	if n.Incarnation == 0 {
 		t.Errorf("expected highest-incarnation merge to win, got %d", n.Incarnation)
+	}
+}
+
+func TestApplyCapacity_KeepsLastKnownOnBareRelay(t *testing.T) {
+	m, err := New("self", "self:1", "self:2")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.members["p1"] = Node{ID: "p1", State: StateAlive, Incarnation: 1}
+	m.Apply(Event{ID: "p1", State: StateAlive, Incarnation: 2, CapacityBytes: 100, UsedBytes: 40, Pressured: true})
+	got, _ := m.Lookup("p1")
+	if got.CapacityBytes != 100 || got.UsedBytes != 40 || !got.Pressured {
+		t.Fatalf("capacity advert not applied: %+v", got)
+	}
+	m.Apply(Event{ID: "p1", State: StateSuspect, Incarnation: 2})
+	got, _ = m.Lookup("p1")
+	if got.CapacityBytes != 100 || got.UsedBytes != 40 || !got.Pressured {
+		t.Errorf("bare state relay wiped capacity: %+v", got)
 	}
 }
