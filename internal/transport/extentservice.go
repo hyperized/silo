@@ -21,10 +21,11 @@ const extentGetBatch = 1024
 // from. internal/extentmap.Store satisfies it. The service is purely the
 // replica-apply endpoint: it folds peer deltas into the local store and streams
 // the local map back. Coordination (placement, quorum fan-out) lives in the
-// replication coordinator on the writing node, never here.
+// replication coordinator on the writing node, never here. Merge and Ensure
+// return an error when the change could not be saved to disk.
 type ExtentStore interface {
-	Merge(volumeID string, entries []crdt.MapEntry[uint64, string])
-	Ensure(volumeID string)
+	Merge(volumeID string, entries []crdt.MapEntry[uint64, string]) error
+	Ensure(volumeID string) error
 	Snapshot(volumeID string) []crdt.MapEntry[uint64, string]
 	Digest(volumeID string) []byte
 	Has(volumeID string) bool
@@ -48,15 +49,21 @@ func NewExtentService(store ExtentStore, logger *slog.Logger) *ExtentService {
 // Apply folds a peer's extent deltas into the local map (LWW by the HLC each
 // entry carries). With no entries and ensure set, it just creates an empty map
 // so a freshly-created volume exists on this replica before any write. The
-// volume id is required.
+// volume id is required. When the change cannot be saved to disk the call fails
+// with codes.Internal, so the sender does not count this replica as durable.
 func (s *ExtentService) Apply(_ context.Context, req *extentv1.ApplyRequest) (*extentv1.ApplyResponse, error) {
 	if req.GetVolumeId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "extent: a volume id is required")
 	}
+	var err error
 	if len(req.GetEntries()) > 0 {
-		s.store.Merge(req.GetVolumeId(), entriesFromProto(req.GetEntries()))
+		err = s.store.Merge(req.GetVolumeId(), entriesFromProto(req.GetEntries()))
 	} else if req.GetEnsure() {
-		s.store.Ensure(req.GetVolumeId())
+		err = s.store.Ensure(req.GetVolumeId())
+	}
+	if err != nil {
+		s.logger.Warn("extent: applied a peer's extent map update in memory but could not save it, so the sender will not count this node toward its write quorum; check free space and permissions on the data directory", "volume", req.GetVolumeId(), "error", err)
+		return nil, status.Errorf(codes.Internal, "extent: the receiving node could not save the extent map of volume %q (%v)", req.GetVolumeId(), err)
 	}
 	return &extentv1.ApplyResponse{}, nil
 }

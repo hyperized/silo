@@ -23,12 +23,13 @@ const DefaultExtentScrubInterval = time.Minute
 // ExtentCatalog is the scrubber's read/repair view of the local extent-map
 // store: enumerate the volumes whose maps live here, fingerprint or snapshot one
 // to compare and re-push, and fold a peer's copy back in. *extentmap.Store
-// satisfies it.
+// satisfies it. Merge applies in memory even when it returns an error; the
+// error only means the merged map was not saved to disk.
 type ExtentCatalog interface {
 	Volumes() []string
 	Snapshot(volumeID string) []crdt.MapEntry[uint64, string]
 	Digest(volumeID string) []byte
-	Merge(volumeID string, entries []crdt.MapEntry[uint64, string])
+	Merge(volumeID string, entries []crdt.MapEntry[uint64, string]) error
 }
 
 // ExtentReplicaProbe inspects a peer's copy of a volume's extent map, fetches it
@@ -208,7 +209,11 @@ func (s *ExtentScrubber) scrubMap(ctx context.Context, self, volumeID string) (u
 			s.logger.Warn("extent-scrubber could not fetch a diverged map to reconcile it; will retry next cycle", "volume", volumeID, "peer", t, "error", err)
 			continue
 		}
-		s.catalog.Merge(volumeID, peerEntries)
+		if err := s.catalog.Merge(volumeID, peerEntries); err != nil {
+			// The merge applied in memory, so the push back below is still
+			// correct; only this node's on-disk copy is behind.
+			s.logger.Warn("extent-scrubber merged a peer's map but could not save it on this node; check free space and permissions on the data directory", "volume", volumeID, "peer", t, "error", err)
+		}
 		byKey := make(map[uint64]crdt.MapEntry[uint64, string], len(peerEntries))
 		for _, e := range peerEntries {
 			byKey[e.Key] = e

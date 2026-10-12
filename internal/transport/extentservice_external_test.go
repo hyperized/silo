@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -30,14 +31,24 @@ type fakeES struct {
 	length    map[string]int
 	deleted   []string
 	deleteErr error
+	// saveErr makes Merge and Ensure report a failed save after applying.
+	saveErr error
 }
 
 func newFakeES() *fakeES {
 	return &fakeES{merged: map[string][]crdt.MapEntry[uint64, string]{}, snap: map[string][]crdt.MapEntry[uint64, string]{}, has: map[string]bool{}, length: map[string]int{}}
 }
 
-func (f *fakeES) Merge(vol string, e []crdt.MapEntry[uint64, string]) { f.merged[vol] = e }
-func (f *fakeES) Ensure(vol string)                                   { f.ensured = append(f.ensured, vol) }
+func (f *fakeES) Merge(vol string, e []crdt.MapEntry[uint64, string]) error {
+	f.merged[vol] = e
+	return f.saveErr
+}
+
+func (f *fakeES) Ensure(vol string) error {
+	f.ensured = append(f.ensured, vol)
+	return f.saveErr
+}
+
 func (f *fakeES) Snapshot(vol string) []crdt.MapEntry[uint64, string] { return f.snap[vol] }
 func (f *fakeES) Has(vol string) bool                                 { return f.has[vol] }
 func (f *fakeES) Len(vol string) int                                  { return f.length[vol] }
@@ -109,6 +120,32 @@ func TestExtentService_Apply(t *testing.T) {
 	}
 	if _, ok := store.merged["vol3"]; ok {
 		t.Error("no-op Apply should not Merge")
+	}
+}
+
+// A replica that cannot save an applied update must fail the RPC, so the sender
+// does not count it toward the write quorum.
+func TestExtentService_ApplySaveFailureIsReturned(t *testing.T) {
+	entries := []*extentv1.ExtentEntry{{Index: 0, ChunkId: "c0", Ts: &extentv1.Hlc{Wall: 1}}}
+	for _, tc := range []struct {
+		name string
+		req  *extentv1.ApplyRequest
+	}{
+		{"merge", &extentv1.ApplyRequest{VolumeId: "vol", Entries: entries}},
+		{"ensure", &extentv1.ApplyRequest{VolumeId: "vol", Ensure: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeES()
+			store.saveErr = errors.New("no space left on device")
+			svc := transport.NewExtentService(store, quiet())
+			_, err := svc.Apply(context.Background(), tc.req)
+			if code(err) != codes.Internal {
+				t.Fatalf("got %v (code %v), want codes.Internal", err, code(err))
+			}
+			if !strings.Contains(err.Error(), "no space left on device") {
+				t.Errorf("error %q should carry the cause", err)
+			}
+		})
 	}
 }
 

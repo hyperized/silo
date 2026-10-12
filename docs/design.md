@@ -71,6 +71,18 @@ zero-filled reads and a way to delete live data. The extent scrubber reconciles
 divergent copies in both directions, and the chunk GC waits for that to finish
 rather than sweeping on a view it cannot trust.
 
+**A damaged local map is rebuilt from every replica, never from one.** Each node
+saves its maps under `<DATA_DIR>/extents/` with a write, fsync, rename and
+directory fsync, so a crash leaves the old map or the new one. A replica only
+counts toward a write's majority once its copy is on disk. If a map file still
+fails to load (a disk fault, or a file written before this was in place), the
+node moves it to `<file>.corrupt` and will not serve the volume until it has
+merged the copy of every replica. The merge keeps the newest binding of each
+extent, so the result is at least as new as anything this node wrote. Rebuilding
+from whichever replica answers first could hand back an older copy, which then
+reads as a clean but earlier version of the volume, and the chunk GC may already
+have reclaimed what that older copy points at.
+
 **A chunk id names a writer, not a volume.** The id is the writing node, a random
 per-session identifier, and a counter. Chunks from one volume are scattered across
 many such sets, and a set outlives the session that created it. This is why
