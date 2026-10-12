@@ -198,3 +198,26 @@ func TestSetSelfCapacityAndPropagation(t *testing.T) {
 		t.Errorf("capacity-less event wiped b's figures: %+v", b)
 	}
 }
+
+// A peer that pruned a dead node still advertises that node's last Dead
+// or Left entry in its anti-entropy view. The receiver must not adopt it,
+// or the node is resurrected and killed again on every sync.
+func TestApply_UnknownDeadOrLeftIsNotStored(t *testing.T) {
+	for _, st := range []membership.State{membership.StateDead, membership.StateLeft} {
+		t.Run(st.String(), func(t *testing.T) {
+			m, err := membership.New("alpha", "alpha:7100", "alpha:7000")
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if n, ok := m.Apply(membership.Event{ID: "ghost", Address: "ghost:7100", State: st, Incarnation: 9}); ok || n.ID != "" {
+				t.Fatalf("Apply: got (%+v, %v), want (zero, false)", n, ok)
+			}
+			if _, ok := m.Lookup("ghost"); ok {
+				t.Error("ghost entry stored")
+			}
+			if changed := m.ApplyMany([]membership.Event{{ID: "ghost", State: st, Incarnation: 9}}); len(changed) != 0 {
+				t.Errorf("ApplyMany: got %d changes, want 0", len(changed))
+			}
+		})
+	}
+}

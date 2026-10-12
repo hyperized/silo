@@ -84,10 +84,11 @@ func (s *Subsystem) runProbeTick(tracker *suspectTracker) {
 		}
 		tracker.clear(id)
 	}
-	// Prune Dead entries that have outlived the retention window.
-	for _, id := range s.members.Prune(s.opts.DeadRetention) {
+	pruned := s.members.Prune(s.opts.DeadRetention)
+	for _, id := range pruned {
 		s.logger.Info("gossip member pruned", "node", id)
 	}
+	s.forget(pruned...)
 	id, addr, ok := s.pickAlivePeer()
 	if !ok {
 		return

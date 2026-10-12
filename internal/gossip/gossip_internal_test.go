@@ -642,7 +642,7 @@ func TestRunProbeTick_IndirectSuccessClearsTrackerEntry(t *testing.T) {
 func TestTryJoinSeeds_EmptySkipped(t *testing.T) {
 	s := newTestSubsystem(t, "self", "127.0.0.1:0", []string{""}, discardLogger())
 	// No real seed entries: returns false because there's nothing to try.
-	if s.tryJoinSeeds() {
+	if s.tryJoinSeeds(nil, false) {
 		t.Error("expected false with only empty seeds")
 	}
 }
@@ -662,7 +662,7 @@ func TestTryJoinSeeds_StopsAtFirstSuccess(t *testing.T) {
 			}), nil
 		},
 	}
-	if !s.tryJoinSeeds() {
+	if !s.tryJoinSeeds(nil, false) {
 		t.Fatal("tryJoinSeeds should succeed")
 	}
 	if calls != 1 {

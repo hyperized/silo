@@ -244,8 +244,12 @@ func (m *Membership) Snapshot() []Node {
 //     triggers a refutation: we bump our own incarnation, re-set
 //     ourselves to Alive, and ignore the incoming event. The returned
 //     Node is our fresh self-entry; changed is true.
-//  2. If the table has no entry for ev.ID, the event is inserted
-//     verbatim. changed is true.
+//  2. If the table has no entry for ev.ID, an Alive or Suspect event
+//     is inserted verbatim and changed is true. A Dead or Left event
+//     for an unknown node is dropped (changed is false): a node we
+//     never knew about being gone tells us nothing, and storing it lets
+//     peers that pruned the node re-learn it from our anti-entropy view,
+//     probe it, kill it and prune it again on every sync.
 //  3. If ev.Incarnation > existing.Incarnation, the event wins.
 //  4. If ev.Incarnation == existing.Incarnation and ev.State has a
 //     higher numeric value than existing.State, the event wins. This
@@ -308,6 +312,9 @@ func (m *Membership) applyLocked(ev Event) (Node, bool) {
 
 	cur, exists := m.members[ev.ID]
 	if !exists {
+		if ev.State >= StateDead {
+			return Node{}, false
+		}
 		n := Node{
 			ID:            ev.ID,
 			Address:       ev.Address,

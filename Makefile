@@ -159,7 +159,7 @@ test-cover: ## Run unit tests and print coverage (excludes generated code).
 	@printf "HTML report: \`go tool cover -html=coverage.out\`\n"
 
 test-integration: ## Run integration tests (require docker, build-tag 'integration').
-	@go test $(GO_TEST_FLAGS) -tags=integration ./test/integration/...
+	@go test $(GO_TEST_FLAGS) -timeout 10m -tags=integration ./test/integration/...
 
 test-nbd-kernel: ## Run the NBD attach/reconnect test against a real kernel (privileged docker; needs /dev/nbd*).
 	@docker run --rm --privileged --network host \

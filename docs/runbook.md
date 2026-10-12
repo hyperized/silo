@@ -69,7 +69,7 @@ Wire these first; they catch the failures that matter.
 |---|---|---|
 | **Under-replication** | `sum(silo_replication_shortfall_chunks) > 0` for >N min | Data is below its replication factor. Spikes on node loss, should heal to 0. |
 | **Disk pressure** | `silo_rebalancer_disk_pressure == 1` (or `used/capacity > 0.85`) | Node crossed the soft high-watermark; add capacity or drain before it hits the hard fence. |
-| **Node isolation** | `silo_gossip_last_sync_age_seconds` climbing | A node has lost gossip contact with the cluster. |
+| **Node isolation** | `silo_gossip_isolated == 1` for >5 min, or `silo_gossip_last_sync_age_seconds` climbing | A node has lost gossip contact with the cluster and its seeds are not answering. Check `SILO_SEEDS` and the seeds' gossip ports. |
 | **Clock skew** | `increase(silo_hlc_clock_skew_alerts_total[10m]) > 0` | A node's clock is drifting; fix NTP before write ordering suffers. |
 | **Backup failure** | `increase(silo_backup_failures_total[1h]) > 0` | The cold copy is not being written. |
 | **Incompatible peer** | `increase(silo_gossip_incompatible_messages_total[10m]) > 0` | A node is on an unsupported protocol; finish or roll back the upgrade. |

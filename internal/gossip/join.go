@@ -3,57 +3,104 @@ package gossip
 import (
 	"math/rand/v2"
 	"time"
+
+	"github.com/hyperized/silo/internal/membership"
 )
 
-// joinInitialBackoff is the first delay between failed seed attempts.
-// Pulled out as a var so unit tests can shrink the back-off and exercise
-// the cap branch without sleeping for the production five seconds.
+// joinInitialBackoff is the first delay between failed seed rounds and
+// joinMaxBackoff caps the doubling. Vars rather than consts so unit
+// tests can shrink them instead of sleeping for real seconds.
 var (
 	joinInitialBackoff = 250 * time.Millisecond
 	joinMaxBackoff     = 5 * time.Second
 )
 
-// joinLoop drives the initial seed join. We try each configured seed
-// in turn until one Acks; if none do, we back off and retry. A
-// successful join is "we exchanged at least one SyncReq/SyncResp pair
-// with a seed" — after that, anti-entropy and probing keep us
-// converging on the rest of the cluster.
+// joinState is the join loop's private bookkeeping. Only the loop
+// goroutine touches it, so it needs no lock.
+type joinState struct {
+	backoff time.Duration
+	// joined flips once any seed has answered. Before that the node is
+	// booting and its seed dials are not counted as rejoin attempts.
+	joined bool
+	// warned is true once the current isolated episode has been logged
+	// at Warn, so a long outage produces one line instead of one per
+	// round.
+	warned bool
+}
+
+// joinLoop keeps this node connected to the cluster for the life of the
+// subsystem. Startup and recovery share it: whenever the node sees fewer
+// than MinPeers Alive peers it dials its seeds, backing off while none
+// answer. Success is judged by re-reading the membership table, not by
+// a seed answering. A peer that still holds us Dead ignores our Alive
+// claim until our incarnation is bumped past its view, so one answered
+// sync does not by itself mean we are back.
 func (s *Subsystem) joinLoop() {
 	defer s.wg.Done()
-	// Initial best-effort attempt: most clusters succeed on the very
-	// first try (the seed is healthy). The back-off path covers the
-	// slow-cold-start case (docker-compose, where silo-a is still
-	// minting its CA when silo-b boots).
-	backoff := joinInitialBackoff
+	st := &joinState{backoff: joinInitialBackoff}
 	for {
-		if s.tryJoinSeeds() {
-			return
-		}
+		wait := s.joinStep(st)
 		select {
 		case <-s.stopCh:
 			return
-		case <-time.After(backoff):
-			backoff *= 2
-			if backoff > joinMaxBackoff {
-				backoff = joinMaxBackoff
-			}
+		case <-time.After(wait):
 		}
 	}
 }
 
-// tryJoinSeeds returns true once any one seed has answered with a
-// SyncResp. Failed seeds are logged at debug; otherwise compose logs
-// would shout one warning per seed per retry, which is noise.
-func (s *Subsystem) tryJoinSeeds() bool {
+// joinStep runs one evaluation of the join loop and returns how long to
+// wait before the next.
+func (s *Subsystem) joinStep(st *joinState) time.Duration {
+	alive := s.members.AlivePeers()
+	if len(alive) >= s.opts.MinPeers {
+		s.isolated.Store(false)
+		st.warned = false
+		st.backoff = joinInitialBackoff
+		return s.opts.ProbeInterval
+	}
+	s.isolated.Store(true)
+	if s.tryJoinSeeds(alive, st.joined) {
+		st.joined = true
+		st.backoff = joinInitialBackoff
+		return st.backoff
+	}
+	if !st.warned {
+		st.warned = true
+		s.logger.Warn("gossip has fewer alive peers than it needs; retrying seeds until one answers. Check that SILO_SEEDS lists the other nodes' gossip addresses and that their gossip ports are reachable from this node",
+			"alive_peers", len(alive), "min_peers", s.opts.MinPeers, "seeds", s.opts.Seeds)
+	}
+	wait := st.backoff
+	st.backoff = min(st.backoff*2, joinMaxBackoff)
+	return wait
+}
+
+// tryJoinSeeds dials each seed once and returns true as soon as one
+// answers with a SyncResp. Seeds already in alive are skipped, so a node
+// that is only short of a full replica set does not keep hammering the
+// peers it already has. rejoin marks the dials as recovery rather than
+// startup. Failed seeds log at Debug; the caller owns the one Warn per
+// episode.
+func (s *Subsystem) tryJoinSeeds(alive []membership.Node, rejoin bool) bool {
+	have := make(map[string]struct{}, len(alive))
+	for _, n := range alive {
+		have[n.Address] = struct{}{}
+	}
 	for _, addr := range s.opts.Seeds {
-		if addr == "" {
+		if _, ok := have[addr]; ok || addr == "" {
 			continue
 		}
+		if rejoin {
+			s.rejoinAttempts.Add(1)
+		}
 		if s.syncWith(addr) {
-			s.logger.Info("gossip joined via seed", "seed", addr)
+			msg := "gossip joined via seed"
+			if rejoin {
+				msg = "gossip rejoined via seed"
+			}
+			s.logger.Info(msg, "seed", addr, "alive_peers", len(s.members.AlivePeers()))
 			return true
 		}
-		s.logger.Debug("gossip seed not yet reachable", "seed", addr)
+		s.logger.Debug("gossip seed did not answer; will retry", "seed", addr)
 	}
 	return false
 }
