@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,9 +28,9 @@ func TestNew_NilLoggerDefaults(t *testing.T) {
 	}
 }
 
-// A marshal failure during persist is logged and swallowed, not fatal, and
-// leaves no file behind.
-func TestPersist_MarshalErrorIsSwallowed(t *testing.T) {
+// A marshal failure during persist is returned, leaves no file behind, and
+// still applies the change in memory.
+func TestPersist_MarshalErrorIsReturned(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir, quiet())
 	if err != nil {
@@ -39,7 +40,9 @@ func TestPersist_MarshalErrorIsSwallowed(t *testing.T) {
 	marshal = func(any) ([]byte, error) { return nil, errors.New("boom") }
 	defer func() { marshal = orig }()
 
-	s.Set("vol", 0, "c0", hlc.Timestamp{Wall: 1}) // persist marshals -> error path
+	if err := s.Set("vol", 0, "c0", hlc.Timestamp{Wall: 1}); err == nil {
+		t.Error("a marshal failure must be returned so the write is not counted as durable")
+	}
 	// Nothing should have been written for vol.
 	if _, statErr := os.Stat(s.filename("vol")); !os.IsNotExist(statErr) {
 		t.Errorf("a marshal failure should leave no file, stat err = %v", statErr)
@@ -50,8 +53,9 @@ func TestPersist_MarshalErrorIsSwallowed(t *testing.T) {
 	}
 }
 
-// A write failure during persist (read-only data dir) is logged and swallowed.
-func TestPersist_WriteErrorIsSwallowed(t *testing.T) {
+// A write failure during persist (read-only data dir) is returned with the
+// directory and what to check, while the change still applies in memory.
+func TestPersist_WriteErrorIsReturned(t *testing.T) {
 	skipIfRoot(t)
 	dir := t.TempDir()
 	s, err := Open(dir, quiet())
@@ -63,7 +67,15 @@ func TestPersist_WriteErrorIsSwallowed(t *testing.T) {
 	}
 	defer func() { _ = os.Chmod(dir, 0o700) }() // restore so TempDir cleanup works
 
-	s.Set("vol", 0, "c0", hlc.Timestamp{Wall: 1}) // write into a read-only dir -> error path, swallowed
+	err = s.Set("vol", 0, "c0", hlc.Timestamp{Wall: 1})
+	if err == nil {
+		t.Fatal("a write failure must be returned")
+	}
+	for _, want := range []string{dir, "free space", "permissions"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should mention %q", err, want)
+		}
+	}
 	if id, ok := s.Get("vol", 0); !ok || id != "c0" {
 		t.Errorf("in-memory state should still apply despite a write failure: (%q,%v)", id, ok)
 	}
@@ -83,7 +95,8 @@ func TestOpen_ReadDirError(t *testing.T) {
 	}
 }
 
-// An unreadable per-volume file is logged and skipped, not fatal.
+// An unreadable file whose name does not decode to a volume is logged and
+// skipped, not fatal, and flags nothing.
 func TestLoad_UnreadableFileIsSkipped(t *testing.T) {
 	skipIfRoot(t)
 	dir := t.TempDir()
@@ -100,8 +113,110 @@ func TestLoad_UnreadableFileIsSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open should not fail on one unreadable file: %v", err)
 	}
-	if len(s.Volumes()) != 0 {
-		t.Errorf("unreadable file should be skipped, got volumes %v", s.Volumes())
+	if len(s.Volumes()) != 0 || len(s.lost) != 0 {
+		t.Errorf("unreadable file should be skipped, got volumes %v lost %v", s.Volumes(), s.lost)
+	}
+}
+
+// An unreadable map file of a known volume is left in place but flags the
+// volume lost: its content is unknown, so a single peer's copy is not enough.
+func TestLoad_UnreadableMapFlagsVolumeLost(t *testing.T) {
+	skipIfRoot(t)
+	dir := t.TempDir()
+	probe := &Store{dir: dir}
+	path := probe.filename("vol")
+	if err := os.WriteFile(path, []byte(`{"volume_id":"vol"}`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(path, 0o600) }()
+
+	s, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !s.Lost("vol") || s.Has("vol") {
+		t.Errorf("Lost=%v Has=%v, want a lost volume with no map", s.Lost("vol"), s.Has("vol"))
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("an unreadable map file should stay where it is: %v", err)
+	}
+}
+
+// When the damaged file cannot be renamed aside the volume is still flagged
+// lost, and the file stays put for the next boot to try again.
+func TestLoad_QuarantineRenameFailureStillFlags(t *testing.T) {
+	dir := t.TempDir()
+	probe := &Store{dir: dir}
+	path := probe.filename("vol")
+	if err := os.WriteFile(path, []byte("{trunc"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// A non-empty directory where the .corrupt file would go makes the rename fail.
+	if err := os.MkdirAll(filepath.Join(path+corruptSuffix, "occupied"), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	s, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !s.Lost("vol") {
+		t.Error("a damaged map must flag its volume lost even when it cannot be moved aside")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("the damaged file should still be in place: %v", err)
+	}
+}
+
+// A leftover temp file that cannot be removed is logged, not fatal, and the
+// real map next to it still loads.
+func TestLoad_StaleTempRemoveFailureIsNotFatal(t *testing.T) {
+	skipIfRoot(t)
+	dir := t.TempDir()
+	s, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = s.Set("vol", 0, "c0", hlc.Timestamp{Wall: 1})
+	tmp := s.filename("vol") + ".tmp"
+	if err := os.WriteFile(tmp, []byte("half"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil { // list ok, remove fails
+		t.Fatalf("chmod: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o700) }()
+
+	reopened, err := Open(dir, quiet())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if id, ok := reopened.Get("vol", 0); !ok || id != "c0" {
+		t.Errorf("the real map should load beside an unremovable temp file: (%q,%v)", id, ok)
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Errorf("the temp file should still exist after a failed remove: %v", err)
+	}
+}
+
+func TestVolumeFromFilename(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		want   string
+		wantOK bool
+	}{
+		{"dm9s" + fileSuffix, "vol", true},
+		{"a" + fileSuffix, "", false},    // one base64 character never decodes
+		{"!!!!" + fileSuffix, "", false}, // not base64url at all
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := volumeFromFilename(tc.name)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("volumeFromFilename(%q) = (%q,%v), want (%q,%v)", tc.name, got, ok, tc.want, tc.wantOK)
+			}
+		})
 	}
 }
 

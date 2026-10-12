@@ -20,6 +20,9 @@ type fakeExtCatalog struct {
 	vols   []string
 	snap   map[string][]crdt.MapEntry[uint64, string]
 	merged []string
+	// mergeErr makes Merge report a failed save after applying, as the real
+	// store does.
+	mergeErr error
 
 	listOnce sync.Once
 	listed   chan struct{}
@@ -45,7 +48,7 @@ func (c *fakeExtCatalog) Digest(v string) []byte {
 
 // Merge records what a reconciliation folded in, and makes it visible to later
 // Snapshot calls so a test can assert the union is what gets pushed back out.
-func (c *fakeExtCatalog) Merge(v string, entries []crdt.MapEntry[uint64, string]) {
+func (c *fakeExtCatalog) Merge(v string, entries []crdt.MapEntry[uint64, string]) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.snap == nil {
@@ -61,6 +64,7 @@ func (c *fakeExtCatalog) Merge(v string, entries []crdt.MapEntry[uint64, string]
 			c.snap[v] = append(c.snap[v], e)
 		}
 	}
+	return c.mergeErr
 }
 
 func hasVol(xs []string, x string) bool {
@@ -362,6 +366,27 @@ func TestExtentScrubber_ReconcilesDivergedReplicaBothWays(t *testing.T) {
 	}
 	if len(rec.entries) != 1 || rec.entries[0].Key != 0 {
 		t.Errorf("pushed %+v, want only extent 0, the binding b was missing", rec.entries)
+	}
+}
+
+// A merge that applies in memory but cannot be saved locally is logged; the
+// reconciled map is still pushed back, because the peer's copy is what matters.
+func TestExtentScrubber_LocalSaveFailureStillPushesBack(t *testing.T) {
+	place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+	cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{
+		"v1": {{Key: 0, Value: "c0"}},
+	}, mergeErr: errors.New("disk full")}
+	peers := newFakeEpeers()
+	peers.statHas["b:7000"] = true
+	peers.statDiverged["b:7000"] = true
+	peers.fetchRes["b:7000"] = []crdt.MapEntry[uint64, string]{{Key: 1, Value: "c1"}}
+	s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
+
+	if !s.scrubMap(context.Background(), "a", "v1") {
+		t.Fatal("a diverged replica should count as under-replicated")
+	}
+	if _, ok := appliedTo(peers.snapApplied(), "b:7000", "v1"); !ok {
+		t.Error("a local save failure must not stop the push back to the diverged replica")
 	}
 }
 

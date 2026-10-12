@@ -47,10 +47,15 @@ func (f *fakeMetaPlace) DataAddr(id string) (string, bool) {
 func (f *fakeMetaPlace) SelfID() string { return f.self }
 
 type fakeStore struct {
-	mu          sync.Mutex
-	data        map[string]map[uint64]string
-	has         map[string]bool
+	mu   sync.Mutex
+	data map[string]map[uint64]string
+	has  map[string]bool
+	lost map[string]bool
+	// setBatchErr, mergeErr and ensureErr report a failed save after the change
+	// applied, which is how the real store behaves.
 	setBatchErr error
+	mergeErr    error
+	ensureErr   error
 	deleteErr   error
 	ensured     []string
 	deleted     []string
@@ -58,7 +63,7 @@ type fakeStore struct {
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{data: map[string]map[uint64]string{}, has: map[string]bool{}, merges: map[string]int{}}
+	return &fakeStore{data: map[string]map[uint64]string{}, has: map[string]bool{}, lost: map[string]bool{}, merges: map[string]int{}}
 }
 
 func (s *fakeStore) ensureMap(vol string) map[uint64]string {
@@ -70,16 +75,13 @@ func (s *fakeStore) ensureMap(vol string) map[uint64]string {
 }
 
 func (s *fakeStore) SetBatch(vol string, idx []uint64, ids []string, _ hlc.Timestamp) error {
-	if s.setBatchErr != nil {
-		return s.setBatchErr
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.ensureMap(vol)
 	for i := range idx {
 		m[idx[i]] = ids[i]
 	}
-	return nil
+	return s.setBatchErr
 }
 
 func (s *fakeStore) Get(vol string, index uint64) (string, bool) {
@@ -110,7 +112,7 @@ func (s *fakeStore) Snapshot(vol string) []crdt.MapEntry[uint64, string] {
 	return entries
 }
 
-func (s *fakeStore) Merge(vol string, entries []crdt.MapEntry[uint64, string]) {
+func (s *fakeStore) Merge(vol string, entries []crdt.MapEntry[uint64, string]) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.ensureMap(vol)
@@ -118,13 +120,27 @@ func (s *fakeStore) Merge(vol string, entries []crdt.MapEntry[uint64, string]) {
 		m[e.Key] = e.Value
 	}
 	s.merges[vol]++
+	return s.mergeErr
 }
 
-func (s *fakeStore) Ensure(vol string) {
+func (s *fakeStore) Ensure(vol string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureMap(vol)
 	s.ensured = append(s.ensured, vol)
+	return s.ensureErr
+}
+
+func (s *fakeStore) Lost(vol string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lost[vol]
+}
+
+func (s *fakeStore) ClearLost(vol string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.lost, vol)
 }
 
 func (s *fakeStore) Delete(vol string) error {
@@ -300,12 +316,62 @@ func TestExtentCoordinator_ApplyDeltaNoReplicas(t *testing.T) {
 	}
 }
 
-func TestExtentCoordinator_ApplyDeltaSetBatchError(t *testing.T) {
+// A local copy that could not be saved still serves reads but must not count
+// toward the quorum: the write is durable only if the peers alone reach it.
+func TestExtentCoordinator_ApplyDeltaLocalSaveFailureDoesNotCount(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		replicas []string
+		downPeer string
+		wantErr  bool
+	}{
+		// a + b + c, quorum 2: b and c ack, so the write is durable without a.
+		{"peers alone reach quorum", []string{"a", "b", "c"}, "", false},
+		// b is down, c acks: 1 ack. Counting a would have reached 2.
+		{"self would have tipped quorum", []string{"a", "b", "c"}, "b:7000", true},
+		// self is not a replica: its save failure is irrelevant to quorum.
+		{"self not a replica", []string{"b", "c", "d"}, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			store.setBatchErr = errors.New("disk full")
+			peers := newFakeEpeers()
+			if tc.downPeer != "" {
+				peers.applyErr[tc.downPeer] = errors.New("down")
+			}
+			c := NewExtentCoordinator(&fakeMetaPlace{replicas: tc.replicas, self: "a"}, store, peers, 3, quietLog())
+			err := c.ApplyDelta(context.Background(), "vol", []uint64{0}, []string{"c0"}, at(1))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "disk full") {
+				t.Errorf("the quorum failure should explain why this node did not count: %v", err)
+			}
+			if v, ok := store.Get("vol", 0); !ok || v != "c0" {
+				t.Errorf("the local copy should still serve reads: (%q,%v)", v, ok)
+			}
+		})
+	}
+}
+
+func TestExtentCoordinator_EnsureAndSnapshotLocalSaveFailureDoesNotCount(t *testing.T) {
+	newC := func(store *fakeStore) *ExtentCoordinator {
+		peers := newFakeEpeers()
+		peers.applyErr["b:7000"] = errors.New("down") // only c acks
+		return NewExtentCoordinator(&fakeMetaPlace{replicas: []string{"a", "b", "c"}, self: "a"}, store, peers, 3, quietLog())
+	}
+
 	store := newFakeStore()
-	store.setBatchErr = errors.New("disk full")
-	c := NewExtentCoordinator(&fakeMetaPlace{replicas: []string{"a", "b", "c"}, self: "a"}, store, newFakeEpeers(), 3, quietLog())
-	if err := c.ApplyDelta(context.Background(), "vol", []uint64{0}, []string{"c0"}, at(1)); err == nil {
-		t.Error("a local SetBatch failure should propagate")
+	store.ensureErr = errors.New("read-only file system")
+	if err := newC(store).EnsureMap(context.Background(), "vol"); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Errorf("EnsureMap: err = %v, want a quorum failure naming the local save error", err)
+	}
+
+	store = newFakeStore()
+	store.Ensure("src")
+	store.mergeErr = errors.New("read-only file system")
+	if err := newC(store).SnapshotMap(context.Background(), "src", "dst"); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Errorf("SnapshotMap: err = %v, want a quorum failure naming the local save error", err)
 	}
 }
 

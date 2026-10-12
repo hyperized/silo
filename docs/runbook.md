@@ -149,6 +149,38 @@ CA, re-mint node certs (rolling restart with the new CA key present), re-issue
 client credentials and tokens, and retire the old CA. Plan this as a maintenance
 window; it touches every node.
 
+### A volume will not attach after an unclean reboot (damaged extent map)
+
+After a hard reset, silod may log at startup that the local copy of a volume's
+extent map was damaged and has been moved aside. The damaged file is kept as
+`<DATA_DIR>/extents/<id>.emap.json.corrupt` (the log line names the volume and
+the exact file). The node then rebuilds that map by
+merging the copy held by **every** replica of the volume, and refuses to serve
+the volume until it has. This holds across restarts: as long as the `.corrupt`
+file exists and no rebuilt map sits beside it, silod treats the volume as damaged
+on every boot. An attach in the meantime fails with `will not serve volume ...
+yet`, naming how many replicas could not be reached.
+
+This is deliberate. The damaged copy may have held writes that only some of the
+replicas received, so serving from whichever replica answered could roll the
+volume back to an earlier state. For a database that looks like a clean
+shutdown at an old checkpoint.
+
+1. Bring the unreachable nodes back, or fix gossip connectivity between the
+   nodes, until `siloctl status` lists every node.
+2. Retry the attach. Once every replica answers, silod logs that it rebuilt the
+   map and the volume serves again.
+3. Delete the `.corrupt` file once the volume serves. Keep it if you want to
+   report the failure; it holds the damaged bytes as found. Once the map is
+   rebuilt, a leftover `.corrupt` file no longer blocks anything.
+
+If the error says **no other replica holds a copy**, the damaged file was the
+only one. Restore the volume from a backup. If the volume never held data,
+delete its `.corrupt` file and restart the node.
+
+Startup also removes any `<id>.emap.json.tmp` file. That is a write a crash cut
+short; the map it was replacing is intact.
+
 ### A volume is being written from two places (split-brain)
 
 It **cannot corrupt the volume.** The single-writer lease is fenced: the newest
