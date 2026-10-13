@@ -130,7 +130,7 @@ kubectl get csinodes -o wide             # the driver should be listed per node
 | `image.repository` / `image.tag` | `ghcr.io/hyperized/silo-csi` / chart appVersion | Point at your registry |
 | `silod.address` | `silo:7000` | silod gRPC `Service` the controller dials |
 | `silod.nbdAddress` | `127.0.0.1:10809` | node-local silod NBD endpoint |
-| `silod.nbdReconnectTimeout` | `5m` | how long a volume's I/O waits for silod to come back (a rolling restart) before erroring |
+| `silod.nbdReconnectTimeout` | `15m` | how long a volume's I/O waits for silod to come back (a rolling restart) before erroring |
 | `silod.nbdRequestTimeout` | `2m` | bound on a single block request; turns a hung connection into a quick reconnect. Keep it set |
 | `silod.tls.secretName` | `""` | Secret with `ca.crt`/`client.crt`/`client.key` for mTLS to silod |
 | `node.hostNetwork` | `true` | lets the node plugin reach node-local silod and host nbd devices |
@@ -285,6 +285,12 @@ kubectl -n silo-system logs -l app.kubernetes.io/component=node -c silo-csi
   Talos, add `nbd` to `machine.kernel.modules`).
 - `mkfs`/`mount` errors → the image is missing block tooling. Use the provided
   `Dockerfile.csi` (it bundles e2fsprogs/xfsprogs/util-linux).
+- `the kernel already failed I/O on this volume` (error level) → the volume's
+  connection to silod stayed down longer than the reconnect window before the
+  plugin could reconnect it, usually because the plugin was replaced while
+  silod was away. The attachment is healed, but a filesystem on the device
+  may have gone read-only: restart the pod that uses it. See
+  [Troubleshooting](operations.md#troubleshooting) in the operations guide.
 
 **PVC stuck `Pending`.** Look at the controller:
 

@@ -102,14 +102,25 @@ The library covers the **core** opcodes. Deferred:
   particular order, orphaning any write still in flight. The node plugin now
   sets the kernel's per-request timeout (`SILO_CSI_NBD_REQUEST_TIMEOUT`,
   default `2m`), which bounds the damage: the orphaned write fails, the
-  unmount proceeds, and the reboot completes. Verified on a real node: about
-  6 minutes end to end with no data loss past the last fsync, where the same
+  unmount proceeds, and the reboot completes, about a minute after the
+  reconnect window runs out. Verified on a real node with a 5-minute window:
+  just over 6 minutes end to end with no data loss past the last fsync, where the same
   reboot without the timeout hung for more than 20 minutes and needed a BMC
   power cut. What remains open is making the teardown orderly, with zero I/O
   errors instead of a bounded few: drain before maintenance, or kubelet
   graceful node shutdown with silod at `system-node-critical` priority (see
   [operations.md](operations.md#rolling-upgrades)). Those are deployment
   settings silo cannot impose on its own.
+- **A node plugin replaced while silod is down leaves its devices
+  unsupervised until the new plugin adopts them.** The kernel keeps the
+  devices and queues their I/O for the reconnect window, and the new plugin
+  reconnects them as soon as it starts, but nothing can reconnect them in
+  between: the old process is gone and the new one is still being scheduled
+  or pulled. If that gap plus the time silod was already away exceeds the
+  window, the kernel fails the queued I/O and the filesystem goes read-only.
+  Rolling silod and the plugin separately avoids it in practice. A plugin
+  that waits for its reconnecting devices to heal before it exits (bounded by
+  the pod's termination grace period) would narrow the gap further.
 - **`siloctl volume attach` for bare-metal hosts.** The CSI node plugin's
   supervised attach (reconnects across silod restarts) lives in
   `internal/nbdclient`. A manual `nbd-client` attach gets none of that: its

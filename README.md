@@ -18,8 +18,8 @@ before it returns.
   chunks re-replicate onto the survivors in the background.
 - **Partition-tolerant namespace.** A CRDT, so both sides of a split keep serving
   and converge once the network heals. There is no quorum to lose.
-- **Rollout-safe attachments.** Volumes pause and reconnect across a silod
-  restart instead of returning I/O errors to the pod.
+- **Rollout-safe attachments.** Volumes pause and reconnect across a silod or
+  node plugin restart instead of returning I/O errors to the pod.
 - **Encrypted at rest and in flight.** AES-GCM with per-chunk keys, mTLS between
   nodes, and keys from a file or a cloud KMS.
 

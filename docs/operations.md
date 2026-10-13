@@ -639,21 +639,36 @@ silod first answers the block requests it has already accepted, so an
 acknowledged write is always durable.
 
 The pause is bounded by `SILO_CSI_NBD_RECONNECT_TIMEOUT` on the node plugin
-(default `5m`, `silod.nbdReconnectTimeout` in the Helm chart). If silod stays
+(default `15m`, `silod.nbdReconnectTimeout` in the Helm chart). If silod stays
 away longer than that, the volume's I/O fails and the pod sees errors. Keep
 the window above your worst-case restart time. Volumes attached manually with
 `nbd-client` do **not** reconnect; see
 [Block volumes over NBD](#block-volumes-over-nbd).
+
+**The node plugin itself can restart too.** The kernel keeps every device
+attached while the plugin is away: the plugin's exit never disconnects a
+device, and the reconnect window is kernel state that outlives the process.
+A new plugin adopts the devices its predecessor recorded, reapplies its own
+timeouts to them, reads from each one to see whether its connection is still
+up, and keeps checking every 15 seconds afterwards (an adopted device has no
+socket the plugin can watch, so a test read is the only reliable signal).
+Nothing supervises a device between the old plugin stopping and the new one
+adopting, so the window also has to cover that gap. Upgrade silod and the
+node plugin as two separate rollouts and let silod settle before the plugin
+rolls; when the plugin is replaced while silod is down, the window is all
+that protects the volumes on that node.
 
 **Rebooting a node with in-use volumes works, but drain it for a clean exit.**
 A whole-node shutdown stops the workload pods, silod, and the node plugin in
 no particular order. A write that is still in flight when silod dies has no
 server to go to, and no supervisor is left to reconnect it. The request
 timeout (`SILO_CSI_NBD_REQUEST_TIMEOUT`, default `2m`,
-`silod.nbdRequestTimeout` in the chart) bounds this case: the kernel fails
-the orphaned write, the unmount proceeds, and the reboot completes. Verified
-on Talos: about 6 minutes end to end, no data loss up to the last fsync, and
-the volume re-attaches after boot.
+`silod.nbdRequestTimeout` in the chart) bounds a write that was already
+sent, and the reconnect window bounds one issued after silod died: the kernel
+fails the orphaned write, the unmount proceeds, and the reboot completes.
+Expect the reboot to take about a minute longer than the reconnect window.
+Verified on Talos with a 5-minute window: just over 6 minutes end to end, no
+data loss up to the last fsync, and the volume re-attaches after boot.
 
 **Never set the request timeout to 0 on Kubernetes nodes.** Without it the
 kernel requeues the orphaned write forever and the shutdown hangs until
@@ -900,17 +915,26 @@ has a newer lease; this is the fence working. Whoever attached most recently
 owns the volume; the previous holder must re-acquire. With NBD/CSI this resolves
 automatically on the new attach.
 
-**A pod's volume turned read-only after a long silod outage.** If silod is
-unreachable for longer than the reconnect window
-(`SILO_CSI_NBD_RECONNECT_TIMEOUT`, default `5m`), the kernel fails the
+**A pod's volume turned read-only after an outage or a rollout.** If a
+volume's connection stays down for longer than the reconnect window
+(`SILO_CSI_NBD_RECONNECT_TIMEOUT`, default `15m`), the kernel fails the
 volume's queued I/O and ext4 remounts read-only to protect itself. The
 attachment heals automatically once silod is back; only the filesystem needs
 a fresh mount. Restart the pod. The remount replays the journal, and
 everything written up to the last fsync is intact (verified under test, no
-data loss). If outages longer than the window are normal in your environment,
-raise `silod.nbdReconnectTimeout` in the Helm chart. Short outages, such as a
-rolling restart or a brief network blip, never get this far: I/O pauses and
-resumes.
+data loss). The node plugin reports this case explicitly: look for `the
+kernel already failed I/O on this volume` at error level in its log, with the
+device and the volume. On the node, `dmesg` (on Talos: `talosctl -n <node>
+dmesg`) shows `nbdX: Dead connection, failed to find a fallback` followed by
+`shutting down sockets` at the moment the window ran out.
+
+Two things keep a connection down that long: silod away for more than the
+window, or the node plugin replaced while the connection was already dead
+(nothing reconnects a device until the new plugin has adopted it). Roll silod
+and the plugin separately, and if outages longer than the window are normal
+in your environment, raise `silod.nbdReconnectTimeout` in the Helm chart.
+Short outages, such as a rolling restart or a brief network blip, never get
+this far: I/O pauses and resumes.
 
 **Clock-skew alerts.** `silo_hlc_clock_skew_alerts_total` is climbing: a peer's
 wall clock differs from this node's by more than `SILO_MAX_CLOCK_SKEW`. Fix NTP

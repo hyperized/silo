@@ -28,7 +28,7 @@ PersistentVolumeClaims.
 Attached volumes survive silod restarts (rolling upgrades, crashes). The node
 plugin watches every attachment and reconnects it as soon as silod is back,
 while the kernel queues the volume's I/O. Workloads see a short pause, not an
-error. `silod.nbdReconnectTimeout` (default `5m`) sets how long I/O waits
+error. `silod.nbdReconnectTimeout` (default `15m`) sets how long I/O waits
 before it fails. `silod.nbdRequestTimeout` (default `2m`) bounds a single
 hung request; keep it set, because it is also what lets a node with in-use
 volumes shut down instead of hanging on an unanswerable write. The plugin

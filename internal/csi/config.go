@@ -72,9 +72,10 @@ const (
 	DefaultMode      = ModeAll
 	DefaultSilodAddr = "127.0.0.1:7000"
 	DefaultNBDAddr   = "127.0.0.1:10809"
-	// DefaultNBDReconnectTimeout comfortably covers a rolling silod restart,
-	// including an image pull on a slow link.
-	DefaultNBDReconnectTimeout = 5 * time.Minute
+	// DefaultNBDReconnectTimeout covers a rolling silod restart with an image
+	// pull on a slow link, even when the node plugin is replaced in the
+	// middle of it. Failing I/O is the worse outcome, so the window errs long.
+	DefaultNBDReconnectTimeout = 15 * time.Minute
 	// DefaultNBDRequestTimeout is far above any legitimate request latency
 	// (silo's fsync-bound writes complete in milliseconds to seconds) while
 	// keeping hung-connection detection and shutdown unblocking prompt.

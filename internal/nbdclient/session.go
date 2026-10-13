@@ -19,6 +19,7 @@ import (
 type KernelNBD interface {
 	Connect(cfg nbdnl.ConnectConfig) (uint32, error)
 	Reconfigure(index uint32, socketFD int, ioTimeout, deadConnTimeout time.Duration) error
+	SetTimeouts(index uint32, ioTimeout, deadConnTimeout time.Duration) error
 	Disconnect(index uint32) error
 }
 
@@ -38,9 +39,11 @@ const (
 // Defaults for Config fields left zero.
 const (
 	// DefaultReconnectWindow is how long the kernel holds a volume's I/O
-	// while silod is away before failing it — long enough to cover a rolling
-	// restart including an image pull.
-	DefaultReconnectWindow = 5 * time.Minute
+	// while silod is away before failing it. A failed write turns the
+	// filesystem read-only and costs a pod restart, whereas a paused write
+	// just waits, so the window is sized well past a rolling restart with an
+	// image pull plus a node plugin replacement in the middle of it.
+	DefaultReconnectWindow = 15 * time.Minute
 	// defaultDialTimeout bounds one dial+handshake attempt.
 	defaultDialTimeout = 15 * time.Second
 )
@@ -173,11 +176,23 @@ func Attach(ctx context.Context, cfg Config) (*Session, error) {
 // Adopt resumes supervising a device this process (or a predecessor) attached
 // earlier — the node plugin restarting must not orphan live attachments. size
 // is the expected export size from the attachment record (0 skips the check).
-// The old connection's fd is gone with the old process, so death detection
-// relies on the dead-link watcher and the caller probing the device once.
+// The old connection's fd is gone with the old process, so the session starts
+// unwatched (see Watched) and death detection is up to the caller: the
+// kernel's dead-link notifications and probing the device.
+//
+// Adopt also hands the device this configuration's request timeout and
+// reconnect window. Failing to do so is logged, not returned: the device is
+// live and keeps the timeouts its previous supervisor set.
 func Adopt(_ context.Context, cfg Config, index uint32, size uint64) (*Session, error) {
 	if err := cfg.applyDefaults(); err != nil {
 		return nil, err
+	}
+	// The kernel still holds the predecessor's timeouts, which may come from
+	// an older release or from settings the operator has since changed. This
+	// process's configuration has to be the one in force from now on.
+	if err := cfg.Kernel.SetTimeouts(index, cfg.IOTimeout, cfg.ReconnectWindow); err != nil {
+		cfg.Logger.Warn("could not reinstate the reconnect window on an adopted volume; it keeps the timeouts its previous supervisor set",
+			"export", cfg.Export, "device", nbdnl.DevicePath(index), "error", err)
 	}
 	s := newSession(cfg, index, size, StateHealthy)
 	s.cfg.Logger.Info("nbd volume adopted", "export", cfg.Export, "device", s.device)
@@ -403,6 +418,19 @@ func (s *Session) Stop() {
 
 // Device returns the attached device node, e.g. /dev/nbd3.
 func (s *Session) Device() string { return s.device }
+
+// Export returns the NBD export name, which is the volume's namespace path.
+func (s *Session) Export() string { return s.cfg.Export }
+
+// Watched reports whether the session is watching its connection's socket,
+// and so notices the connection dying on its own. An adopted session is
+// unwatched until its first reconnect, as is one whose socket watch could not
+// be set up; the caller has to check those devices' links itself.
+func (s *Session) Watched() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopWatch != nil
+}
 
 // Index returns the kernel device index.
 func (s *Session) Index() uint32 { return s.index }

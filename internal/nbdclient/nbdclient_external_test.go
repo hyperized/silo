@@ -117,6 +117,14 @@ type fakeKernel struct {
 	connectErr      error
 	reconfigErr     error
 	disconnectErr   error
+	setTimeoutsErr  error
+	timeoutCalls    []timeoutCall
+}
+
+// timeoutCall records one SetTimeouts invocation.
+type timeoutCall struct {
+	index      uint32
+	io, window time.Duration
 }
 
 func (k *fakeKernel) Connect(cfg nbdnl.ConnectConfig) (uint32, error) {
@@ -140,6 +148,13 @@ func (k *fakeKernel) Reconfigure(uint32, int, time.Duration, time.Duration) erro
 	k.reconfigures++
 	k.connected = true
 	return nil
+}
+
+func (k *fakeKernel) SetTimeouts(index uint32, io, window time.Duration) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.timeoutCalls = append(k.timeoutCalls, timeoutCall{index: index, io: io, window: window})
+	return k.setTimeoutsErr
 }
 
 func (k *fakeKernel) Disconnect(uint32) error {
@@ -172,6 +187,7 @@ func (k *fakeKernel) snapshot() fakeKernel {
 		disconnects:     k.disconnects,
 		disconnectCalls: k.disconnectCalls,
 		connectCfg:      k.connectCfg,
+		timeoutCalls:    append([]timeoutCall(nil), k.timeoutCalls...),
 	}
 }
 

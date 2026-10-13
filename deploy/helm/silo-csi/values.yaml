@@ -21,8 +21,10 @@ silod:
   # back after its connection drops (a rolling restart, an upgrade, a crash)
   # before erroring. During the wait the I/O is paused; once silod returns,
   # the node plugin reconnects the volume and the I/O resumes. The default
-  # covers a rolling restart including an image pull.
-  nbdReconnectTimeout: "5m"
+  # covers a rolling restart including an image pull, with room for the node
+  # plugin being replaced in the middle of it; a paused volume recovers, a
+  # failed one needs a pod restart.
+  nbdReconnectTimeout: "15m"
   # nbdRequestTimeout bounds a single block request in the kernel: a request
   # that exceeds it has its connection retired and is retried on the next
   # one. This turns a silently hung connection into a quick reconnect, and
