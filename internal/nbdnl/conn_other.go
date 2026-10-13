@@ -29,6 +29,11 @@ func (c *Conn) Reconfigure(uint32, int, time.Duration, time.Duration) error {
 	return ErrUnsupportedOS
 }
 
+// SetTimeouts fails with ErrUnsupportedOS.
+func (c *Conn) SetTimeouts(uint32, time.Duration, time.Duration) error {
+	return ErrUnsupportedOS
+}
+
 // Disconnect fails with ErrUnsupportedOS.
 func (c *Conn) Disconnect(uint32) error { return ErrUnsupportedOS }
 

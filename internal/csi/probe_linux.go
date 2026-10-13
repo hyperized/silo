@@ -9,35 +9,44 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// probeDeviceLiveness reports whether an NBD device currently answers reads.
-// It exists for adopted attachments: their connection may have died while no
-// supervisor was running, and the kernel's status flag only reports
+// probeDeviceLiveness reads from an NBD device to learn the state of its
+// link. It exists for devices without a socket watch: their connection may
+// have died unnoticed, and the kernel's status flag only reports
 // configuration, not link health. A direct read forces a real round-trip to
-// silod (the page cache would answer for a dead link); on a dead link the
-// read queues inside the kernel, so the deadline is the verdict.
+// silod (the page cache would answer for a dead link). On a dead link the
+// read queues inside the kernel, so hitting the deadline means probeStalled;
+// once the kernel's reconnect window has expired it fails reads at once,
+// which is probeFailed.
 //
 // The goroutine behind a timed-out probe stays in the read until the link is
-// repaired or the kernel fails the queued I/O — bounded by the reconnect
-// window, and the read completes harmlessly then.
-var probeDeviceLiveness = func(device string, timeout time.Duration) bool {
-	done := make(chan bool, 1)
+// repaired or the kernel fails the queued I/O, which the reconnect window
+// bounds, and the read completes harmlessly then.
+var probeDeviceLiveness = func(device string, timeout time.Duration) probeVerdict {
+	done := make(chan probeVerdict, 1)
 	go func() {
 		fd, err := unix.Open(device, unix.O_RDONLY|unix.O_DIRECT|unix.O_CLOEXEC, 0)
 		if err != nil {
-			done <- false
+			done <- probeFailed
 			return
 		}
 		defer func() { _ = unix.Close(fd) }()
 		buf := alignedBlock(4096)
 		_, err = unix.Pread(fd, buf, 0)
-		done <- err == nil
+		done <- readVerdict(err)
 	}()
 	select {
-	case ok := <-done:
-		return ok
+	case v := <-done:
+		return v
 	case <-time.After(timeout):
-		return false
+		return probeStalled
 	}
+}
+
+func readVerdict(err error) probeVerdict {
+	if err != nil {
+		return probeFailed
+	}
+	return probeAlive
 }
 
 // alignedBlock returns a size-byte buffer aligned to 512 bytes, the alignment

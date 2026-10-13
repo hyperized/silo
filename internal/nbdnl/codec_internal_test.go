@@ -359,6 +359,29 @@ func TestRequestConstructors(t *testing.T) {
 		t.Fatalf("reconfigure sockets: %v %v", sockets, err)
 	}
 
+	for _, tc := range []struct {
+		name        string
+		fd          int
+		wantSockets bool
+	}{
+		{"with a socket splices it in", 9, true},
+		{"fd zero is still a socket", 0, true},
+		{"negative fd sends timeouts only", -1, false},
+	} {
+		t.Run("reconfigure "+tc.name, func(t *testing.T) {
+			m := parseOne(t, reconfigureRequest(0x1d, 5, 10, 4, tc.fd, 30*time.Second, 5*time.Minute))
+			if _, ok := attrByType(m.Attrs, nbdAttrSockets); ok != tc.wantSockets {
+				t.Fatalf("sockets attribute present = %v, want %v", ok, tc.wantSockets)
+			}
+			if v := binary.NativeEndian.Uint64(requireAttr(t, m, nbdAttrTimeout).Data); v != 30 {
+				t.Fatalf("io timeout = %d, want 30", v)
+			}
+			if v := binary.NativeEndian.Uint64(requireAttr(t, m, nbdAttrDeadConnTimeout).Data); v != 300 {
+				t.Fatalf("dead-connection timeout = %d, want 300", v)
+			}
+		})
+	}
+
 	disc := parseOne(t, disconnectRequest(0x1d, 3, 10, 6))
 	if disc.Cmd != nbdCmdDisconnect {
 		t.Fatalf("disconnect cmd = %d", disc.Cmd)

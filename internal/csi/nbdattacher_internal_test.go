@@ -21,6 +21,8 @@ import (
 type fakeSession struct {
 	mu         sync.Mutex
 	index      uint32
+	export     string
+	watched    bool
 	size       uint64
 	state      nbdclient.State
 	kicks      int
@@ -31,8 +33,16 @@ type fakeSession struct {
 }
 
 func (s *fakeSession) Device() string { return nbdnl.DevicePath(s.index) }
+func (s *fakeSession) Export() string { return s.export }
 func (s *fakeSession) Index() uint32  { return s.index }
-func (s *fakeSession) Size() uint64   { return s.size }
+
+func (s *fakeSession) Watched() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.watched
+}
+
+func (s *fakeSession) Size() uint64 { return s.size }
 
 func (s *fakeSession) State() nbdclient.State {
 	s.mu.Lock()
@@ -84,18 +94,23 @@ type fakeBackend struct {
 	attachErr     error
 	adoptErr      error
 	configured    map[uint32]bool
-	dead          map[string]bool // devices whose probe should report a dead link
+	verdicts      map[string]probeVerdict // probe results by device; unlisted devices are alive
 	deadLinks     chan uint32
+	watchErrs     chan error // errors the fake watcher's Next returns
+	watcherErrs   []error    // results of the next newWatcher calls; nil entries succeed
+	watchers      int
 	disconnects   []uint32
 	disconnectErr error
+	specs         map[string]sessionSpec // how attach shapes a volume's session
 }
 
 func newFakeBackend() *fakeBackend {
 	return &fakeBackend{
 		sessions:   map[string]*fakeSession{},
 		configured: map[uint32]bool{},
-		dead:       map[string]bool{},
+		verdicts:   map[string]probeVerdict{},
 		deadLinks:  make(chan uint32),
+		watchErrs:  make(chan error),
 	}
 }
 
@@ -107,7 +122,8 @@ func (b *fakeBackend) option() NBDAttacherOption {
 			return nil, b.attachErr
 		}
 		b.attaches = append(b.attaches, cfg.Export)
-		s := &fakeSession{index: b.nextIndex, size: 1 << 20}
+		spec := b.specs[cfg.Export]
+		s := &fakeSession{index: b.nextIndex, export: cfg.Export, size: 1 << 20, watched: spec.watched, state: spec.state}
 		b.nextIndex++
 		b.sessions[cfg.Export] = s
 		b.configured[s.index] = true
@@ -120,22 +136,32 @@ func (b *fakeBackend) option() NBDAttacherOption {
 			return nil, b.adoptErr
 		}
 		b.adopts = append(b.adopts, index)
-		s := &fakeSession{index: index, size: size}
+		s := &fakeSession{index: index, export: cfg.Export, size: size}
 		b.sessions[cfg.Export] = s
 		return s, nil
 	}
 	watcher := func() (linkWatcher, error) {
-		return &fakeWatcher{ch: b.deadLinks, done: make(chan struct{})}, nil
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.watchers++
+		if len(b.watcherErrs) > 0 {
+			err := b.watcherErrs[0]
+			b.watcherErrs = b.watcherErrs[1:]
+			if err != nil {
+				return nil, err
+			}
+		}
+		return &fakeWatcher{ch: b.deadLinks, errs: b.watchErrs, done: make(chan struct{})}, nil
 	}
 	configured := func(index uint32) bool {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		return b.configured[index]
 	}
-	probe := func(device string, _ time.Duration) bool {
+	probe := func(device string, _ time.Duration) probeVerdict {
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		return !b.dead[device]
+		return b.verdicts[device]
 	}
 	return withNBDBackend(&fakeKernelNBD{b: b}, watcher, attach, adopt, configured, probe)
 }
@@ -165,6 +191,8 @@ func (k *fakeKernelNBD) Reconfigure(uint32, int, time.Duration, time.Duration) e
 	return nil
 }
 
+func (k *fakeKernelNBD) SetTimeouts(uint32, time.Duration, time.Duration) error { return nil }
+
 func (k *fakeKernelNBD) Disconnect(index uint32) error {
 	k.b.mu.Lock()
 	defer k.b.mu.Unlock()
@@ -178,6 +206,7 @@ func (k *fakeKernelNBD) Connected(uint32) (bool, error) { return true, nil }
 
 type fakeWatcher struct {
 	ch     chan uint32
+	errs   chan error
 	closed sync.Once
 	done   chan struct{}
 }
@@ -186,6 +215,8 @@ func (w *fakeWatcher) Next() (uint32, error) {
 	select {
 	case idx := <-w.ch:
 		return idx, nil
+	case err := <-w.errs:
+		return 0, err
 	case <-w.done:
 		return 0, errors.New("closed")
 	}
@@ -299,7 +330,7 @@ func TestNBDAttacherResumeRepairsDeadAdoptedLink(t *testing.T) {
 	dir := t.TempDir()
 	backend := newFakeBackend()
 	backend.configured[4] = true
-	backend.dead["/dev/nbd4"] = true // the link died while no plugin was running
+	backend.verdicts["/dev/nbd4"] = probeStalled // the link died while no plugin was running
 	if err := newAttachmentStore(dir).save([]attachmentRecord{{Volume: "/vol/db", Index: 4, Size: 1 << 20}}); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
@@ -686,4 +717,298 @@ func TestNBDAttacherMetrics(t *testing.T) {
 	if v := byName(ms, "nbd_attached_volumes"); v != 1 {
 		t.Fatalf("attached after detach = %v, want 1", v)
 	}
+}
+
+// lockedBuffer is a log sink background goroutines may write to while the
+// test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// setLinkCheckTiming tightens the periodic check and the watcher retry for
+// one test. It must run before the attacher is built.
+func setLinkCheckTiming(t *testing.T, interval, retryFloor, retryCap time.Duration) {
+	t.Helper()
+	oldInterval, oldFloor, oldCap := linkCheckInterval, watcherRetryFloor, watcherRetryCap
+	linkCheckInterval, watcherRetryFloor, watcherRetryCap = interval, retryFloor, retryCap
+	t.Cleanup(func() {
+		linkCheckInterval, watcherRetryFloor, watcherRetryCap = oldInterval, oldFloor, oldCap
+	})
+}
+
+// newLoggedAttacher is newTestAttacher with the log captured.
+func newLoggedAttacher(t *testing.T, backend *fakeBackend, extra ...NBDAttacherOption) (*NBDAttacher, *lockedBuffer) {
+	t.Helper()
+	logs := &lockedBuffer{}
+	opts := append([]NBDAttacherOption{
+		backend.option(),
+		WithStateDir(t.TempDir()),
+		WithAttacherLogger(slog.New(slog.NewTextHandler(logs, nil))),
+		WithReconnectWindow(time.Minute),
+	}, extra...)
+	a, err := NewNBDAttacher("127.0.0.1:10809", opts...)
+	if err != nil {
+		t.Fatalf("NewNBDAttacher: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	return a, logs
+}
+
+func waitUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestNBDAttacherRepairIfDead(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		verdict   probeVerdict
+		state     nbdclient.State
+		wantKicks int
+		wantLog   string
+	}{
+		{name: "alive", verdict: probeAlive, wantKicks: 0},
+		{name: "stalled link reconnects", verdict: probeStalled, wantKicks: 1, wantLog: "level=WARN msg=\"a volume's connection is dead"},
+		{name: "failed device tells the operator to restart the pod", verdict: probeFailed, wantKicks: 1, wantLog: "level=ERROR msg=\"the kernel already failed I/O on this volume"},
+		{name: "detached while probing", verdict: probeFailed, state: nbdclient.StateDetached, wantKicks: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := newFakeBackend()
+			a, logs := newLoggedAttacher(t, backend)
+			s := &fakeSession{index: 6, export: "/vol/db", state: tc.state}
+			backend.mu.Lock()
+			backend.verdicts[s.Device()] = tc.verdict
+			backend.mu.Unlock()
+
+			a.repairIfDead(s)
+
+			if got := s.kicked(); got != tc.wantKicks {
+				t.Fatalf("kicks = %d, want %d", got, tc.wantKicks)
+			}
+			out := logs.String()
+			if tc.wantLog == "" {
+				if strings.Contains(out, "level=WARN") || strings.Contains(out, "level=ERROR") {
+					t.Fatalf("nothing should be reported, got:\n%s", out)
+				}
+				return
+			}
+			if !strings.Contains(out, tc.wantLog) {
+				t.Fatalf("log lacks %q:\n%s", tc.wantLog, out)
+			}
+			if !strings.Contains(out, "volume=/vol/db") || !strings.Contains(out, "device=/dev/nbd6") {
+				t.Fatalf("log should name the volume and device:\n%s", out)
+			}
+			if tc.verdict == probeFailed && !strings.Contains(out, "restart the pod") {
+				t.Fatalf("a failed device must tell the operator to restart the pod:\n%s", out)
+			}
+		})
+	}
+}
+
+// sessionSpec is how the fake backend shapes one attached session.
+type sessionSpec struct {
+	watched bool
+	state   nbdclient.State
+}
+
+// attachSessions attaches one volume per entry, each session created with its
+// spec's watch and state already in place and its device's probe stalling, so
+// a concurrent link check never sees a half-configured session.
+func attachSessions(t *testing.T, a *NBDAttacher, backend *fakeBackend, specs map[string]sessionSpec) map[string]*fakeSession {
+	t.Helper()
+	backend.mu.Lock()
+	backend.specs = specs
+	for i := range uint32(len(specs)) {
+		backend.verdicts[nbdnl.DevicePath(backend.nextIndex+i)] = probeStalled
+	}
+	backend.mu.Unlock()
+	out := make(map[string]*fakeSession, len(specs))
+	for vol := range specs {
+		if _, err := a.Attach(context.Background(), vol); err != nil {
+			t.Fatalf("Attach %s: %v", vol, err)
+		}
+		out[vol] = backend.session(vol)
+	}
+	return out
+}
+
+func TestNBDAttacherPeriodicLinkCheck(t *testing.T) {
+	setLinkCheckTiming(t, 5*time.Millisecond, time.Millisecond, time.Millisecond)
+	backend := newFakeBackend()
+	a, _ := newLoggedAttacher(t, backend)
+	s := attachSessions(t, a, backend, map[string]sessionSpec{
+		"/vol/adopted":      {watched: false},
+		"/vol/watched":      {watched: true},
+		"/vol/reconnecting": {watched: false, state: nbdclient.StateReconnecting},
+	})
+
+	waitUntil(t, "the unwatched session to be kicked", func() bool { return s["/vol/adopted"].kicked() > 0 })
+	if got := s["/vol/watched"].kicked(); got != 0 {
+		t.Fatalf("watched session kicks = %d, want 0: its socket watch covers it", got)
+	}
+	if got := s["/vol/reconnecting"].kicked(); got != 0 {
+		t.Fatalf("reconnecting session kicks = %d, want 0: its supervisor is already on it", got)
+	}
+}
+
+func TestNBDAttacherCloseStopsPeriodicLinkCheck(t *testing.T) {
+	setLinkCheckTiming(t, time.Millisecond, time.Millisecond, time.Millisecond)
+	backend := newFakeBackend()
+	a, _ := newLoggedAttacher(t, backend)
+	s := attachSessions(t, a, backend, map[string]sessionSpec{"/vol/a": {}})
+	waitUntil(t, "a periodic kick", func() bool { return s["/vol/a"].kicked() > 0 })
+
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	after := s["/vol/a"].kicked()
+	time.Sleep(20 * time.Millisecond)
+	if got := s["/vol/a"].kicked(); got != after {
+		t.Fatalf("kicks went from %d to %d after Close; the periodic check is still running", after, got)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("a second Close must be harmless: %v", err)
+	}
+}
+
+func TestNBDAttacherDroppedNotificationsTriggerSweep(t *testing.T) {
+	// The default interval keeps the periodic check out of the way, so every
+	// kick here comes from the watcher goroutine.
+	backend := newFakeBackend()
+	a, logs := newLoggedAttacher(t, backend)
+	s := attachSessions(t, a, backend, map[string]sessionSpec{
+		"/vol/adopted": {watched: false},
+		"/vol/watched": {watched: true},
+	})
+
+	backend.watchErrs <- nbdnl.ErrNotificationsDropped
+	waitUntil(t, "the sweep to kick the unwatched session", func() bool { return s["/vol/adopted"].kicked() == 1 })
+	if got := s["/vol/watched"].kicked(); got != 0 {
+		t.Fatalf("watched session kicks = %d, want 0", got)
+	}
+	if !strings.Contains(logs.String(), "dropped some dead-link notifications") {
+		t.Fatalf("the overflow should be logged:\n%s", logs.String())
+	}
+
+	// The goroutine keeps consuming notifications after the overflow.
+	backend.deadLinks <- s["/vol/watched"].index
+	waitUntil(t, "the dead-link kick", func() bool { return s["/vol/watched"].kicked() == 1 })
+}
+
+func TestNBDAttacherReopensFailedWatcher(t *testing.T) {
+	setLinkCheckTiming(t, time.Hour, time.Millisecond, time.Millisecond)
+	backend := newFakeBackend()
+	// The initial watch opens; the first re-open attempt fails, the second
+	// succeeds.
+	backend.watcherErrs = []error{nil, errors.New("netlink busy"), nil}
+	a, logs := newLoggedAttacher(t, backend)
+	s := attachSessions(t, a, backend, map[string]sessionSpec{
+		"/vol/adopted": {watched: false},
+		"/vol/watched": {watched: true},
+	})
+
+	backend.watchErrs <- errors.New("socket gone")
+	// The re-opened watch sweeps for links that died while it was down.
+	waitUntil(t, "the post-reopen sweep", func() bool { return s["/vol/adopted"].kicked() == 1 })
+	backend.mu.Lock()
+	watchers := backend.watchers
+	backend.mu.Unlock()
+	if watchers != 3 {
+		t.Fatalf("newWatcher calls = %d, want 3 (initial, failed retry, success)", watchers)
+	}
+	for _, want := range []string{"the dead-link watch failed", "could not re-open the dead-link watch", "the dead-link watch is back"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("log lacks %q:\n%s", want, logs.String())
+		}
+	}
+
+	// Notifications flow through the replacement watch.
+	backend.deadLinks <- s["/vol/watched"].index
+	waitUntil(t, "the dead-link kick", func() bool { return s["/vol/watched"].kicked() == 1 })
+}
+
+func TestNBDAttacherCloseDuringWatcherReopen(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// reopen runs when the attacher retries the watch.
+		reopen func(a *NBDAttacher) (linkWatcher, error)
+	}{
+		{
+			name:   "while waiting to retry",
+			reopen: func(*NBDAttacher) (linkWatcher, error) { return nil, errors.New("still failing") },
+		},
+		{
+			name: "right as a new watch opens",
+			reopen: func(a *NBDAttacher) (linkWatcher, error) {
+				a.closeOnce.Do(func() { close(a.stop) })
+				return &fakeWatcher{done: make(chan struct{})}, nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setLinkCheckTiming(t, time.Hour, time.Millisecond, time.Millisecond)
+			backend := newFakeBackend()
+			var reopened sync.WaitGroup
+			reopened.Add(1)
+			var once sync.Once
+			var mu sync.Mutex
+			first := true
+			hook := func(att *NBDAttacher) {
+				att.newWatcher = func() (linkWatcher, error) {
+					mu.Lock()
+					isFirst := first
+					first = false
+					mu.Unlock()
+					if isFirst {
+						return &fakeWatcher{ch: backend.deadLinks, errs: backend.watchErrs, done: make(chan struct{})}, nil
+					}
+					defer once.Do(reopened.Done)
+					return tc.reopen(att)
+				}
+			}
+			a, _ := newLoggedAttacher(t, backend, hook)
+			backend.watchErrs <- errors.New("socket gone")
+			reopened.Wait()
+
+			done := make(chan struct{})
+			go func() {
+				_ = a.Close()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Close hung while the watch was being re-opened")
+			}
+		})
+	}
+}
+
+func TestNBDAttacherWithoutWatcherStillChecksLinks(t *testing.T) {
+	setLinkCheckTiming(t, time.Millisecond, time.Millisecond, time.Millisecond)
+	backend := newFakeBackend()
+	noWatcher := func(a *NBDAttacher) { a.newWatcher = nil }
+	a, _ := newLoggedAttacher(t, backend, noWatcher)
+	s := attachSessions(t, a, backend, map[string]sessionSpec{"/vol/a": {}})
+	waitUntil(t, "a periodic kick", func() bool { return s["/vol/a"].kicked() > 0 })
 }

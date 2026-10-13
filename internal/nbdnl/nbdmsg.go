@@ -121,10 +121,14 @@ func parseConnectReply(m message) (uint32, error) {
 	return idx.U32()
 }
 
+// reconfigureRequest builds NBD_CMD_RECONFIGURE. A negative fd leaves out the
+// sockets attribute, which the kernel accepts as "update the timeouts only":
+// that is how a new supervisor makes its own timeouts take effect on a device
+// a predecessor configured, without touching the live connection.
 func reconfigureRequest(family uint16, seq, pid uint32, index uint32, fd int, ioTimeout, deadConnTimeout time.Duration) []byte {
-	attrs := []attr{
-		u32Attr(nbdAttrIndex, index),
-		socketsAttr(fd),
+	attrs := []attr{u32Attr(nbdAttrIndex, index)}
+	if fd >= 0 {
+		attrs = append(attrs, socketsAttr(fd))
 	}
 	if ioTimeout != 0 {
 		attrs = append(attrs, u64Attr(nbdAttrTimeout, seconds(ioTimeout)))

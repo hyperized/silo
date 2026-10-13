@@ -3,6 +3,7 @@ package nbdclient_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -313,4 +314,135 @@ func TestReconfigureFailureKeepsLeaseGuardConnection(t *testing.T) {
 	// The successful attempt re-acquired the lease and the kernel holds its
 	// own socket reference: every user-space connection can close.
 	waitFor(t, "all connections closed", func() bool { return dialer.unclosed() == 0 })
+}
+
+// lockedBuffer is a log sink the session's goroutines may write to while the
+// test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestAdoptReinstatesTimeouts(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		window     time.Duration
+		io         time.Duration
+		kernelErr  error
+		wantWindow time.Duration
+		wantLog    bool
+	}{
+		{name: "configured values", window: 2 * time.Minute, io: 30 * time.Second, wantWindow: 2 * time.Minute},
+		{name: "default window", wantWindow: nbdclient.DefaultReconnectWindow},
+		{name: "kernel refuses", window: time.Minute, kernelErr: errors.New("no such device"), wantWindow: time.Minute, wantLog: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kernel := &fakeKernel{index: 3, setTimeoutsErr: tc.kernelErr}
+			logs := &lockedBuffer{}
+			cfg := testConfig(t, kernel, memBackend{size: 1 << 20})
+			cfg.ReconnectWindow = tc.window
+			cfg.IOTimeout = tc.io
+			cfg.Logger = slog.New(slog.NewTextHandler(logs, nil))
+
+			s, err := nbdclient.Adopt(context.Background(), cfg, 3, 1<<20)
+			if err != nil {
+				t.Fatalf("Adopt must not fail over the timeouts: %v", err)
+			}
+			defer s.Stop()
+
+			calls := kernel.snapshot().timeoutCalls
+			if len(calls) != 1 {
+				t.Fatalf("SetTimeouts calls = %d, want 1", len(calls))
+			}
+			if got := calls[0]; got.index != 3 || got.io != tc.io || got.window != tc.wantWindow {
+				t.Fatalf("SetTimeouts(%d, %v, %v), want (3, %v, %v)", got.index, got.io, got.window, tc.io, tc.wantWindow)
+			}
+			logged := strings.Contains(logs.String(), "could not reinstate the reconnect window")
+			if logged != tc.wantLog {
+				t.Fatalf("warning logged = %v, want %v; logs:\n%s", logged, tc.wantLog, logs.String())
+			}
+		})
+	}
+}
+
+func TestSessionWatched(t *testing.T) {
+	restoreFD := nbdclient.SetSocketFDForTest(func(net.Conn) (int, error) { return 42, nil })
+	defer restoreFD()
+	restoreBackoff := nbdclient.SetBackoffForTest(time.Millisecond, 5*time.Millisecond)
+	defer restoreBackoff()
+
+	for _, tc := range []struct {
+		name       string
+		start      func(nbdclient.Config) (*nbdclient.Session, error)
+		watchFails bool
+		before     bool
+		afterKick  bool
+	}{
+		{
+			name: "attached",
+			start: func(cfg nbdclient.Config) (*nbdclient.Session, error) {
+				return nbdclient.Attach(context.Background(), cfg)
+			},
+			before:    true,
+			afterKick: true,
+		},
+		{
+			name: "adopted until its first reconnect",
+			start: func(cfg nbdclient.Config) (*nbdclient.Session, error) {
+				return nbdclient.Adopt(context.Background(), cfg, 4, 1<<20)
+			},
+			before:    false,
+			afterKick: true,
+		},
+		{
+			name: "socket watch unavailable",
+			start: func(cfg nbdclient.Config) (*nbdclient.Session, error) {
+				return nbdclient.Attach(context.Background(), cfg)
+			},
+			watchFails: true,
+			before:     false,
+			afterKick:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kernel := &fakeKernel{index: 4}
+			cfg := testConfig(t, kernel, memBackend{size: 1 << 20})
+			if tc.watchFails {
+				cfg.WatchSocket = func(int, func()) (func(), error) { return nil, errors.New("no fd to watch") }
+			}
+			s, err := tc.start(cfg)
+			if err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			if got := s.Watched(); got != tc.before {
+				t.Fatalf("Watched before reconnect = %v, want %v", got, tc.before)
+			}
+			if s.Export() != cfg.Export {
+				t.Fatalf("Export = %q, want %q", s.Export(), cfg.Export)
+			}
+			s.Kick()
+			waitFor(t, "reconnect", func() bool { return s.Reconnects() == 1 })
+			if got := s.Watched(); got != tc.afterKick {
+				t.Fatalf("Watched after reconnect = %v, want %v", got, tc.afterKick)
+			}
+			if err := s.Detach(context.Background()); err != nil {
+				t.Fatalf("Detach: %v", err)
+			}
+			if s.Watched() {
+				t.Fatal("a detached session must not report a watch")
+			}
+		})
+	}
 }

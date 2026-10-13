@@ -110,6 +110,16 @@ The library covers the **core** opcodes. Deferred:
   graceful node shutdown with silod at `system-node-critical` priority (see
   [operations.md](operations.md#rolling-upgrades)). Those are deployment
   settings silo cannot impose on its own.
+- **A node plugin replaced while silod is down leaves its devices
+  unsupervised until the new plugin adopts them.** The kernel keeps the
+  devices and queues their I/O for the reconnect window, and the new plugin
+  reconnects them as soon as it starts, but nothing can reconnect them in
+  between: the old process is gone and the new one is still being scheduled
+  or pulled. If that gap plus the time silod was already away exceeds the
+  window, the kernel fails the queued I/O and the filesystem goes read-only.
+  Rolling silod and the plugin separately avoids it in practice. A plugin
+  that waits for its reconnecting devices to heal before it exits (bounded by
+  the pod's termination grace period) would narrow the gap further.
 - **`siloctl volume attach` for bare-metal hosts.** The CSI node plugin's
   supervised attach (reconnects across silod restarts) lives in
   `internal/nbdclient`. A manual `nbd-client` attach gets none of that: its

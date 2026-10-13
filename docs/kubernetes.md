@@ -285,6 +285,12 @@ kubectl -n silo-system logs -l app.kubernetes.io/component=node -c silo-csi
   Talos, add `nbd` to `machine.kernel.modules`).
 - `mkfs`/`mount` errors → the image is missing block tooling. Use the provided
   `Dockerfile.csi` (it bundles e2fsprogs/xfsprogs/util-linux).
+- `the kernel already failed I/O on this volume` (error level) → the volume's
+  connection to silod stayed down longer than the reconnect window before the
+  plugin could reconnect it, usually because the plugin was replaced while
+  silod was away. The attachment is healed, but a filesystem on the device
+  may have gone read-only: restart the pod that uses it. See
+  [Troubleshooting](operations.md#troubleshooting) in the operations guide.
 
 **PVC stuck `Pending`.** Look at the controller:
 

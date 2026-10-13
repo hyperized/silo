@@ -5,6 +5,7 @@ package nbdnl
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -58,8 +59,10 @@ func netlinkSocket() (*os.File, uint32, error) {
 // Conn is a session with the kernel's NBD generic-netlink family. Methods are
 // safe for concurrent use; each command is one request/ack round-trip.
 type Conn struct {
-	mu     sync.Mutex
-	f      *os.File
+	mu sync.Mutex
+	// f is the netlink socket; an interface so tests can script the kernel's
+	// side of a round-trip.
+	f      io.ReadWriteCloser
 	pid    uint32
 	seq    uint32
 	family familyInfo
@@ -185,6 +188,19 @@ func (c *Conn) Reconfigure(index uint32, socketFD int, ioTimeout, deadConnTimeou
 	return nil
 }
 
+// SetTimeouts replaces a configured device's request timeout and
+// dead-connection timeout without touching its connection. The kernel keeps
+// these per device, so they outlive the process that set them.
+func (c *Conn) SetTimeouts(index uint32, ioTimeout, deadConnTimeout time.Duration) error {
+	_, err := c.roundTrip(func(seq uint32) []byte {
+		return reconfigureRequest(c.family.id, seq, c.pid, index, -1, ioTimeout, deadConnTimeout)
+	}, false)
+	if err != nil {
+		return fmt.Errorf("nbdnl: could not set device %d's timeouts (%w); check that the device is still attached and the node plugin runs privileged", index, err)
+	}
+	return nil
+}
+
 // Disconnect tears down the device's connection and configuration.
 func (c *Conn) Disconnect(index uint32) error {
 	_, err := c.roundTrip(func(seq uint32) []byte {
@@ -210,7 +226,7 @@ func (c *Conn) Connected(index uint32) (bool, error) {
 // Watcher delivers the kernel's dead-link notifications: the index of each
 // NBD device whose connection just died. One watcher serves a whole process.
 type Watcher struct {
-	f      *os.File
+	f      io.ReadCloser
 	family familyInfo
 }
 
@@ -244,11 +260,18 @@ func (c *Conn) Watch() (*Watcher, error) {
 }
 
 // Next blocks until a device's connection dies and returns its index. It
-// returns an error once the watcher is closed.
+// returns ErrNotificationsDropped when the socket's receive buffer overflowed
+// and notifications were lost; the watcher keeps working after that. Any
+// other error means the watch has ended, for example because it was closed.
 func (w *Watcher) Next() (uint32, error) {
 	buf := make([]byte, receiveBufSize)
 	for {
 		n, err := w.f.Read(buf)
+		if errors.Is(err, unix.ENOBUFS) {
+			// The kernel reports the overflow once on the next read and
+			// clears it; the socket itself is still subscribed.
+			return 0, ErrNotificationsDropped
+		}
 		if err != nil {
 			return 0, fmt.Errorf("nbdnl: the dead-link watch ended (%w)", err)
 		}
