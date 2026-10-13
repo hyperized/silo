@@ -102,8 +102,9 @@ The library covers the **core** opcodes. Deferred:
   particular order, orphaning any write still in flight. The node plugin now
   sets the kernel's per-request timeout (`SILO_CSI_NBD_REQUEST_TIMEOUT`,
   default `2m`), which bounds the damage: the orphaned write fails, the
-  unmount proceeds, and the reboot completes. Verified on a real node: about
-  6 minutes end to end with no data loss past the last fsync, where the same
+  unmount proceeds, and the reboot completes, about a minute after the
+  reconnect window runs out. Verified on a real node with a 5-minute window:
+  just over 6 minutes end to end with no data loss past the last fsync, where the same
   reboot without the timeout hung for more than 20 minutes and needed a BMC
   power cut. What remains open is making the teardown orderly, with zero I/O
   errors instead of a bounded few: drain before maintenance, or kubelet

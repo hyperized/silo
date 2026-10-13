@@ -639,7 +639,7 @@ silod first answers the block requests it has already accepted, so an
 acknowledged write is always durable.
 
 The pause is bounded by `SILO_CSI_NBD_RECONNECT_TIMEOUT` on the node plugin
-(default `5m`, `silod.nbdReconnectTimeout` in the Helm chart). If silod stays
+(default `15m`, `silod.nbdReconnectTimeout` in the Helm chart). If silod stays
 away longer than that, the volume's I/O fails and the pod sees errors. Keep
 the window above your worst-case restart time. Volumes attached manually with
 `nbd-client` do **not** reconnect; see
@@ -663,10 +663,12 @@ A whole-node shutdown stops the workload pods, silod, and the node plugin in
 no particular order. A write that is still in flight when silod dies has no
 server to go to, and no supervisor is left to reconnect it. The request
 timeout (`SILO_CSI_NBD_REQUEST_TIMEOUT`, default `2m`,
-`silod.nbdRequestTimeout` in the chart) bounds this case: the kernel fails
-the orphaned write, the unmount proceeds, and the reboot completes. Verified
-on Talos: about 6 minutes end to end, no data loss up to the last fsync, and
-the volume re-attaches after boot.
+`silod.nbdRequestTimeout` in the chart) bounds a write that was already
+sent, and the reconnect window bounds one issued after silod died: the kernel
+fails the orphaned write, the unmount proceeds, and the reboot completes.
+Expect the reboot to take about a minute longer than the reconnect window.
+Verified on Talos with a 5-minute window: just over 6 minutes end to end, no
+data loss up to the last fsync, and the volume re-attaches after boot.
 
 **Never set the request timeout to 0 on Kubernetes nodes.** Without it the
 kernel requeues the orphaned write forever and the shutdown hangs until
@@ -915,7 +917,7 @@ automatically on the new attach.
 
 **A pod's volume turned read-only after an outage or a rollout.** If a
 volume's connection stays down for longer than the reconnect window
-(`SILO_CSI_NBD_RECONNECT_TIMEOUT`, default `5m`), the kernel fails the
+(`SILO_CSI_NBD_RECONNECT_TIMEOUT`, default `15m`), the kernel fails the
 volume's queued I/O and ext4 remounts read-only to protect itself. The
 attachment heals automatically once silod is back; only the filesystem needs
 a fresh mount. Restart the pod. The remount replays the journal, and

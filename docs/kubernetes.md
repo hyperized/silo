@@ -130,7 +130,7 @@ kubectl get csinodes -o wide             # the driver should be listed per node
 | `image.repository` / `image.tag` | `ghcr.io/hyperized/silo-csi` / chart appVersion | Point at your registry |
 | `silod.address` | `silo:7000` | silod gRPC `Service` the controller dials |
 | `silod.nbdAddress` | `127.0.0.1:10809` | node-local silod NBD endpoint |
-| `silod.nbdReconnectTimeout` | `5m` | how long a volume's I/O waits for silod to come back (a rolling restart) before erroring |
+| `silod.nbdReconnectTimeout` | `15m` | how long a volume's I/O waits for silod to come back (a rolling restart) before erroring |
 | `silod.nbdRequestTimeout` | `2m` | bound on a single block request; turns a hung connection into a quick reconnect. Keep it set |
 | `silod.tls.secretName` | `""` | Secret with `ca.crt`/`client.crt`/`client.key` for mTLS to silod |
 | `node.hostNetwork` | `true` | lets the node plugin reach node-local silod and host nbd devices |

@@ -39,9 +39,11 @@ const (
 // Defaults for Config fields left zero.
 const (
 	// DefaultReconnectWindow is how long the kernel holds a volume's I/O
-	// while silod is away before failing it — long enough to cover a rolling
-	// restart including an image pull.
-	DefaultReconnectWindow = 5 * time.Minute
+	// while silod is away before failing it. A failed write turns the
+	// filesystem read-only and costs a pod restart, whereas a paused write
+	// just waits, so the window is sized well past a rolling restart with an
+	// image pull plus a node plugin replacement in the middle of it.
+	DefaultReconnectWindow = 15 * time.Minute
 	// defaultDialTimeout bounds one dial+handshake attempt.
 	defaultDialTimeout = 15 * time.Second
 )
