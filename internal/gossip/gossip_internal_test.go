@@ -1757,3 +1757,44 @@ func TestSubsystem_Metrics(t *testing.T) {
 		t.Errorf("last_sync_age_seconds = %v (found %v), want ~5", age, found)
 	}
 }
+
+// TestShutdownBeforeStart_StartReturnsNil covers silod cancelling before the
+// gossip goroutines exist: Start must notice the stop, release the port and
+// return cleanly instead of launching loops nobody will wait for.
+func TestShutdownBeforeStart_StartReturnsNil(t *testing.T) {
+	s := newTestSubsystem(t, "self", "127.0.0.1:0", nil, discardLogger())
+	if err := s.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start after Shutdown: %v", err)
+	}
+	if s.Addr() != "" {
+		t.Errorf("Addr = %q after Start-after-Shutdown, want empty", s.Addr())
+	}
+}
+
+// TestStartShutdown_Overlap is the race-detector regression for Start and
+// Shutdown running at the same moment, which is what an immediate signal at
+// boot produces. It only fails under -race.
+func TestStartShutdown_Overlap(t *testing.T) {
+	for i := 0; i < 25; i++ {
+		s := newTestSubsystem(t, "self", "127.0.0.1:0", nil, discardLogger())
+		done := make(chan error, 1)
+		go func() { done <- s.Start() }()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := s.Shutdown(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("iteration %d: Shutdown: %v", i, err)
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("iteration %d: Start: %v", i, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: Start did not return after Shutdown", i)
+		}
+	}
+}
