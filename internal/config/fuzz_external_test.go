@@ -14,11 +14,19 @@ import (
 func FuzzConfigLoad(f *testing.F) {
 	f.Add("0.0.0.0:7000", "3", "30s", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	f.Add("", "", "", "")
+	f.Add("https://minio.example.com:9000", "0", "30s", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	f.Add("https://user:pw@host/?q=1#f", "-1", "soon", "")
 	f.Add("::bad::", "-1", "soon", "!!not-base64")
 
 	f.Fuzz(func(_ *testing.T, addr, repl, dur, key string) {
 		env := func(k string) string {
 			switch k {
+			case "SILO_BACKUP_TARGET":
+				return "s3://fuzz-bucket/prefix"
+			case "SILO_BACKUP_S3_ENDPOINT":
+				return addr
+			case "SILO_BACKUP_RETAIN":
+				return repl
 			case "SILO_NODE_ID":
 				return "fuzz-node"
 			case "SILO_GRPC_ADDR":

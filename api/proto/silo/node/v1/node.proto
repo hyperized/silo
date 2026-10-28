@@ -4,6 +4,8 @@ package silo.node.v1;
 
 option go_package = "github.com/hyperized/silo/api/proto/silo/node/v1;nodev1";
 
+import "silo/status/v1/status.proto";
+
 // NodeAdmin is silod's operator-facing node-lifecycle surface. Unlike the
 // read-only ClusterStatus service, these RPCs mutate the node, so they are kept
 // separate.
@@ -14,6 +16,11 @@ service NodeAdmin {
   // it is removed — drain is not shutdown. Watch silo_replication_shortfall_chunks
   // fall to zero before removing the node.
   rpc Drain(DrainRequest) returns (DrainResponse);
+  // RunBackup starts a backup on the receiving node now and waits for it to
+  // finish. It fails with FAILED_PRECONDITION when backups are not configured
+  // on the node or a run is already in progress. A run the caller stops
+  // waiting for keeps going on the node; `siloctl status` shows its outcome.
+  rpc RunBackup(RunBackupRequest) returns (RunBackupResponse);
 }
 
 message DrainRequest {}
@@ -24,4 +31,13 @@ message DrainResponse {
   // announced is true when this call transitioned the node to Left; false when
   // it was already draining (the call is idempotent).
   bool announced = 2;
+}
+
+message RunBackupRequest {}
+
+message RunBackupResponse {
+  // node_id is the id of the node that ran the backup.
+  string node_id = 1;
+  // run is the outcome of the backup this call started.
+  silo.status.v1.BackupRun run = 2;
 }

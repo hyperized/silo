@@ -32,6 +32,7 @@ type StatusService struct {
 	nodeID    string
 	version   string
 	diskUsage func(path string) (diskusage.Usage, error)
+	backup    BackupReporter
 	logger    *slog.Logger
 }
 
@@ -102,6 +103,7 @@ func (s *StatusService) GetStatus(ctx context.Context, _ *statusv1.GetStatusRequ
 		Version:          s.version,
 		Nodes:            nodes,
 		Storage:          storage,
+		Backup:           backupStatusProto(s.backup),
 	}, nil
 }
 

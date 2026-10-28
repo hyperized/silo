@@ -41,7 +41,7 @@ const (
 	CapNamespaceWrite Capability = "namespace:write"
 	// CapStatusRead permits reading cluster status.
 	CapStatusRead Capability = "status:read"
-	// CapNodeAdmin permits node lifecycle operations (drain).
+	// CapNodeAdmin permits node lifecycle operations (drain, run a backup).
 	CapNodeAdmin Capability = "node:admin"
 	// CapAll is a wildcard authorising every capability — for operator/admin
 	// tokens. Use sparingly; the point of tokens is least privilege.

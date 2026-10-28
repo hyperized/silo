@@ -7,6 +7,7 @@
 package nodev1
 
 import (
+	v1 "github.com/hyperized/silo/api/proto/silo/status/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -112,17 +113,112 @@ func (x *DrainResponse) GetAnnounced() bool {
 	return false
 }
 
+type RunBackupRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunBackupRequest) Reset() {
+	*x = RunBackupRequest{}
+	mi := &file_silo_node_v1_node_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunBackupRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunBackupRequest) ProtoMessage() {}
+
+func (x *RunBackupRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_silo_node_v1_node_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunBackupRequest.ProtoReflect.Descriptor instead.
+func (*RunBackupRequest) Descriptor() ([]byte, []int) {
+	return file_silo_node_v1_node_proto_rawDescGZIP(), []int{2}
+}
+
+type RunBackupResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// node_id is the id of the node that ran the backup.
+	NodeId string `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	// run is the outcome of the backup this call started.
+	Run           *v1.BackupRun `protobuf:"bytes,2,opt,name=run,proto3" json:"run,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunBackupResponse) Reset() {
+	*x = RunBackupResponse{}
+	mi := &file_silo_node_v1_node_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunBackupResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunBackupResponse) ProtoMessage() {}
+
+func (x *RunBackupResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_silo_node_v1_node_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunBackupResponse.ProtoReflect.Descriptor instead.
+func (*RunBackupResponse) Descriptor() ([]byte, []int) {
+	return file_silo_node_v1_node_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RunBackupResponse) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *RunBackupResponse) GetRun() *v1.BackupRun {
+	if x != nil {
+		return x.Run
+	}
+	return nil
+}
+
 var File_silo_node_v1_node_proto protoreflect.FileDescriptor
 
 const file_silo_node_v1_node_proto_rawDesc = "" +
 	"\n" +
-	"\x17silo/node/v1/node.proto\x12\fsilo.node.v1\"\x0e\n" +
+	"\x17silo/node/v1/node.proto\x12\fsilo.node.v1\x1a\x1bsilo/status/v1/status.proto\"\x0e\n" +
 	"\fDrainRequest\"F\n" +
 	"\rDrainResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1c\n" +
-	"\tannounced\x18\x02 \x01(\bR\tannounced2M\n" +
+	"\tannounced\x18\x02 \x01(\bR\tannounced\"\x12\n" +
+	"\x10RunBackupRequest\"Y\n" +
+	"\x11RunBackupResponse\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12+\n" +
+	"\x03run\x18\x02 \x01(\v2\x19.silo.status.v1.BackupRunR\x03run2\x9b\x01\n" +
 	"\tNodeAdmin\x12@\n" +
-	"\x05Drain\x12\x1a.silo.node.v1.DrainRequest\x1a\x1b.silo.node.v1.DrainResponseB9Z7github.com/hyperized/silo/api/proto/silo/node/v1;nodev1b\x06proto3"
+	"\x05Drain\x12\x1a.silo.node.v1.DrainRequest\x1a\x1b.silo.node.v1.DrainResponse\x12L\n" +
+	"\tRunBackup\x12\x1e.silo.node.v1.RunBackupRequest\x1a\x1f.silo.node.v1.RunBackupResponseB9Z7github.com/hyperized/silo/api/proto/silo/node/v1;nodev1b\x06proto3"
 
 var (
 	file_silo_node_v1_node_proto_rawDescOnce sync.Once
@@ -136,19 +232,25 @@ func file_silo_node_v1_node_proto_rawDescGZIP() []byte {
 	return file_silo_node_v1_node_proto_rawDescData
 }
 
-var file_silo_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_silo_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_silo_node_v1_node_proto_goTypes = []any{
-	(*DrainRequest)(nil),  // 0: silo.node.v1.DrainRequest
-	(*DrainResponse)(nil), // 1: silo.node.v1.DrainResponse
+	(*DrainRequest)(nil),      // 0: silo.node.v1.DrainRequest
+	(*DrainResponse)(nil),     // 1: silo.node.v1.DrainResponse
+	(*RunBackupRequest)(nil),  // 2: silo.node.v1.RunBackupRequest
+	(*RunBackupResponse)(nil), // 3: silo.node.v1.RunBackupResponse
+	(*v1.BackupRun)(nil),      // 4: silo.status.v1.BackupRun
 }
 var file_silo_node_v1_node_proto_depIdxs = []int32{
-	0, // 0: silo.node.v1.NodeAdmin.Drain:input_type -> silo.node.v1.DrainRequest
-	1, // 1: silo.node.v1.NodeAdmin.Drain:output_type -> silo.node.v1.DrainResponse
-	1, // [1:2] is the sub-list for method output_type
-	0, // [0:1] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	4, // 0: silo.node.v1.RunBackupResponse.run:type_name -> silo.status.v1.BackupRun
+	0, // 1: silo.node.v1.NodeAdmin.Drain:input_type -> silo.node.v1.DrainRequest
+	2, // 2: silo.node.v1.NodeAdmin.RunBackup:input_type -> silo.node.v1.RunBackupRequest
+	1, // 3: silo.node.v1.NodeAdmin.Drain:output_type -> silo.node.v1.DrainResponse
+	3, // 4: silo.node.v1.NodeAdmin.RunBackup:output_type -> silo.node.v1.RunBackupResponse
+	3, // [3:5] is the sub-list for method output_type
+	1, // [1:3] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_silo_node_v1_node_proto_init() }
@@ -162,7 +264,7 @@ func file_silo_node_v1_node_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_silo_node_v1_node_proto_rawDesc), len(file_silo_node_v1_node_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 
 	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
+	"github.com/hyperized/silo/internal/backup"
 	"github.com/hyperized/silo/internal/diskusage"
 	"github.com/hyperized/silo/internal/membership"
 )
@@ -111,5 +112,66 @@ func TestProtoNodeState(t *testing.T) {
 		if got := protoNodeState(in); got != want {
 			t.Errorf("protoNodeState(%v) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+type fakeBackupReporter struct{ st backup.Status }
+
+func (f fakeBackupReporter) Status() backup.Status { return f.st }
+
+func TestStatusService_GetStatus_Backup(t *testing.T) {
+	started := time.Unix(1_700_000_000, 0)
+	next := time.Unix(1_700_021_600, 0)
+	run := &backup.Run{
+		StartedAt: started, FinishedAt: started.Add(time.Minute), OK: false, Error: "target unreachable",
+		ChunksUploaded: 5, ChunksSkipped: 3, BytesUploaded: 8192, Manifest: "silo-a/manifest.json",
+	}
+	cases := []struct {
+		name     string
+		reporter BackupReporter
+		check    func(t *testing.T, b *statusv1.BackupStatus)
+	}{
+		{"no reporter means not configured", nil, func(t *testing.T, b *statusv1.BackupStatus) {
+			if b == nil || b.GetConfigured() || b.GetTarget() != "" || b.GetLastRun() != nil || b.GetNextRunUnix() != 0 {
+				t.Errorf("backup = %+v, want zero value with configured=false", b)
+			}
+		}},
+		{"configured, never ran, nothing scheduled", fakeBackupReporter{backup.Status{
+			Configured: true, Target: "s3://bucket/p", Interval: 6 * time.Hour,
+		}}, func(t *testing.T, b *statusv1.BackupStatus) {
+			if !b.GetConfigured() || b.GetTarget() != "s3://bucket/p" || b.GetIntervalSeconds() != 21600 || b.GetRunning() {
+				t.Errorf("backup = %+v", b)
+			}
+			if b.GetNextRunUnix() != 0 || b.GetLastRun() != nil {
+				t.Errorf("next=%d last=%v, want 0 and nil", b.GetNextRunUnix(), b.GetLastRun())
+			}
+		}},
+		{"running with schedule and last run", fakeBackupReporter{backup.Status{
+			Configured: true, Target: "gs://b", Interval: time.Hour, Running: true, NextRun: next, LastRun: run,
+		}}, func(t *testing.T, b *statusv1.BackupStatus) {
+			if !b.GetRunning() || b.GetIntervalSeconds() != 3600 || b.GetNextRunUnix() != next.Unix() {
+				t.Errorf("backup = %+v", b)
+			}
+			r := b.GetLastRun()
+			if r.GetStartedUnix() != started.Unix() || r.GetFinishedUnix() != started.Add(time.Minute).Unix() ||
+				r.GetOk() || r.GetError() != "target unreachable" || r.GetChunksUploaded() != 5 ||
+				r.GetChunksSkipped() != 3 || r.GetBytesUploaded() != 8192 || r.GetManifest() != "silo-a/manifest.json" {
+				t.Errorf("last run = %+v", r)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var opts []StatusOption
+			if tc.reporter != nil {
+				opts = append(opts, WithBackupReporter(tc.reporter))
+			}
+			svc := NewStatusService(fakeStatusMembers{}, fakeStatusStore{}, "/d", "n", "v", discardStatusLogger(), opts...)
+			resp, err := svc.GetStatus(context.Background(), &statusv1.GetStatusRequest{})
+			if err != nil {
+				t.Fatalf("GetStatus: %v", err)
+			}
+			tc.check(t, resp.GetBackup())
+		})
 	}
 }

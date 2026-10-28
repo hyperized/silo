@@ -129,6 +129,17 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoad_BadBackupInterval(t *testing.T) {
+	_, err := Load(envMap(map[string]string{
+		"SILO_NODE_ID":         "n",
+		"SILO_ENCRYPTION_KEY":  validBase64Key(t),
+		"SILO_BACKUP_INTERVAL": "daily",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "SILO_BACKUP_INTERVAL") {
+		t.Fatalf("got %v, want a SILO_BACKUP_INTERVAL parse error", err)
+	}
+}
+
 func TestLoad_BadTombstoneRetention(t *testing.T) {
 	_, err := Load(envMap(map[string]string{
 		"SILO_NODE_ID":             "n",
@@ -337,6 +348,8 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		Replication:         5,
 		MaxConcurrentWrites: 128,
 		ScrubInterval:       5 * time.Second,
+		BackupRetain:        DefaultBackupRetain,
+		BackupRetainFor:     DefaultBackupRetainFor,
 		TombstoneRetention:  12 * time.Hour,
 		MaxClockSkew:        2 * time.Second,
 		KeySource:           KeySourceStatic,
@@ -688,6 +701,16 @@ func TestValidate(t *testing.T) {
 		{"negative replication", func(c *Config) { c.Replication = 0 }, "SILO_REPLICATION"},
 		{"unknown log level", func(c *Config) { c.LogLevel = "loud" }, "SILO_LOG_LEVEL"},
 		{"unknown log format", func(c *Config) { c.LogFormat = "yaml" }, "SILO_LOG_FORMAT"},
+		{"negative backup retain", func(c *Config) { c.BackupRetain = -1 }, "SILO_BACKUP_RETAIN"},
+		{"endpoint without s3 target", func(c *Config) {
+			c.BackupS3Endpoint = "https://minio.example.com"
+			c.BackupTarget = "file:///backups"
+		}, "SILO_BACKUP_TARGET"},
+		{"endpoint without any target", func(c *Config) { c.BackupS3Endpoint = "https://minio.example.com" }, "SILO_BACKUP_S3_ENDPOINT"},
+		{"endpoint with bad scheme", func(c *Config) {
+			c.BackupTarget = "s3://bucket/p"
+			c.BackupS3Endpoint = "ftp://minio.example.com"
+		}, "SILO_BACKUP_S3_ENDPOINT is not usable"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -740,5 +763,150 @@ func TestLoad_ChunkGCCanBeSetToDryRun(t *testing.T) {
 	}
 	if cfg.ChunkGCEnable {
 		t.Error("an explicit SILO_CHUNK_GC_ENABLE=false must give the reporting-only mode")
+	}
+}
+
+func TestLoad_BackupSettings(t *testing.T) {
+	cases := []struct {
+		name       string
+		env        map[string]string
+		wantRetain int
+		wantRegion string
+		wantPath   bool
+		wantErr    string
+	}{
+		{name: "defaults", wantRetain: DefaultBackupRetain},
+		{name: "retain zero keeps everything", env: map[string]string{"SILO_BACKUP_RETAIN": "0"}, wantRetain: 0},
+		{name: "retain override", env: map[string]string{"SILO_BACKUP_RETAIN": "30"}, wantRetain: 30},
+		{name: "retain not a number", env: map[string]string{"SILO_BACKUP_RETAIN": "abc"}, wantErr: "SILO_BACKUP_RETAIN"},
+		{name: "retain negative", env: map[string]string{"SILO_BACKUP_RETAIN": "-1"}, wantErr: "SILO_BACKUP_RETAIN"},
+		{
+			name: "endpoint defaults region and path style",
+			env: map[string]string{
+				"SILO_BACKUP_TARGET":      "s3://bucket/prefix",
+				"SILO_BACKUP_S3_ENDPOINT": "https://minio.example.com:9000",
+			},
+			wantRetain: DefaultBackupRetain, wantRegion: DefaultBackupS3Region, wantPath: true,
+		},
+		{
+			name: "explicit path style off",
+			env: map[string]string{
+				"SILO_BACKUP_TARGET":        "s3://bucket/prefix",
+				"SILO_BACKUP_S3_ENDPOINT":   "http://minio.example.com:9000",
+				"SILO_BACKUP_S3_PATH_STYLE": "false",
+			},
+			wantRetain: DefaultBackupRetain, wantRegion: DefaultBackupS3Region, wantPath: false,
+		},
+		{
+			name: "region override",
+			env: map[string]string{
+				"SILO_BACKUP_TARGET":      "s3://bucket/prefix",
+				"SILO_BACKUP_S3_ENDPOINT": "https://minio.example.com:9000",
+				"SILO_BACKUP_S3_REGION":   "eu-west-1",
+			},
+			wantRetain: DefaultBackupRetain, wantRegion: "eu-west-1", wantPath: true,
+		},
+		{
+			name:       "region without endpoint is kept as given",
+			env:        map[string]string{"SILO_BACKUP_TARGET": "s3://bucket/prefix", "SILO_BACKUP_S3_REGION": "eu-west-1"},
+			wantRetain: DefaultBackupRetain, wantRegion: "eu-west-1",
+		},
+		{
+			name: "endpoint with non-s3 target",
+			env: map[string]string{
+				"SILO_BACKUP_TARGET":      "file:///backups",
+				"SILO_BACKUP_S3_ENDPOINT": "https://minio.example.com",
+			},
+			wantErr: "SILO_BACKUP_TARGET",
+		},
+		{
+			name: "endpoint with password is rejected and not echoed",
+			env: map[string]string{
+				"SILO_BACKUP_TARGET":      "s3://bucket/prefix",
+				"SILO_BACKUP_S3_ENDPOINT": "https://admin:hunter2@minio.example.com",
+			},
+			wantErr: "SILO_BACKUP_S3_ENDPOINT",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{
+				"SILO_NODE_ID":        "n1",
+				"SILO_ENCRYPTION_KEY": validBase64Key(t),
+			}
+			for k, v := range tc.env {
+				env[k] = v
+			}
+			cfg, err := Load(envMap(env))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Load: got %v, want error containing %q", err, tc.wantErr)
+				}
+				for _, secret := range []string{"hunter2", "admin:", "minio.example.com"} {
+					if strings.Contains(err.Error(), secret) {
+						t.Errorf("error echoes %q: %v", secret, err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.BackupRetain != tc.wantRetain {
+				t.Errorf("BackupRetain = %d, want %d", cfg.BackupRetain, tc.wantRetain)
+			}
+			if cfg.BackupS3Region != tc.wantRegion {
+				t.Errorf("BackupS3Region = %q, want %q", cfg.BackupS3Region, tc.wantRegion)
+			}
+			if cfg.BackupS3PathStyle != tc.wantPath {
+				t.Errorf("BackupS3PathStyle = %v, want %v", cfg.BackupS3PathStyle, tc.wantPath)
+			}
+		})
+	}
+}
+
+func TestFileNameConstants(t *testing.T) {
+	if NamespaceFileName != "namespace.json" || ExtentsDirName != "extents" {
+		t.Errorf("on-disk names changed: %q, %q; restore and boot must agree", NamespaceFileName, ExtentsDirName)
+	}
+}
+
+func TestLoad_BackupRetainFor(t *testing.T) {
+	cases := []struct {
+		name    string
+		set     bool
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "unset uses the default", want: DefaultBackupRetainFor},
+		{name: "zero disables the floor", set: true, value: "0", want: 0},
+		{name: "explicit duration", set: true, value: "36h", want: 36 * time.Hour},
+		{name: "negative", set: true, value: "-1h", wantErr: true},
+		{name: "not a duration", set: true, value: "abc", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{
+				"SILO_NODE_ID":        "n",
+				"SILO_ENCRYPTION_KEY": validBase64Key(t),
+			}
+			if tc.set {
+				env["SILO_BACKUP_RETAIN_FOR"] = tc.value
+			}
+			cfg, err := Load(envMap(env))
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "SILO_BACKUP_RETAIN_FOR") {
+					t.Fatalf("got %v, want an error naming SILO_BACKUP_RETAIN_FOR", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.BackupRetainFor != tc.want {
+				t.Errorf("BackupRetainFor = %v, want %v", cfg.BackupRetainFor, tc.want)
+			}
+		})
 	}
 }

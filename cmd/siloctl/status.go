@@ -75,6 +75,51 @@ func printStatus(w io.Writer, resp *statusv1.GetStatusResponse) {
 			humanizeBytes(st.GetUsedBytes()), humanizeBytes(st.GetCapacityBytes()),
 			humanizeBytes(st.GetAvailableBytes()), st.GetChunkCount(), plural(int(st.GetChunkCount())))
 	}
+
+	printBackupStatus(w, resp.GetRespondingNodeId(), resp.GetBackup())
+}
+
+// printBackupStatus renders the responding node's backup schedule and last
+// result.
+func printBackupStatus(w io.Writer, node string, b *statusv1.BackupStatus) {
+	if !b.GetConfigured() {
+		fmt.Fprintf(w, "Backup: not configured on %s (set SILO_BACKUP_TARGET to enable)\n", node)
+		return
+	}
+	fmt.Fprintf(w, "Backup: %s, every %s\n", termSafe(b.GetTarget()), time.Duration(b.GetIntervalSeconds())*time.Second)
+	if b.GetRunning() {
+		fmt.Fprintln(w, "  running now")
+	}
+	switch last := b.GetLastRun(); {
+	case last == nil:
+		fmt.Fprintln(w, "  last run: none yet")
+	case last.GetOk():
+		fmt.Fprintf(w, "  last run: ok %s (%d uploaded, %d already stored)\n", humanizeAge(last.GetFinishedUnix()), last.GetChunksUploaded(), last.GetChunksSkipped())
+	default:
+		fmt.Fprintf(w, "  last run: FAILED %s: %s\n", humanizeAge(last.GetFinishedUnix()), termSafe(last.GetError()))
+	}
+	if b.GetNextRunUnix() == 0 {
+		fmt.Fprintln(w, "  next run: not scheduled")
+		return
+	}
+	fmt.Fprintf(w, "  next run: %s\n", humanizeUntil(b.GetNextRunUnix()))
+}
+
+// humanizeUntil renders an epoch-seconds timestamp as a time from now.
+func humanizeUntil(unix int64) string {
+	d := time.Unix(unix, 0).Sub(statusNow())
+	switch {
+	case d <= 0:
+		return "due now"
+	case d < time.Minute:
+		return fmt.Sprintf("in %ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("in %dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("in %dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("in %dd", int(d.Hours())/24)
+	}
 }
 
 // healthSummary turns the per-state counts into " — 2 alive, 1 suspect", or

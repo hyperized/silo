@@ -150,6 +150,30 @@ func TestAuthorize_ClientMissingScopeDenied(t *testing.T) {
 	}
 }
 
+func TestAuthorize_RunBackupNeedsNodeAdmin(t *testing.T) {
+	const mRunBackup = "/silo.node.v1.NodeAdmin/RunBackup"
+	cases := []struct {
+		name     string
+		caps     []captoken.Capability
+		wantRan  bool
+		wantCode codes.Code
+	}{
+		{"node admin allowed", []captoken.Capability{captoken.CapNodeAdmin}, true, codes.OK},
+		{"chunk read denied", []captoken.Capability{captoken.CapChunkRead}, false, codes.PermissionDenied},
+		{"status read denied", []captoken.Capability{captoken.CapStatusRead}, false, codes.PermissionDenied},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, mint, _ := authFixture(t)
+			ctx := withBearer(peerCtx(certWithURI(mustURL(t, clientURI))), mint("ops", tc.caps...))
+			ran, err := unaryRan(ctx, mRunBackup, a)
+			if ran != tc.wantRan || codeOf(err) != tc.wantCode {
+				t.Errorf("ran=%v code=%v err=%v, want ran=%v code=%v", ran, codeOf(err), err, tc.wantRan, tc.wantCode)
+			}
+		})
+	}
+}
+
 func TestAuthorize_UnknownMethodDenied(t *testing.T) {
 	a, mint, _ := authFixture(t)
 	ctx := withBearer(peerCtx(certWithURI(mustURL(t, clientURI))), mint("csi", captoken.CapAll))

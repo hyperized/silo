@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hyperized/silo/internal/blobstore"
 	"github.com/hyperized/silo/internal/diskpressure"
 )
 
@@ -73,6 +74,13 @@ const (
 	DefaultKeySource           = KeySourceStatic
 	DefaultLogLevel            = "info"
 	DefaultLogFormat           = "text"
+	// DefaultBackupRetain keeps a week of backups at one run per day, or a
+	// little under two days at the default 6h interval.
+	DefaultBackupRetain = 7
+	// DefaultBackupS3Region is used with a custom S3 endpoint when no region
+	// is set. Most S3-compatible services accept any region and expect this
+	// one.
+	DefaultBackupS3Region = "us-east-1"
 )
 
 // DefaultTombstoneRetention is how long deleted-entry tombstones are kept
@@ -80,10 +88,24 @@ const (
 // was partitioned for hours — before its tombstone is reclaimed.
 const DefaultTombstoneRetention = 24 * time.Hour
 
+// DefaultBackupRetainFor keeps a week of backups however many runs happen in
+// that week, so a burst of manual runs cannot push every good restore point
+// out of a count-only retention.
+const DefaultBackupRetainFor = 7 * 24 * time.Hour
+
 // DefaultMaxClockSkew is how far ahead a peer's clock may run before silod
 // warns. 500ms comfortably absorbs gossip and processing delay while still
 // catching a genuinely misconfigured clock (seconds to hours off).
 const DefaultMaxClockSkew = 500 * time.Millisecond
+
+// Files silod keeps directly under SILO_DATA_DIR. They are named here so the
+// offline restore in siloctl writes exactly what silod reads at boot.
+const (
+	// NamespaceFileName is the persisted namespace replica.
+	NamespaceFileName = "namespace.json"
+	// ExtentsDirName holds the per-volume extent maps.
+	ExtentsDirName = "extents"
+)
 
 // Config is silod's fully-resolved runtime configuration. Load builds it
 // from the environment and Validate must pass before it is used.
@@ -119,6 +141,20 @@ type Config struct {
 	// gs://, az://). BackupInterval (SILO_BACKUP_INTERVAL) paces them.
 	BackupTarget   string
 	BackupInterval time.Duration
+	// BackupRetain (SILO_BACKUP_RETAIN) is how many backups per node retention
+	// keeps; 0 switches pruning off.
+	BackupRetain int
+	// BackupRetainFor (SILO_BACKUP_RETAIN_FOR) protects every backup younger
+	// than this from pruning, whatever BackupRetain says; 0 disables it.
+	BackupRetainFor time.Duration
+	// BackupS3Endpoint (SILO_BACKUP_S3_ENDPOINT) points an s3:// target at an
+	// S3-compatible service. BackupS3Region (SILO_BACKUP_S3_REGION) and
+	// BackupS3PathStyle (SILO_BACKUP_S3_PATH_STYLE) default to us-east-1 and
+	// true when an endpoint is set, because that is what self-hosted services
+	// expect. Credentials always come from the AWS credential chain.
+	BackupS3Endpoint  string
+	BackupS3Region    string
+	BackupS3PathStyle bool
 	// TombstoneRetention is how long a deleted namespace entry's tombstone
 	// is kept before GC reclaims it — long enough to propagate to every
 	// replica. Set SILO_TOMBSTONE_RETENTION to override the 24h default.
@@ -284,6 +320,8 @@ func Load(env EnvFunc) (*Config, error) {
 		KeySource:           KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),
 		KeyPath:             env("SILO_ENCRYPTION_KEY_PATH"),
 		BackupTarget:        env("SILO_BACKUP_TARGET"),
+		BackupS3Endpoint:    env("SILO_BACKUP_S3_ENDPOINT"),
+		BackupS3Region:      env("SILO_BACKUP_S3_REGION"),
 		KMSKeyID:            env("SILO_KMS_KEY_ID"),
 		KMSVaultURL:         env("SILO_KMS_VAULT_URL"),
 		KMSKeyName:          env("SILO_KMS_KEY_NAME"),
@@ -348,6 +386,26 @@ func Load(env EnvFunc) (*Config, error) {
 		return nil, err
 	}
 	cfg.BackupInterval = backupInterval
+
+	backupRetain, err := envInt(env, "SILO_BACKUP_RETAIN", DefaultBackupRetain)
+	if err != nil {
+		return nil, err
+	}
+	cfg.BackupRetain = backupRetain
+	cfg.BackupRetainFor = DefaultBackupRetainFor
+	if env("SILO_BACKUP_RETAIN_FOR") != "" {
+		// Unlike most durations here, an explicit 0 is meaningful (no
+		// floor), so the unset case is told apart before parsing.
+		retainFor, err := envDuration(env, "SILO_BACKUP_RETAIN_FOR")
+		if err != nil {
+			return nil, err
+		}
+		cfg.BackupRetainFor = retainFor
+	}
+	cfg.BackupS3PathStyle = envBoolDefault(env, "SILO_BACKUP_S3_PATH_STYLE", cfg.BackupS3Endpoint != "")
+	if cfg.BackupS3Endpoint != "" && cfg.BackupS3Region == "" {
+		cfg.BackupS3Region = DefaultBackupS3Region
+	}
 
 	retention, err := envDuration(env, "SILO_TOMBSTONE_RETENTION")
 	if err != nil {
@@ -489,6 +547,9 @@ func (c *Config) Validate() error {
 	if c.Replication < 1 {
 		return fmt.Errorf("SILO_REPLICATION must be at least 1 (got %d); use 3 for production, 2 for two-node test setups, 1 for single-node-only", c.Replication)
 	}
+	if err := c.validateBackup(); err != nil {
+		return err
+	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
@@ -498,6 +559,24 @@ func (c *Config) Validate() error {
 	case "text", "json":
 	default:
 		return fmt.Errorf("SILO_LOG_FORMAT %q is not recognised; set it to text (human-readable) or json (machine-readable)", c.LogFormat)
+	}
+	return nil
+}
+
+// validateBackup checks the SILO_BACKUP_* settings that can be judged without
+// contacting the target.
+func (c *Config) validateBackup() error {
+	if c.BackupRetain < 0 {
+		return fmt.Errorf("SILO_BACKUP_RETAIN must be 0 or more (got %d); it is how many backups per node to keep, 7 by default, and 0 keeps everything", c.BackupRetain)
+	}
+	if c.BackupS3Endpoint == "" {
+		return nil
+	}
+	if !strings.HasPrefix(c.BackupTarget, "s3://") {
+		return errors.New("SILO_BACKUP_S3_ENDPOINT is set but SILO_BACKUP_TARGET is not an s3:// URL; set SILO_BACKUP_TARGET=s3://bucket/prefix, or unset SILO_BACKUP_S3_ENDPOINT")
+	}
+	if err := blobstore.ValidateS3Endpoint(c.BackupS3Endpoint); err != nil {
+		return fmt.Errorf("SILO_BACKUP_S3_ENDPOINT is not usable: %w", err)
 	}
 	return nil
 }

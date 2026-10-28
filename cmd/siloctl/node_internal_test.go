@@ -74,13 +74,13 @@ func TestNodeDrain_DialError(t *testing.T) {
 
 // errNodeAdminClient and alreadyDrainingClient exercise the RPC-error and
 // already-draining branches without a live server.
-type errNodeAdminClient struct{}
+type errNodeAdminClient struct{ nodev1.NodeAdminClient }
 
 func (errNodeAdminClient) Drain(context.Context, *nodev1.DrainRequest, ...grpc.CallOption) (*nodev1.DrainResponse, error) {
 	return nil, status.Error(codes.Unavailable, "silod is down")
 }
 
-type alreadyDrainingClient struct{}
+type alreadyDrainingClient struct{ nodev1.NodeAdminClient }
 
 func (alreadyDrainingClient) Drain(context.Context, *nodev1.DrainRequest, ...grpc.CallOption) (*nodev1.DrainResponse, error) {
 	return &nodev1.DrainResponse{NodeId: "silo-a", Announced: false}, nil

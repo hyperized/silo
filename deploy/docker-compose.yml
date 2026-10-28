@@ -46,6 +46,12 @@ x-silod: &silod
     SILO_CHUNK_GC_INTERVAL: ${SILO_CHUNK_GC_INTERVAL:-5s}
     SILO_CHUNK_GC_GRACE: ${SILO_CHUNK_GC_GRACE:-10s}
     SILO_CHUNK_GC_ENABLE: ${SILO_CHUNK_GC_ENABLE:-true}
+    # Back up to the local S3 server. Credentials reach the AWS SDK default chain.
+    SILO_BACKUP_TARGET: s3://silo-backups/cluster
+    SILO_BACKUP_S3_ENDPOINT: http://s3:9000
+    SILO_BACKUP_INTERVAL: ${SILO_BACKUP_INTERVAL:-1h}
+    AWS_ACCESS_KEY_ID: "${SILO_S3_ACCESS_KEY:?run 'make down' then 'make up' to regenerate deploy/.env with the backup storage credentials}"
+    AWS_SECRET_ACCESS_KEY: "${SILO_S3_SECRET_KEY:?run 'make down' then 'make up' to regenerate deploy/.env with the backup storage credentials}"
   healthcheck:
     test: ["CMD", "wget", "-qO-", "http://localhost:7080/healthz"]
     interval: 5s
@@ -102,6 +108,9 @@ services:
       - "7001:7001" # Bootstrap join API — point siloctl auth init here
       - "${SILO_GRPC_HOST_PORT:-7900}:7000" # mTLS gRPC — siloctl chunk … goes here after auth init
       - "${SILO_NBD_HOST_PORT:-10809}:10809" # NBD — a Linux host can nbd-client this directly
+    depends_on:
+      s3-init:
+        condition: service_completed_successfully
 
   silo-b:
     <<: *silod
@@ -121,6 +130,8 @@ services:
       # a second node directly and watch namespace mutations converge.
       - "7901:7000"
     depends_on:
+      s3-init:
+        condition: service_completed_successfully
       silo-a:
         condition: service_healthy
 
@@ -139,6 +150,8 @@ services:
     ports:
       - "7082:7080"
     depends_on:
+      s3-init:
+        condition: service_completed_successfully
       silo-a:
         condition: service_healthy
 
@@ -163,6 +176,55 @@ services:
       - silo
     depends_on:
       silo-a:
+        condition: service_healthy
+
+  # S3-compatible object storage that silod backs up to. The image name is the
+  # only RustFS-specific line: any S3 server that serves the API on port 9000
+  # can replace it. Pinned by tag and digest so a re-pushed
+  # tag cannot change what runs.
+  s3:
+    image: rustfs/rustfs:1.0.4@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: "${SILO_S3_ACCESS_KEY:?run 'make down' then 'make up' to regenerate deploy/.env with the backup storage credentials}"
+      RUSTFS_SECRET_KEY: "${SILO_S3_SECRET_KEY:?run 'make down' then 'make up' to regenerate deploy/.env with the backup storage credentials}"
+    volumes:
+      - s3-data:/data
+    ports:
+      - "127.0.0.1:${SILO_S3_PORT:-9000}:9000" # S3 API, for `siloctl backup list`
+      - "127.0.0.1:${SILO_S3_CONSOLE_PORT:-9001}:9001" # web console at /rustfs/console/
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/health"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    networks:
+      - silo
+
+  # s3-init creates the backup bucket and exits. It is idempotent so a restart
+  # of the stack does not fail on an existing bucket.
+  s3-init:
+    image: amazon/aws-cli:2.39.0@sha256:6014c77975a4ae237395924cc821333f20bf87c91964a45dd4ed5f3b13b424f5
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for _ in $$(seq 1 30); do
+          out=$$(aws --endpoint-url http://s3:9000 s3api create-bucket --bucket silo-backups 2>&1) && exit 0
+          case "$$out" in *BucketAlreadyOwnedByYou*|*BucketAlreadyExists*) exit 0;; esac
+          sleep 2
+        done
+        echo "could not create the silo-backups bucket: $$out" >&2
+        exit 1
+    environment:
+      AWS_ACCESS_KEY_ID: "${SILO_S3_ACCESS_KEY:?run 'make down' then 'make up' to regenerate deploy/.env with the backup storage credentials}"
+      AWS_SECRET_ACCESS_KEY: "${SILO_S3_SECRET_KEY:?run 'make down' then 'make up' to regenerate deploy/.env with the backup storage credentials}"
+      AWS_DEFAULT_REGION: us-east-1
+    networks:
+      - silo
+    depends_on:
+      s3:
         condition: service_healthy
 
   prometheus:
@@ -209,6 +271,7 @@ volumes:
   # node. node silo-a creates it on first boot (self-mint); silo-b and
   # silo-c wait for the seed via depends_on and then load it from disk.
   silo-ca:
+  s3-data:
   prometheus-data:
   grafana-data:
 

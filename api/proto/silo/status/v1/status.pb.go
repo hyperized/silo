@@ -301,6 +301,7 @@ type GetStatusResponse struct {
 	Version          string                 `protobuf:"bytes,2,opt,name=version,proto3" json:"version,omitempty"`
 	Nodes            []*NodeStatus          `protobuf:"bytes,3,rep,name=nodes,proto3" json:"nodes,omitempty"`
 	Storage          *StorageStatus         `protobuf:"bytes,4,opt,name=storage,proto3" json:"storage,omitempty"`
+	Backup           *BackupStatus          `protobuf:"bytes,5,opt,name=backup,proto3" json:"backup,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
 }
@@ -363,6 +364,205 @@ func (x *GetStatusResponse) GetStorage() *StorageStatus {
 	return nil
 }
 
+func (x *GetStatusResponse) GetBackup() *BackupStatus {
+	if x != nil {
+		return x.Backup
+	}
+	return nil
+}
+
+// BackupStatus is the responding node's backup configuration and the outcome
+// of its most recent run. Unconfigured nodes report configured=false.
+type BackupStatus struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Configured bool                   `protobuf:"varint,1,opt,name=configured,proto3" json:"configured,omitempty"`
+	// target is the destination URL without credentials, e.g. s3://bucket/prefix.
+	Target          string `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`
+	IntervalSeconds int64  `protobuf:"varint,3,opt,name=interval_seconds,json=intervalSeconds,proto3" json:"interval_seconds,omitempty"`
+	// next_run_unix is 0 when no run is scheduled.
+	NextRunUnix int64 `protobuf:"varint,4,opt,name=next_run_unix,json=nextRunUnix,proto3" json:"next_run_unix,omitempty"`
+	Running     bool  `protobuf:"varint,5,opt,name=running,proto3" json:"running,omitempty"`
+	// last_run is unset until a run has finished.
+	LastRun       *BackupRun `protobuf:"bytes,6,opt,name=last_run,json=lastRun,proto3" json:"last_run,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BackupStatus) Reset() {
+	*x = BackupStatus{}
+	mi := &file_silo_status_v1_status_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BackupStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BackupStatus) ProtoMessage() {}
+
+func (x *BackupStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_silo_status_v1_status_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BackupStatus.ProtoReflect.Descriptor instead.
+func (*BackupStatus) Descriptor() ([]byte, []int) {
+	return file_silo_status_v1_status_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *BackupStatus) GetConfigured() bool {
+	if x != nil {
+		return x.Configured
+	}
+	return false
+}
+
+func (x *BackupStatus) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *BackupStatus) GetIntervalSeconds() int64 {
+	if x != nil {
+		return x.IntervalSeconds
+	}
+	return 0
+}
+
+func (x *BackupStatus) GetNextRunUnix() int64 {
+	if x != nil {
+		return x.NextRunUnix
+	}
+	return 0
+}
+
+func (x *BackupStatus) GetRunning() bool {
+	if x != nil {
+		return x.Running
+	}
+	return false
+}
+
+func (x *BackupStatus) GetLastRun() *BackupRun {
+	if x != nil {
+		return x.LastRun
+	}
+	return nil
+}
+
+type BackupRun struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	StartedUnix  int64                  `protobuf:"varint,1,opt,name=started_unix,json=startedUnix,proto3" json:"started_unix,omitempty"`
+	FinishedUnix int64                  `protobuf:"varint,2,opt,name=finished_unix,json=finishedUnix,proto3" json:"finished_unix,omitempty"`
+	Ok           bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
+	// error is empty when ok; otherwise it tells the operator what to do next.
+	Error          string `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
+	ChunksUploaded int64  `protobuf:"varint,5,opt,name=chunks_uploaded,json=chunksUploaded,proto3" json:"chunks_uploaded,omitempty"`
+	// chunks_skipped were already present on the target.
+	ChunksSkipped int64 `protobuf:"varint,6,opt,name=chunks_skipped,json=chunksSkipped,proto3" json:"chunks_skipped,omitempty"`
+	BytesUploaded int64 `protobuf:"varint,7,opt,name=bytes_uploaded,json=bytesUploaded,proto3" json:"bytes_uploaded,omitempty"`
+	// manifest is the object key of the manifest this run wrote.
+	Manifest      string `protobuf:"bytes,8,opt,name=manifest,proto3" json:"manifest,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BackupRun) Reset() {
+	*x = BackupRun{}
+	mi := &file_silo_status_v1_status_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BackupRun) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BackupRun) ProtoMessage() {}
+
+func (x *BackupRun) ProtoReflect() protoreflect.Message {
+	mi := &file_silo_status_v1_status_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BackupRun.ProtoReflect.Descriptor instead.
+func (*BackupRun) Descriptor() ([]byte, []int) {
+	return file_silo_status_v1_status_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *BackupRun) GetStartedUnix() int64 {
+	if x != nil {
+		return x.StartedUnix
+	}
+	return 0
+}
+
+func (x *BackupRun) GetFinishedUnix() int64 {
+	if x != nil {
+		return x.FinishedUnix
+	}
+	return 0
+}
+
+func (x *BackupRun) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *BackupRun) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *BackupRun) GetChunksUploaded() int64 {
+	if x != nil {
+		return x.ChunksUploaded
+	}
+	return 0
+}
+
+func (x *BackupRun) GetChunksSkipped() int64 {
+	if x != nil {
+		return x.ChunksSkipped
+	}
+	return 0
+}
+
+func (x *BackupRun) GetBytesUploaded() int64 {
+	if x != nil {
+		return x.BytesUploaded
+	}
+	return 0
+}
+
+func (x *BackupRun) GetManifest() string {
+	if x != nil {
+		return x.Manifest
+	}
+	return ""
+}
+
 var File_silo_status_v1_status_proto protoreflect.FileDescriptor
 
 const file_silo_status_v1_status_proto_rawDesc = "" +
@@ -387,12 +587,31 @@ const file_silo_status_v1_status_proto_rawDesc = "" +
 	"used_bytes\x18\x03 \x01(\x03R\tusedBytes\x12'\n" +
 	"\x0favailable_bytes\x18\x04 \x01(\x03R\x0eavailableBytes\x12\x1f\n" +
 	"\vchunk_count\x18\x05 \x01(\x03R\n" +
-	"chunkCount\"\xc6\x01\n" +
+	"chunkCount\"\xfc\x01\n" +
 	"\x11GetStatusResponse\x12,\n" +
 	"\x12responding_node_id\x18\x01 \x01(\tR\x10respondingNodeId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x120\n" +
 	"\x05nodes\x18\x03 \x03(\v2\x1a.silo.status.v1.NodeStatusR\x05nodes\x127\n" +
-	"\astorage\x18\x04 \x01(\v2\x1d.silo.status.v1.StorageStatusR\astorage*\x7f\n" +
+	"\astorage\x18\x04 \x01(\v2\x1d.silo.status.v1.StorageStatusR\astorage\x124\n" +
+	"\x06backup\x18\x05 \x01(\v2\x1c.silo.status.v1.BackupStatusR\x06backup\"\xe5\x01\n" +
+	"\fBackupStatus\x12\x1e\n" +
+	"\n" +
+	"configured\x18\x01 \x01(\bR\n" +
+	"configured\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\x12)\n" +
+	"\x10interval_seconds\x18\x03 \x01(\x03R\x0fintervalSeconds\x12\"\n" +
+	"\rnext_run_unix\x18\x04 \x01(\x03R\vnextRunUnix\x12\x18\n" +
+	"\arunning\x18\x05 \x01(\bR\arunning\x124\n" +
+	"\blast_run\x18\x06 \x01(\v2\x19.silo.status.v1.BackupRunR\alastRun\"\x8c\x02\n" +
+	"\tBackupRun\x12!\n" +
+	"\fstarted_unix\x18\x01 \x01(\x03R\vstartedUnix\x12#\n" +
+	"\rfinished_unix\x18\x02 \x01(\x03R\ffinishedUnix\x12\x0e\n" +
+	"\x02ok\x18\x03 \x01(\bR\x02ok\x12\x14\n" +
+	"\x05error\x18\x04 \x01(\tR\x05error\x12'\n" +
+	"\x0fchunks_uploaded\x18\x05 \x01(\x03R\x0echunksUploaded\x12%\n" +
+	"\x0echunks_skipped\x18\x06 \x01(\x03R\rchunksSkipped\x12%\n" +
+	"\x0ebytes_uploaded\x18\a \x01(\x03R\rbytesUploaded\x12\x1a\n" +
+	"\bmanifest\x18\b \x01(\tR\bmanifest*\x7f\n" +
 	"\tNodeState\x12\x1a\n" +
 	"\x16NODE_STATE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10NODE_STATE_ALIVE\x10\x01\x12\x16\n" +
@@ -415,25 +634,29 @@ func file_silo_status_v1_status_proto_rawDescGZIP() []byte {
 }
 
 var file_silo_status_v1_status_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_silo_status_v1_status_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_silo_status_v1_status_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_silo_status_v1_status_proto_goTypes = []any{
 	(NodeState)(0),            // 0: silo.status.v1.NodeState
 	(*GetStatusRequest)(nil),  // 1: silo.status.v1.GetStatusRequest
 	(*NodeStatus)(nil),        // 2: silo.status.v1.NodeStatus
 	(*StorageStatus)(nil),     // 3: silo.status.v1.StorageStatus
 	(*GetStatusResponse)(nil), // 4: silo.status.v1.GetStatusResponse
+	(*BackupStatus)(nil),      // 5: silo.status.v1.BackupStatus
+	(*BackupRun)(nil),         // 6: silo.status.v1.BackupRun
 }
 var file_silo_status_v1_status_proto_depIdxs = []int32{
 	0, // 0: silo.status.v1.NodeStatus.state:type_name -> silo.status.v1.NodeState
 	2, // 1: silo.status.v1.GetStatusResponse.nodes:type_name -> silo.status.v1.NodeStatus
 	3, // 2: silo.status.v1.GetStatusResponse.storage:type_name -> silo.status.v1.StorageStatus
-	1, // 3: silo.status.v1.ClusterStatus.GetStatus:input_type -> silo.status.v1.GetStatusRequest
-	4, // 4: silo.status.v1.ClusterStatus.GetStatus:output_type -> silo.status.v1.GetStatusResponse
-	4, // [4:5] is the sub-list for method output_type
-	3, // [3:4] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	5, // 3: silo.status.v1.GetStatusResponse.backup:type_name -> silo.status.v1.BackupStatus
+	6, // 4: silo.status.v1.BackupStatus.last_run:type_name -> silo.status.v1.BackupRun
+	1, // 5: silo.status.v1.ClusterStatus.GetStatus:input_type -> silo.status.v1.GetStatusRequest
+	4, // 6: silo.status.v1.ClusterStatus.GetStatus:output_type -> silo.status.v1.GetStatusResponse
+	6, // [6:7] is the sub-list for method output_type
+	5, // [5:6] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_silo_status_v1_status_proto_init() }
@@ -447,7 +670,7 @@ func file_silo_status_v1_status_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_silo_status_v1_status_proto_rawDesc), len(file_silo_status_v1_status_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

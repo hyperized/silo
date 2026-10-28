@@ -53,7 +53,8 @@ full procedure.
   default 3). It must be ≤ node count.
 - [ ] **Backups configured** if you want a cold copy: `SILO_BACKUP_TARGET`
   (local/S3/GCS/Azure) + `SILO_BACKUP_INTERVAL`
-  ([Backups](operations.md#backups)). Restore is a manual procedure today.
+  ([Backups](operations.md#backups)). Run `siloctl backup verify` once against
+  the first backup, and keep the encryption key somewhere other than the bucket.
 - [ ] **Metrics are scraped and alerts are wired.** See [Alerts](#alerts-the-golden-signals).
 - [ ] **NTP is healthy on every node.** silo's HLC tolerates skew but write
   ordering degrades past `SILO_MAX_CLOCK_SKEW`; watch
@@ -198,13 +199,61 @@ source and restart.
 
 ### Restoring from a backup
 
-Backups hold each node's still-encrypted chunks plus the namespace snapshot. The
-full procedure (provider-specific `aws s3 sync` / `gsutil rsync` / `az` commands,
-data-dir layout, post-restore verification) lives in
-[operations.md#restore](operations.md#restore). The short version: same cluster
-encryption key + hydrate `<DATA_DIR>/chunks/` and the namespace snapshot from the
-bucket + start silod. An automated `siloctl restore` is roadmapped
-([known-gaps.md](known-gaps.md)).
+Use this when you lost more nodes than the replication factor tolerates, or when
+you want to go back in time. Losing a single node is usually easier: replace it
+and let re-replication heal it (see
+[A node is gone for good](#a-node-is-gone-for-good-replace-it)).
+
+Backups hold each node's chunks (still encrypted), the namespace snapshot and the
+per-volume extent maps, plus a manifest per run listing all of it. You need the
+cluster encryption key, because the chunks stay encrypted with it. Backups
+deliberately contain no keys or certificates.
+
+1. **Stop the node**, or prepare a replacement host.
+2. **Pick a backup.** This reads the bucket directly and needs no running silod:
+
+   ```sh
+   siloctl backup list --target s3://silo-backups/prod
+   ```
+
+3. **Verify it.** This checks that every object the manifest refers to exists
+   with the recorded size, and exits with status 1 if anything is wrong:
+
+   ```sh
+   siloctl backup verify --target s3://silo-backups/prod --node silo-a
+   ```
+
+   Add `--manifest STAMP` to check an older backup instead of the latest. For a
+   restore you depend on, add `--deep`: it downloads everything and checks each
+   SHA-256, which also catches damage that kept the size. The restore step below
+   refuses any object that does not match its recorded checksum, so a damaged
+   backup fails before anything is written.
+4. **Restore into a new directory.** The directory must not exist or must be
+   empty; siloctl never overwrites files. If the restore fails part-way, delete
+   the directory and run it again.
+
+   ```sh
+   siloctl backup restore --target s3://silo-backups/prod --node silo-a \
+     --data-dir /var/lib/silo-restored
+   ```
+
+   For an S3-compatible service add `--s3-endpoint`, or set the same
+   `SILO_BACKUP_*` variables silod uses. Credentials come from `AWS_*`.
+5. **Give the directory its TLS files.** Copy `ca.crt`, `node.crt` and
+   `node.key` into it (plus `ca.key` on the node that seeds the CA), or point
+   `SILO_TLS_CA_CERT`, `SILO_TLS_NODE_CERT` and `SILO_TLS_NODE_KEY` at them.
+6. **Start silod** with `SILO_DATA_DIR=/var/lib/silo-restored`, the same
+   `SILO_NODE_ID` as the backup came from, and the same encryption key
+   (`SILO_ENCRYPTION_KEY`, or the same key source). silod checks each chunk's
+   encryption tag the first time it reads it, so a wrong key shows up as read
+   errors.
+7. **Check the result.** `siloctl status` should show the expected volumes and
+   the node healthy. Read a volume back and confirm the contents.
+
+To restore a whole cluster, restore every node from its own backup before
+starting any of them, and pick backups from around the same time.
+
+Details and the bucket layout are in [operations.md](operations.md#backups).
 
 ---
 
