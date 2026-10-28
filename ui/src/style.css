@@ -1,0 +1,187 @@
+@import 'tailwindcss';
+
+/* Latin only: the page shows ids, numbers and English labels, so the other subsets would be dead weight in the silod binary. */
+@font-face {
+  font-family: 'Plex Sans';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 700;
+  font-stretch: 75% 100%;
+  src: url('@fontsource-variable/ibm-plex-sans/files/ibm-plex-sans-latin-standard-normal.woff2') format('woff2-variations');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url('@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2') format('woff2-variations');
+}
+
+/*
+ * Semantic tokens. Components only use these names, so the dark scheme is a
+ * second set of values here rather than dark: variants spread through markup.
+ */
+:root {
+  color-scheme: light dark;
+  --c-page: #eceef2;
+  --c-panel: #ffffff;
+  --c-raise: #f5f6f8;
+  --c-ink: #151a21;
+  --c-ink-2: #454d59;
+  --c-ink-3: #5f6773;
+  --c-rule: #d9dde4;
+  --c-accent: #2a52be;
+  --c-track: #e1e5ec;
+  --c-good: #17803a;
+  --c-warn: #925f00;
+  --c-warn-bar: #c08000;
+  --c-crit: #c42b2b;
+  --c-good-wash: #e3f3e8;
+  --c-warn-wash: #fcf1d9;
+  --c-crit-wash: #fbe5e4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-page: #0f131a;
+    --c-panel: #161b24;
+    --c-raise: #1c2230;
+    --c-ink: #e3e7ee;
+    --c-ink-2: #aab2bf;
+    --c-ink-3: #8c95a3;
+    --c-rule: #273040;
+    --c-accent: #86a1ff;
+    --c-track: #262e3d;
+    --c-good: #4cc472;
+    --c-warn: #e6b54a;
+    --c-warn-bar: #e6b54a;
+    --c-crit: #ff7f78;
+    --c-good-wash: #15291f;
+    --c-warn-wash: #2c2414;
+    --c-crit-wash: #33191b;
+  }
+}
+
+@theme inline {
+  --color-page: var(--c-page);
+  --color-panel: var(--c-panel);
+  --color-raise: var(--c-raise);
+  --color-ink: var(--c-ink);
+  --color-ink-2: var(--c-ink-2);
+  --color-ink-3: var(--c-ink-3);
+  --color-rule: var(--c-rule);
+  --color-accent: var(--c-accent);
+  --color-track: var(--c-track);
+  --color-good: var(--c-good);
+  --color-warn: var(--c-warn);
+  --color-warn-bar: var(--c-warn-bar);
+  --color-crit: var(--c-crit);
+  --color-good-wash: var(--c-good-wash);
+  --color-warn-wash: var(--c-warn-wash);
+  --color-crit-wash: var(--c-crit-wash);
+}
+
+@theme {
+  --font-sans: 'Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html {
+    background: var(--c-page);
+    color: var(--c-ink);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--c-page);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 20px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  code,
+  kbd,
+  samp,
+  .font-mono {
+    font-size: 0.9em;
+    font-variant-ligatures: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--c-accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+}
+
+/*
+ * Below 640 px a data table turns into one key / value block per row, so it never scrolls sideways.
+ * Deliberately unlayered: it has to beat the cell utilities (height, padding, alignment) it undoes.
+ */
+@media (width < 40rem) {
+  .stack,
+  .stack tbody,
+  .stack tr,
+  .stack th,
+  .stack td {
+    display: block;
+  }
+
+  .stack thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  .stack tr {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .stack th,
+  .stack td {
+    height: auto;
+    padding: 0.125rem 0;
+    text-align: left;
+  }
+
+  .stack [data-label] {
+    display: grid;
+    grid-template-columns: 6rem minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.125rem 0;
+    text-align: left;
+  }
+
+  .stack [data-label]::before {
+    content: attr(data-label);
+    color: var(--c-ink-3);
+    font-family: var(--font-sans);
+    font-size: 12px;
+  }
+}
+
+@keyframes flash {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+@utility animate-flash {
+  @media (prefers-reduced-motion: no-preference) {
+    animation: flash 400ms ease-out forwards;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    opacity: 0;
+  }
+}

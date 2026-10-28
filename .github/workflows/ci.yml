@@ -16,6 +16,8 @@ env:
   # `go: no such tool "covdata"` under -coverprofile) and makes golangci-lint
   # refuse to run, so keep this in lockstep with go.mod.
   GO_VERSION: "1.25"
+  # Node.js LTS major for the web UI; keep in step with the node stage in the Dockerfile.
+  NODE_VERSION: "26"
 
 jobs:
   test:
@@ -74,9 +76,38 @@ jobs:
         with:
           version: v2.12.2
 
+  ui:
+    name: ui (lint + test + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run test -- --run
+
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webui-dist
+          path: internal/webui/dist
+          retention-days: 7
+
   build:
     name: build (binary)
-    needs: [test, lint]
+    needs: [test, lint, ui]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -88,8 +119,13 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: webui-dist
+          path: internal/webui/dist
+
       - name: build
-        run: make build
+        run: make build SKIP_UI=1
 
       - uses: actions/upload-artifact@v4
         with:
@@ -99,7 +135,7 @@ jobs:
 
   publish:
     name: publish (container images)
-    needs: [test, lint]
+    needs: [test, lint, ui]
     runs-on: ubuntu-latest
     permissions:
       contents: read

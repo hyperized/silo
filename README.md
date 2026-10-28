@@ -24,7 +24,10 @@ before it returns.
   nodes, and keys from a file or a cloud KMS.
 - **Incremental, restorable backups.** Nodes copy their still-encrypted chunks
   and checksummed metadata to S3 or any S3-compatible store (MinIO, Backblaze B2,
-  Hetzner and others), GCS or Azure, and `siloctl backup restore` rebuilds a node from any of them.
+  Hetzner and others), GCS or Azure, and `siloctl backup restore` rebuilds a
+  node from any of them.
+- **Built-in status page.** A read-only web UI in every silod shows the nodes,
+  their capacity, your volumes and the last backup, with no extra service to run.
 
 You give up `ReadWriteMany` on block volumes, erasure coding, and some write
 latency for this. The full capability list, the reasoning, and the current status
@@ -41,6 +44,8 @@ git clone https://github.com/hyperized/silo && cd silo
 make up        # build + boot 3 silod nodes (+ Prometheus :9090, Grafana :3030, backup storage :9001)
 make build     # compile ./bin/{silod,siloctl,silo-csi}
 ```
+
+Once it is up, open <http://localhost:7080/> for the read-only status page.
 
 `make up` scrapes silo-a's bootstrap token from the container logs and prints a
 paste-ready `siloctl auth init` command. Run it to claim your operator credentials.

@@ -185,6 +185,43 @@ func TestNodeStateStringAndHelpers(t *testing.T) {
 	}
 }
 
+func TestPrintStatus_Volumes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		vols []*statusv1.VolumeStatus
+		want []string
+	}{
+		{name: "empty", want: []string{"Volumes: none yet", "siloctl volume create"}},
+		{
+			name: "table",
+			vols: []*statusv1.VolumeStatus{
+				{Path: "/db", SizeBytes: 1 << 30, ExtentSizeBytes: 64 << 10, ExtentsWritten: 16, LeaseHolder: "silo-a"},
+				{Path: "/unsized", ExtentSizeBytes: 4096},
+			},
+			want: []string{"Volumes: 2", "PATH", "ALLOCATED", "WRITER", "/db", "1.0 GiB", "1.0 MiB", "silo-a", "/unsized", "0 B"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printStatus(&buf, &statusv1.GetStatusResponse{RespondingNodeId: "n", Version: "v", Volumes: tc.vols})
+			for _, want := range tc.want {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("missing %q in:\n%s", want, buf.String())
+				}
+			}
+		})
+	}
+}
+
+func TestVolumeSize(t *testing.T) {
+	if got := volumeSize(0); got != "—" {
+		t.Errorf("volumeSize(0) = %q, want a dash", got)
+	}
+	if got := volumeSize(2048); got != "2.0 KiB" {
+		t.Errorf("volumeSize(2048) = %q", got)
+	}
+}
+
 func TestPrintBackupStatus(t *testing.T) {
 	prev := statusNow
 	t.Cleanup(func() { statusNow = prev })
@@ -254,5 +291,25 @@ func TestHumanizeUntil(t *testing.T) {
 		if got := humanizeUntil(base.Add(tt.d).Unix()); got != tt.want {
 			t.Errorf("humanizeUntil(%v) = %q, want %q", tt.d, got, tt.want)
 		}
+	}
+}
+
+func TestPrintStatus_SectionOrder(t *testing.T) {
+	var buf bytes.Buffer
+	printStatus(&buf, &statusv1.GetStatusResponse{
+		RespondingNodeId: "silo-a", Version: "v",
+		Nodes:   []*statusv1.NodeStatus{{Id: "silo-a", State: statusv1.NodeState_NODE_STATE_ALIVE}},
+		Storage: &statusv1.StorageStatus{DataDir: "/d"},
+		Volumes: []*statusv1.VolumeStatus{{Path: "/db"}},
+		Backup:  &statusv1.BackupStatus{Configured: true, Target: "s3://b/p", IntervalSeconds: 3600},
+	})
+	got := buf.String()
+	last := -1
+	for _, heading := range []string{"Cluster:", "NODE", "\nStorage on", "\nVolumes:", "\nBackup:"} {
+		i := strings.Index(got, heading)
+		if i <= last {
+			t.Fatalf("%q at %d, want after the previous section (%d) in:\n%s", heading, i, last, got)
+		}
+		last = i
 	}
 }

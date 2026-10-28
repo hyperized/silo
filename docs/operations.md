@@ -15,6 +15,10 @@ the common problems. For the Kubernetes CSI driver specifically, see
 annotated [`.env.example`](../.env.example) is the canonical source; this table
 is the quick reference.
 
+On/off variables take `true` or `false` (`1`/`0`, `yes`/`no` and `on`/`off`
+also work, in any case). Any other value stops silod at startup with an error
+naming the variable, so a typo cannot quietly leave a feature on.
+
 ### Identity & networking
 
 | Variable | Default | Purpose |
@@ -169,7 +173,8 @@ Re-run `siloctl ca revoke` (even with no new serials) to refresh it.
 |---|---|---|
 | `SILO_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `SILO_LOG_FORMAT` | `text` | `text`, `json` (use `json` in production) |
-| `SILO_PPROF` | *(empty = off)* | Any non-empty value mounts `net/http/pprof` at `/debug/pprof/` on `SILO_HTTP_ADDR`; see [Health, metrics & profiling](#health-metrics--profiling) |
+| `SILO_PPROF` | `false` | `true` mounts `net/http/pprof` at `/debug/pprof/` on `SILO_HTTP_ADDR`; see [Health, metrics & profiling](#health-metrics--profiling) |
+| `SILO_UI_ENABLED` | `true` | Serves the read-only [web UI](#web-ui) at `/` and `GET /api/v1/status` on `SILO_HTTP_ADDR`. Set to `false` to turn both off |
 
 ---
 
@@ -926,6 +931,60 @@ make nbd-demo-vm   # boots a throwaway aarch64 Linux guest under QEMU with the
 
 ---
 
+## Web UI
+
+![The status page showing a warning: one suspect node, one disk at 84%, a failed backup](images/ui-warning-light.png)
+
+silod serves a read-only status page at `http://<node>:7080/`, on the same
+listener as `/healthz` and `/metrics`. It shows:
+
+- the cluster members as this node sees them: state, addresses and capacity
+- this node's local storage usage
+- the volumes: path, size, roughly how much is allocated, and which writer is
+  attached. The allocated figure comes from the node's own copy of each
+  volume's extent map (the table of which regions hold data), so a node that
+  does not keep a copy of a given volume's map shows 0 for it
+- this node's backups: where they go, how often, whether one is running, and
+  how the last run went (see [Backups](#backups))
+
+The page refreshes itself by polling. Each node answers from its own view of the
+cluster, so two nodes can disagree for a short while after a membership change.
+Nothing in the UI can change state.
+
+For scripts, `GET /api/v1/status` returns the data `siloctl status` prints, as
+JSON, with two fields left empty: `storage.dataDir` and each volume's `inode`
+are always `""` over HTTP, because an unauthenticated page has no use for them.
+`siloctl status` still shows them. Field names are lowerCamelCase, node states
+are names such as `NODE_STATE_ALIVE`, and 64-bit numbers (sizes, counts) are
+strings, so convert them before doing arithmetic:
+
+```sh
+curl -s http://localhost:7080/api/v1/status | jq .
+```
+
+The endpoint reuses one answer for two seconds, so polling it faster than that
+returns the same data. A request waits at most five seconds for silod to
+collect its status, and when more than eight requests are already waiting it
+answers 503 with `Retry-After: 1`. Either way, retry after a short pause.
+
+Set `SILO_UI_ENABLED=false` to turn off both the page and the endpoint. `/` then
+answers 404 with a JSON message that names the variable.
+
+Like `/metrics`, the page and the endpoint are plain HTTP with no
+authentication, and they reveal node ids and addresses, capacity, volume paths
+and which node is writing each volume. Volume paths double as NBD export names,
+so if the NBD port is reachable too, anyone who reads this page can attach a
+volume (see [threat-model.md](threat-model.md)). Either keep port 7080 on the operator network, or put a reverse proxy in
+front that requires a login and terminates TLS, and publish only the proxy. The
+proxy only needs to forward `/` and `/api/v1/status` to the node after it has
+checked who is asking.
+
+The container images always contain the UI. A binary built from source without
+Node.js installed shows a placeholder page that tells you to run `make ui`; see
+[development.md](development.md#web-ui).
+
+---
+
 ## Health, metrics & profiling
 
 - **Liveness:** `GET http://<node>:7080/healthz`
@@ -1052,7 +1111,7 @@ The same per-node figures are available on demand via `siloctl status`.
 
 ### Profiling (pprof)
 
-Set `SILO_PPROF` to any non-empty value to mount the standard `net/http/pprof`
+Set `SILO_PPROF=true` to mount the standard `net/http/pprof`
 handlers under `/debug/pprof/` on `SILO_HTTP_ADDR`. It is **off by default**:
 the profiles expose runtime internals and carry a small always-on sampling cost.
 Enable it on demand (e.g. add `SILO_PPROF=1` to the node's env and restart)

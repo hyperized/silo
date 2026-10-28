@@ -10,8 +10,14 @@ dist/
 deploy/data/
 data/
 docs/
+# Web UI: the image builds the UI in its own stage. A developer's local build
+# output must not ride along, because COPY --from=ui merges into dist/ rather
+# than replacing it and stale hashed assets would end up embedded.
+internal/webui/dist/
 ui/node_modules/
 ui/dist/
+ui/coverage/
+ui/.vite/
 .env
 .env.local
 .env.*.local

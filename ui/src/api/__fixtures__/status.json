@@ -1,0 +1,18 @@
+{
+  "respondingNodeId": "node-a",
+  "version": "0.16.0",
+  "nodes": [
+    {"id":"node-a","gossipAddress":"10.0.0.1:7100","dataAddress":"10.0.0.1:7000","state":"NODE_STATE_ALIVE","incarnation":"3","lastChangeUnix":"1761640000","capacityBytes":"107374182400","usedBytes":"32212254720"},
+    {"id":"node-b","gossipAddress":"10.0.0.2:7100","dataAddress":"10.0.0.2:7000","state":"NODE_STATE_ALIVE","incarnation":"1","lastChangeUnix":"1761552000","capacityBytes":"107374182400","usedBytes":"30064771072"},
+    {"id":"node-c","gossipAddress":"10.0.0.3:7100","dataAddress":"10.0.0.3:7000","state":"NODE_STATE_ALIVE","incarnation":"2","lastChangeUnix":"1761600000","capacityBytes":"107374182400","usedBytes":"34359738368"}
+  ],
+  "storage": {"dataDir":"","capacityBytes":"107374182400","usedBytes":"32212254720","availableBytes":"75161927680","chunkCount":"12345"},
+  "backup": {
+    "configured": true, "target": "s3://silo-backups/cluster", "intervalSeconds":"21600", "nextRunUnix":"1761660000", "running": false,
+    "lastRun": {"startedUnix":"1761638000","finishedUnix":"1761638120","ok":true,"error":"","chunksUploaded":"42","chunksSkipped":"12303","bytesUploaded":"176160768","manifest":"manifests/node-a/2026-10-28T08:00:00Z.json"}
+  },
+  "volumes": [
+    {"path":"/db","inode":"","sizeBytes":"53687091200","extentSizeBytes":"4194304","leaseHolder":"csi-node-3","extentsWritten":"1800"},
+    {"path":"/cache","inode":"","sizeBytes":"10737418240","extentSizeBytes":"4194304","leaseHolder":"","extentsWritten":"0"}
+  ]
+}

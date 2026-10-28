@@ -45,10 +45,25 @@ authorization beyond "is a cluster member" (see [Authorization](#authorization-c
   NBD port as sensitive: bind it to localhost/the node network, not the public
   interface. The CSI node plugin connects to the node-local silod.
 - **Observability listeners are unauthenticated HTTP.** silod's
-  `SILO_HTTP_ADDR` (metrics, health, optional pprof) and the CSI node
-  plugin's `SILO_CSI_HTTP_ADDR` (metrics, health) expose operational
-  readings, never data or credentials. Keep them on the node or cluster
-  network anyway.
+  `SILO_HTTP_ADDR` (health, metrics, the web UI, `GET /api/v1/status`, and
+  pprof when `SILO_PPROF` is on) and the CSI node plugin's `SILO_CSI_HTTP_ADDR`
+  (health, metrics) answer anyone who can reach them. The web UI and
+  `/api/v1/status` hand out a map of the cluster: node ids, gossip and data
+  addresses, incarnation numbers, capacity and usage per node, the local chunk
+  count, every volume path with its size, extent size and allocated extents,
+  the lease holder (the node currently writing each volume), the backup target
+  (bucket and prefix, never credentials) with the last run's outcome and error
+  text, and the silo version, which tells an attacker which known bugs to try. The data directory
+  and volume inode ids are left out of the HTTP view. Volume paths are also the
+  NBD export names, so this endpoint together with a reachable NBD port
+  (`SILO_NBD_ADDR`) is everything needed to attach a volume, read it, and write
+  to it, taking the lease from its current writer. Pick one of three
+  mitigations: keep `SILO_HTTP_ADDR` on a trusted network only; put a reverse
+  proxy that requires authentication (and terminates TLS) in front of it and
+  publish only the proxy; or set `SILO_UI_ENABLED=false` to remove the UI and
+  the status endpoint while keeping health and metrics. The UI itself is
+  read-only and served with a strict Content-Security-Policy, so a hostile
+  volume name cannot inject script into the page.
 
 ### Disk / stolen-media attacker
 

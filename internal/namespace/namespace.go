@@ -356,7 +356,12 @@ func (n *Namespace) List(path string) ([]ResolvedEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	return n.resolvedChildrenLocked(dir), nil
+}
 
+// resolvedChildrenLocked is List's conflict resolution over one directory,
+// shared with Volumes so both name a conflicting claim the same way.
+func (n *Namespace) resolvedChildrenLocked(dir *Inode) []ResolvedEntry {
 	byName := map[string][]Entry{}
 	for _, e := range dir.children.Elements() {
 		byName[e.Name] = append(byName[e.Name], e)
@@ -395,7 +400,70 @@ func (n *Namespace) List(path string) ([]ResolvedEntry, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
+	return out
+}
+
+// VolumeInfo is a read-only summary of one volume, as returned by Volumes.
+type VolumeInfo struct {
+	Path        string
+	Inode       string
+	Size        int64
+	ExtentSize  int64
+	LeaseHolder string
+	// InlineExtents counts the extent bindings held in the namespace itself.
+	// Under extent replication those bindings live in the out-of-band extent
+	// map store instead, so this is zero there and callers must ask that store.
+	InlineExtents int
+}
+
+// Volumes returns every volume reachable from the root, sorted by path. A
+// volume whose name lost a concurrent-create race is listed under the same
+// ".conflict-<hlc>" name List shows. The walk takes the lock once and is linear
+// in the size of the tree; the returned slice is owned by the caller.
+func (n *Namespace) Volumes() []VolumeInfo {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	var out []VolumeInfo
+	// seen guards against a directory cycle, which only a corrupt peer merge
+	// can produce but which would otherwise loop forever.
+	seen := map[string]struct{}{rootID: {}}
+	n.collectVolumesLocked(n.inodes[rootID], "", seen, &out)
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+func (n *Namespace) collectVolumesLocked(dir *Inode, prefix string, seen map[string]struct{}, out *[]VolumeInfo) {
+	for _, e := range n.resolvedChildrenLocked(dir) {
+		in := n.inodes[e.Inode]
+		if in == nil {
+			continue
+		}
+		p := prefix + "/" + e.Name
+		switch in.Type {
+		case Volume:
+			*out = append(*out, volumeInfo(p, in))
+		case Dir:
+			if _, dup := seen[in.ID]; dup {
+				continue
+			}
+			seen[in.ID] = struct{}{}
+			n.collectVolumesLocked(in, p, seen, out)
+		}
+	}
+}
+
+func volumeInfo(path string, in *Inode) VolumeInfo {
+	vi := VolumeInfo{
+		Path:        path,
+		Inode:       in.ID,
+		Size:        in.Size,
+		ExtentSize:  in.ExtentSize,
+		LeaseHolder: in.lease.Value,
+	}
+	if in.extents != nil {
+		vi.InlineExtents = in.extents.Len()
+	}
+	return vi
 }
 
 // AppendChunk records that chunkID belongs to the file at path, tagged with

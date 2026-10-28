@@ -523,3 +523,37 @@ func TestNamespace_SnapshotVolumeErrors(t *testing.T) {
 		t.Errorf("snapshot under a missing parent: got %v, want not-exist", err)
 	}
 }
+
+func TestNamespace_Volumes(t *testing.T) {
+	var clk int64 = 100
+	ns := nsAt("a", &clk)
+	if got := ns.Volumes(); len(got) != 0 {
+		t.Fatalf("Volumes on an empty namespace = %v, want none", got)
+	}
+	steps := []func() error{
+		func() error { _, err := ns.Mkdir("/pool"); return err },
+		func() error { _, err := ns.Mkdir("/pool/inner"); return err },
+		func() error { _, err := ns.CreateVolume("/pool/inner/b", 4096, namespace.WithSize(1<<20)); return err },
+		func() error { _, err := ns.CreateVolume("/a", 0); return err },
+		func() error { _, err := ns.Touch("/pool/file"); return err },
+		func() error { _, err := ns.AcquireLease("/a", "node-x"); return err },
+		func() error { return ns.WriteExtent("/a", 3, "chunk-1", "node-x") },
+		func() error { return ns.WriteExtent("/a", 7, "chunk-2", "node-x") },
+	}
+	for i, step := range steps {
+		clk++
+		if err := step(); err != nil {
+			t.Fatalf("setup step %d: %v", i, err)
+		}
+	}
+	aID, _ := ns.VolumeInodeID("/a")
+	bID, _ := ns.VolumeInodeID("/pool/inner/b")
+
+	want := []namespace.VolumeInfo{
+		{Path: "/a", Inode: aID, ExtentSize: namespace.DefaultExtentSize, LeaseHolder: "node-x", InlineExtents: 2},
+		{Path: "/pool/inner/b", Inode: bID, Size: 1 << 20, ExtentSize: 4096},
+	}
+	if got := ns.Volumes(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Volumes =\n %+v\nwant\n %+v", got, want)
+	}
+}

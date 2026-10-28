@@ -11,6 +11,7 @@ import (
 
 	nodev1 "github.com/hyperized/silo/api/proto/silo/node/v1"
 	"github.com/hyperized/silo/internal/backup"
+	"github.com/hyperized/silo/internal/clusterstatus"
 )
 
 // Drainer drains the local node out of the cluster. The gossip subsystem
@@ -87,7 +88,7 @@ func (s *NodeAdminService) RunBackup(ctx context.Context, _ *nodev1.RunBackupReq
 	case err != nil:
 		return nil, status.FromContextError(err).Err()
 	}
-	return &nodev1.RunBackupResponse{NodeId: s.nodeID, Run: backupRunProto(&run)}, nil
+	return &nodev1.RunBackupResponse{NodeId: s.nodeID, Run: clusterstatus.BackupRun(&run)}, nil
 }
 
 // WithNodeAdminService registers the operator-facing NodeAdmin service.

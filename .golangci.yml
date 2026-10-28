@@ -24,6 +24,9 @@ linters:
         - fmt.Fprintf
         - fmt.Fprintln
   exclusions:
+    # npm packages occasionally ship Go sources (flatted does); they are not ours.
+    paths:
+      - ui/node_modules
     rules:
       - path: _test\.go
         linters:
@@ -35,3 +38,6 @@ formatters:
   enable:
     - gofumpt
     - goimports
+  exclusions:
+    paths:
+      - ui/node_modules

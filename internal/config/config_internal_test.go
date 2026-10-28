@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -116,6 +117,9 @@ func TestLoad_AppliesDefaults(t *testing.T) {
 	// would be a slow-motion disk-full.
 	if !cfg.ChunkGCEnable {
 		t.Error("ChunkGCEnable default: got false, want true")
+	}
+	if !cfg.UIEnabled {
+		t.Error("UIEnabled default: got false, want true")
 	}
 	// Retention, unlike the scrub interval, defaults to a concrete value:
 	// zero would let GC resurrect deleted entries.
@@ -327,6 +331,8 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_CHUNK_GC_ENABLE":       "1",
 		"SILO_PRINT_BOOTSTRAP_TOKEN": "yes",
 		"SILO_TLS_CA_SEED":           "true",
+		"SILO_UI_ENABLED":            "0",
+		"SILO_PPROF":                 "on",
 	}))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -341,6 +347,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		GossipAddr:          "127.0.0.1:9100",
 		GossipAdvertise:     "node-host:9100",
 		HTTPAddr:            "127.0.0.1:9080",
+		UIEnabled:           false, // overridden from its default of true
 		NBDAddr:             "127.0.0.1:10809",
 		Domain:              "silo.example",
 		DataDir:             "/tmp/silo",
@@ -374,6 +381,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		CAExternal:          true,
 		CASeed:              true,
 		PrintBootstrapToken: true,
+		Pprof:               true,
 	}
 	got := *cfg
 	got.Seeds = nil
@@ -585,26 +593,55 @@ func TestLoad_ValidationErrorAfterParse(t *testing.T) {
 }
 
 func TestEnvBool(t *testing.T) {
-	cases := []struct {
-		val  string
-		want bool
+	for _, tc := range []struct {
+		val      string
+		fallback bool
+		want     bool
+		wantErr  bool
 	}{
-		{"1", true},
-		{"true", true},
-		{"True", true},
-		{"YES", true},
-		{"on", true},
-		{"", false},
-		{"0", false},
-		{"false", false},
-		{"no", false},
-		{"definitely", false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.val, func(t *testing.T) {
+		{val: "1", want: true},
+		{val: "true", want: true},
+		{val: "True", want: true},
+		{val: "YES", want: true},
+		{val: "on", want: true},
+		{val: " true\n", want: true},
+		{val: "", want: false},
+		{val: "", fallback: true, want: true},
+		{val: "   ", fallback: true, want: true},
+		{val: "0", fallback: true, want: false},
+		{val: "false ", fallback: true, want: false},
+		{val: "no", fallback: true, want: false},
+		{val: "OFF", fallback: true, want: false},
+		{val: "disabled", fallback: true, wantErr: true},
+		{val: "definitely", wantErr: true},
+	} {
+		t.Run(fmt.Sprintf("%q/%t", tc.val, tc.fallback), func(t *testing.T) {
 			env := func(string) string { return tc.val }
-			if got := envBool(env, "X"); got != tc.want {
+			got, err := envBool(env, "X", tc.fallback)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("envBool(%q) error = %v, wantErr %v", tc.val, err, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
 				t.Errorf("envBool(%q): got %v, want %v", tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsUnrecognisedBooleans(t *testing.T) {
+	for _, key := range []string{
+		"SILO_UI_ENABLED", "SILO_EXTENT_REPLICATION", "SILO_CHUNK_GC_ENABLE", "SILO_DISK_PRESSURE_STEERING",
+		"SILO_REQUIRE_TOKENS", "SILO_TLS_CA_SEED", "SILO_PRINT_BOOTSTRAP_TOKEN", "SILO_PPROF",
+	} {
+		t.Run(key, func(t *testing.T) {
+			_, err := Load(envMap(map[string]string{
+				"SILO_NODE_ID":        "n1",
+				"SILO_ENCRYPTION_KEY": validBase64Key(t),
+				key:                   "disabled",
+			}))
+			want := key + ` must be true or false; got "disabled"`
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("Load error = %v, want it to contain %q", err, want)
 			}
 		})
 	}
@@ -796,6 +833,23 @@ func TestLoad_BackupSettings(t *testing.T) {
 				"SILO_BACKUP_S3_PATH_STYLE": "false",
 			},
 			wantRetain: DefaultBackupRetain, wantRegion: DefaultBackupS3Region, wantPath: false,
+		},
+		{
+			name: "path style junk is rejected",
+			env: map[string]string{
+				"SILO_BACKUP_TARGET":        "s3://bucket/prefix",
+				"SILO_BACKUP_S3_ENDPOINT":   "http://minio.example.com:9000",
+				"SILO_BACKUP_S3_PATH_STYLE": "maybe",
+			},
+			wantErr: `SILO_BACKUP_S3_PATH_STYLE must be true or false; got "maybe"`,
+		},
+		{
+			name: "path style on without endpoint",
+			env: map[string]string{
+				"SILO_BACKUP_TARGET":        "s3://bucket/prefix",
+				"SILO_BACKUP_S3_PATH_STYLE": "yes",
+			},
+			wantRetain: DefaultBackupRetain, wantPath: true,
 		},
 		{
 			name: "region override",

@@ -1,5 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
+# ---- Web UI stage -----------------------------------------------------------
+FROM node:26-alpine3.24 AS ui
+WORKDIR /src/ui
+
+COPY ui/package.json ui/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+
+# Vite writes to ../internal/webui/dist, i.e. /src/internal/webui/dist here.
+COPY ui/ ./
+RUN npm run build
+
 # ---- Build stage ------------------------------------------------------------
 FROM golang:1.25-alpine AS builder
 WORKDIR /src
@@ -12,6 +23,9 @@ COPY go.su[m] ./
 RUN go mod download
 
 COPY . .
+
+# The image always embeds the real UI; a plain go build without this step serves a placeholder page.
+COPY --from=ui /src/internal/webui/dist ./internal/webui/dist
 
 ARG VERSION=dev
 RUN --mount=type=cache,target=/root/.cache/go-build \
