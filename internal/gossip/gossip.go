@@ -129,8 +129,12 @@ type Subsystem struct {
 	logger  *slog.Logger
 	members *membership.Membership
 
-	mu sync.Mutex
-	ln net.Listener
+	// mu guards ln and stopped. The goroutines Start launches register on wg
+	// under mu, and Shutdown flips stopped under mu before it waits on wg, so
+	// a Shutdown that overlaps Start can never race an Add against the Wait.
+	mu      sync.Mutex
+	ln      net.Listener
+	stopped bool
 
 	// piggybackMu guards the bounded slice of recent events that ride
 	// on every outbound Ping/Ack/Sync. Recent-events feed back as
@@ -401,8 +405,12 @@ func (s *Subsystem) Start() error {
 		return fmt.Errorf("gossip: could not bind listener at %q (%w); set SILO_GOSSIP_ADDR to a free host:port, e.g. 0.0.0.0:7100", s.opts.Addr, err)
 	}
 	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		_ = ln.Close()
+		return nil
+	}
 	s.ln = ln
-	s.mu.Unlock()
 	bound := ln.Addr().String()
 	advertise := s.opts.Advertise
 	if advertise == "" {
@@ -428,6 +436,7 @@ func (s *Subsystem) Start() error {
 	} else {
 		s.logger.Info("gossip has no seeds; this node waits for peers to dial it and cannot rejoin by itself if it loses them. Set SILO_SEEDS to the other nodes' gossip addresses on any multi-node cluster")
 	}
+	s.mu.Unlock()
 
 	<-s.stopCh
 	return nil
@@ -444,10 +453,11 @@ func (s *Subsystem) Shutdown(ctx context.Context) error {
 	// calls can't double-close stopCh (which would panic). Later callers fall
 	// through to wait on the WaitGroup, which is already drained.
 	s.stopOnce.Do(func() {
-		close(s.stopCh)
 		s.mu.Lock()
+		s.stopped = true
 		ln := s.ln
 		s.mu.Unlock()
+		close(s.stopCh)
 		if ln != nil {
 			_ = ln.Close()
 		}
