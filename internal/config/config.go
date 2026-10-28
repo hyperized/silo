@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hyperized/silo/internal/blobstore"
 	"github.com/hyperized/silo/internal/diskpressure"
 )
 
@@ -73,6 +74,13 @@ const (
 	DefaultKeySource           = KeySourceStatic
 	DefaultLogLevel            = "info"
 	DefaultLogFormat           = "text"
+	// DefaultBackupRetain keeps a week of backups at one run per day, or a
+	// little under two days at the default 6h interval.
+	DefaultBackupRetain = 7
+	// DefaultBackupS3Region is used with a custom S3 endpoint when no region
+	// is set. Most S3-compatible services accept any region and expect this
+	// one.
+	DefaultBackupS3Region = "us-east-1"
 )
 
 // DefaultTombstoneRetention is how long deleted-entry tombstones are kept
@@ -80,10 +88,24 @@ const (
 // was partitioned for hours — before its tombstone is reclaimed.
 const DefaultTombstoneRetention = 24 * time.Hour
 
+// DefaultBackupRetainFor keeps a week of backups however many runs happen in
+// that week, so a burst of manual runs cannot push every good restore point
+// out of a count-only retention.
+const DefaultBackupRetainFor = 7 * 24 * time.Hour
+
 // DefaultMaxClockSkew is how far ahead a peer's clock may run before silod
 // warns. 500ms comfortably absorbs gossip and processing delay while still
 // catching a genuinely misconfigured clock (seconds to hours off).
 const DefaultMaxClockSkew = 500 * time.Millisecond
+
+// Files silod keeps directly under SILO_DATA_DIR. They are named here so the
+// offline restore in siloctl writes exactly what silod reads at boot.
+const (
+	// NamespaceFileName is the persisted namespace replica.
+	NamespaceFileName = "namespace.json"
+	// ExtentsDirName holds the per-volume extent maps.
+	ExtentsDirName = "extents"
+)
 
 // Config is silod's fully-resolved runtime configuration. Load builds it
 // from the environment and Validate must pass before it is used.
@@ -97,6 +119,10 @@ type Config struct {
 	GossipAddr         string
 	GossipAdvertise    string
 	HTTPAddr           string
+	// UIEnabled (SILO_UI_ENABLED, default true) serves the read-only status web
+	// UI and its JSON feed at /api/v1/status on HTTPAddr. Turning it off removes
+	// both routes; /healthz and /metrics are unaffected.
+	UIEnabled bool
 	// NBDAddr is the host:port the NBD block-device server listens on. Empty
 	// (the default) leaves NBD off: it is unauthenticated block I/O, so it is
 	// opt-in. Set SILO_NBD_ADDR (e.g. 0.0.0.0:10809) to serve volumes.
@@ -119,6 +145,20 @@ type Config struct {
 	// gs://, az://). BackupInterval (SILO_BACKUP_INTERVAL) paces them.
 	BackupTarget   string
 	BackupInterval time.Duration
+	// BackupRetain (SILO_BACKUP_RETAIN) is how many backups per node retention
+	// keeps; 0 switches pruning off.
+	BackupRetain int
+	// BackupRetainFor (SILO_BACKUP_RETAIN_FOR) protects every backup younger
+	// than this from pruning, whatever BackupRetain says; 0 disables it.
+	BackupRetainFor time.Duration
+	// BackupS3Endpoint (SILO_BACKUP_S3_ENDPOINT) points an s3:// target at an
+	// S3-compatible service. BackupS3Region (SILO_BACKUP_S3_REGION) and
+	// BackupS3PathStyle (SILO_BACKUP_S3_PATH_STYLE) default to us-east-1 and
+	// true when an endpoint is set, because that is what self-hosted services
+	// expect. Credentials always come from the AWS credential chain.
+	BackupS3Endpoint  string
+	BackupS3Region    string
+	BackupS3PathStyle bool
 	// TombstoneRetention is how long a deleted namespace entry's tombstone
 	// is kept before GC reclaims it — long enough to propagate to every
 	// replica. Set SILO_TOMBSTONE_RETENTION to override the 24h default.
@@ -246,6 +286,9 @@ type Config struct {
 	// restart, then unset it. Default false: silod prints a token only
 	// on the very first boot when the store is empty.
 	PrintBootstrapToken bool
+	// Pprof (SILO_PPROF, default false) mounts net/http/pprof under
+	// /debug/pprof/ on HTTPAddr.
+	Pprof bool
 }
 
 // EnvFunc resolves an env-var name to its value. Injected into Load so
@@ -269,41 +312,41 @@ func LoadFromEnv() (*Config, error) {
 func Load(env EnvFunc) (*Config, error) {
 	rawCACert := env("SILO_TLS_CA_CERT")
 	cfg := &Config{
-		NodeID:              env("SILO_NODE_ID"),
-		GRPCAddr:            envDefault(env, "SILO_GRPC_ADDR", DefaultGRPCAddr),
-		GRPCAdvertise:       env("SILO_GRPC_ADVERTISE"),
-		GRPCPeerAdvertise:   env("SILO_GRPC_PEER_ADVERTISE"),
-		BootstrapAddr:       envDefault(env, "SILO_BOOTSTRAP_ADDR", DefaultBootstrapAddr),
-		BootstrapAdvertise:  env("SILO_BOOTSTRAP_ADVERTISE"),
-		GossipAddr:          envDefault(env, "SILO_GOSSIP_ADDR", DefaultGossipAddr),
-		GossipAdvertise:     env("SILO_GOSSIP_ADVERTISE"),
-		HTTPAddr:            envDefault(env, "SILO_HTTP_ADDR", DefaultHTTPAddr),
-		NBDAddr:             env("SILO_NBD_ADDR"),
-		Domain:              env("SILO_DOMAIN"),
-		DataDir:             envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
-		KeySource:           KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),
-		KeyPath:             env("SILO_ENCRYPTION_KEY_PATH"),
-		BackupTarget:        env("SILO_BACKUP_TARGET"),
-		KMSKeyID:            env("SILO_KMS_KEY_ID"),
-		KMSVaultURL:         env("SILO_KMS_VAULT_URL"),
-		KMSKeyName:          env("SILO_KMS_KEY_NAME"),
-		ExtentReplication:   envBoolDefault(env, "SILO_EXTENT_REPLICATION", true),
-		ChunkGCEnable:       envBoolDefault(env, "SILO_CHUNK_GC_ENABLE", true),
-		LogLevel:            envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
-		LogFormat:           envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
-		CACertPath:          rawCACert,
-		CAKeyPath:           env("SILO_TLS_CA_KEY"),
-		NodeCertPath:        env("SILO_TLS_NODE_CERT"),
-		NodeKeyPath:         env("SILO_TLS_NODE_KEY"),
-		CRLPath:             env("SILO_TLS_CRL"),
-		RequireTokens:       envBool(env, "SILO_REQUIRE_TOKENS"),
-		DiskSteering:        envBoolDefault(env, "SILO_DISK_PRESSURE_STEERING", true),
-		CAExternal:          rawCACert != "",
-		CASeed:              envBool(env, "SILO_TLS_CA_SEED"),
-		PrintBootstrapToken: envBool(env, "SILO_PRINT_BOOTSTRAP_TOKEN"),
+		NodeID:             env("SILO_NODE_ID"),
+		GRPCAddr:           envDefault(env, "SILO_GRPC_ADDR", DefaultGRPCAddr),
+		GRPCAdvertise:      env("SILO_GRPC_ADVERTISE"),
+		GRPCPeerAdvertise:  env("SILO_GRPC_PEER_ADVERTISE"),
+		BootstrapAddr:      envDefault(env, "SILO_BOOTSTRAP_ADDR", DefaultBootstrapAddr),
+		BootstrapAdvertise: env("SILO_BOOTSTRAP_ADVERTISE"),
+		GossipAddr:         envDefault(env, "SILO_GOSSIP_ADDR", DefaultGossipAddr),
+		GossipAdvertise:    env("SILO_GOSSIP_ADVERTISE"),
+		HTTPAddr:           envDefault(env, "SILO_HTTP_ADDR", DefaultHTTPAddr),
+		NBDAddr:            env("SILO_NBD_ADDR"),
+		Domain:             env("SILO_DOMAIN"),
+		DataDir:            envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
+		KeySource:          KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),
+		KeyPath:            env("SILO_ENCRYPTION_KEY_PATH"),
+		BackupTarget:       env("SILO_BACKUP_TARGET"),
+		BackupS3Endpoint:   env("SILO_BACKUP_S3_ENDPOINT"),
+		BackupS3Region:     env("SILO_BACKUP_S3_REGION"),
+		KMSKeyID:           env("SILO_KMS_KEY_ID"),
+		KMSVaultURL:        env("SILO_KMS_VAULT_URL"),
+		KMSKeyName:         env("SILO_KMS_KEY_NAME"),
+		LogLevel:           envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
+		LogFormat:          envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
+		CACertPath:         rawCACert,
+		CAKeyPath:          env("SILO_TLS_CA_KEY"),
+		NodeCertPath:       env("SILO_TLS_NODE_CERT"),
+		NodeKeyPath:        env("SILO_TLS_NODE_KEY"),
+		CRLPath:            env("SILO_TLS_CRL"),
+		CAExternal:         rawCACert != "",
 	}
 
 	cfg.Seeds = parseSeeds(env("SILO_SEEDS"))
+
+	if err := loadBools(env, cfg); err != nil {
+		return nil, err
+	}
 
 	disk, err := diskThresholds(env)
 	if err != nil {
@@ -348,6 +391,30 @@ func Load(env EnvFunc) (*Config, error) {
 		return nil, err
 	}
 	cfg.BackupInterval = backupInterval
+
+	backupRetain, err := envInt(env, "SILO_BACKUP_RETAIN", DefaultBackupRetain)
+	if err != nil {
+		return nil, err
+	}
+	cfg.BackupRetain = backupRetain
+	cfg.BackupRetainFor = DefaultBackupRetainFor
+	if env("SILO_BACKUP_RETAIN_FOR") != "" {
+		// Unlike most durations here, an explicit 0 is meaningful (no
+		// floor), so the unset case is told apart before parsing.
+		retainFor, err := envDuration(env, "SILO_BACKUP_RETAIN_FOR")
+		if err != nil {
+			return nil, err
+		}
+		cfg.BackupRetainFor = retainFor
+	}
+	pathStyle, err := envBool(env, "SILO_BACKUP_S3_PATH_STYLE", cfg.BackupS3Endpoint != "")
+	if err != nil {
+		return nil, err
+	}
+	cfg.BackupS3PathStyle = pathStyle
+	if cfg.BackupS3Endpoint != "" && cfg.BackupS3Region == "" {
+		cfg.BackupS3Region = DefaultBackupS3Region
+	}
 
 	retention, err := envDuration(env, "SILO_TOMBSTONE_RETENTION")
 	if err != nil {
@@ -489,6 +556,9 @@ func (c *Config) Validate() error {
 	if c.Replication < 1 {
 		return fmt.Errorf("SILO_REPLICATION must be at least 1 (got %d); use 3 for production, 2 for two-node test setups, 1 for single-node-only", c.Replication)
 	}
+	if err := c.validateBackup(); err != nil {
+		return err
+	}
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
@@ -498,6 +568,24 @@ func (c *Config) Validate() error {
 	case "text", "json":
 	default:
 		return fmt.Errorf("SILO_LOG_FORMAT %q is not recognised; set it to text (human-readable) or json (machine-readable)", c.LogFormat)
+	}
+	return nil
+}
+
+// validateBackup checks the SILO_BACKUP_* settings that can be judged without
+// contacting the target.
+func (c *Config) validateBackup() error {
+	if c.BackupRetain < 0 {
+		return fmt.Errorf("SILO_BACKUP_RETAIN must be 0 or more (got %d); it is how many backups per node to keep, 7 by default, and 0 keeps everything", c.BackupRetain)
+	}
+	if c.BackupS3Endpoint == "" {
+		return nil
+	}
+	if !strings.HasPrefix(c.BackupTarget, "s3://") {
+		return errors.New("SILO_BACKUP_S3_ENDPOINT is set but SILO_BACKUP_TARGET is not an s3:// URL; set SILO_BACKUP_TARGET=s3://bucket/prefix, or unset SILO_BACKUP_S3_ENDPOINT")
+	}
+	if err := blobstore.ValidateS3Endpoint(c.BackupS3Endpoint); err != nil {
+		return fmt.Errorf("SILO_BACKUP_S3_ENDPOINT is not usable: %w", err)
 	}
 	return nil
 }
@@ -577,30 +665,48 @@ func envInt(env EnvFunc, key string, fallback int) (int, error) {
 	return n, nil
 }
 
-// envBool reads a boolean env var with a permissive truthy set ("1",
-// "true", "yes", case-insensitive). Missing or "0"/"false"/"no"/"" is
-// false. Strict parsing would force operators to know the exact spelling;
-// a permissive set matches the docker-compose ergonomics they already
-// expect from variables like SILO_LOG_FORMAT.
-func envBool(env EnvFunc, key string) bool {
-	switch strings.ToLower(env(key)) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
+// loadBools parses every boolean toggle. Each one is strict: a value that is
+// neither a true nor a false spelling is an error rather than a silent
+// default, because a typo like SILO_UI_ENABLED=disabled must not leave a
+// surface switched on that the operator meant to switch off.
+func loadBools(env EnvFunc, cfg *Config) error {
+	for _, b := range []struct {
+		key      string
+		dst      *bool
+		fallback bool
+	}{
+		{"SILO_UI_ENABLED", &cfg.UIEnabled, true},
+		{"SILO_EXTENT_REPLICATION", &cfg.ExtentReplication, true},
+		{"SILO_CHUNK_GC_ENABLE", &cfg.ChunkGCEnable, true},
+		{"SILO_DISK_PRESSURE_STEERING", &cfg.DiskSteering, true},
+		{"SILO_REQUIRE_TOKENS", &cfg.RequireTokens, false},
+		{"SILO_TLS_CA_SEED", &cfg.CASeed, false},
+		{"SILO_PRINT_BOOTSTRAP_TOKEN", &cfg.PrintBootstrapToken, false},
+		{"SILO_PPROF", &cfg.Pprof, false},
+	} {
+		v, err := envBool(env, b.key, b.fallback)
+		if err != nil {
+			return err
+		}
+		*b.dst = v
 	}
+	return nil
 }
 
-// envBoolDefault is envBool with an explicit fallback for the unset case, so a
-// flag can default to true (e.g. an opt-out toggle) rather than always-false.
-func envBoolDefault(env EnvFunc, key string, fallback bool) bool {
-	switch strings.ToLower(env(key)) {
+// envBool reads a boolean env var. Unset or blank gives fallback. The accepted
+// spellings are case-insensitive and ignore surrounding whitespace, which is
+// how values pasted into compose files and Helm values tend to arrive.
+func envBool(env EnvFunc, key string, fallback bool) (bool, error) {
+	raw := env(key)
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return fallback, nil
 	case "1", "true", "yes", "on":
-		return true
+		return true, nil
 	case "0", "false", "no", "off":
-		return false
+		return false, nil
 	default:
-		return fallback
+		return false, fmt.Errorf("%s must be true or false; got %q. Use true or false (1/0, yes/no and on/off also work), or unset it to keep the default (%t)", key, raw, fallback)
 	}
 }
 

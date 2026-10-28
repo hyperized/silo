@@ -45,6 +45,8 @@ func runMain(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runVolume(rest, stdout, stderr)
 	case "status":
 		return runStatus(rest, stdout, stderr)
+	case "backup":
+		return runBackup(rest, stdout, stderr)
 	case "node":
 		return runNode(rest, stdout, stderr)
 	case "ca":
@@ -75,6 +77,7 @@ Commands:
   volume     Create and manage block volumes
   status     Show cluster health and this node's storage
   node       Node lifecycle operations (drain)
+  backup     Run, list, verify and restore backups
   ca         Cluster CA operations: revoke certificates (offline)
   version    Print the siloctl version
   help       Show this message

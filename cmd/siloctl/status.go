@@ -47,8 +47,8 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// printStatus renders a cluster-health summary, a per-node table, and the
-// responding node's storage.
+// printStatus renders a cluster-health summary, a per-node table, the
+// responding node's storage, the volumes it knows about and its backup state.
 func printStatus(w io.Writer, resp *statusv1.GetStatusResponse) {
 	nodes := resp.GetNodes()
 	counts := map[statusv1.NodeState]int{}
@@ -74,6 +74,80 @@ func printStatus(w io.Writer, resp *statusv1.GetStatusResponse) {
 			resp.GetRespondingNodeId(), orDash(st.GetDataDir()),
 			humanizeBytes(st.GetUsedBytes()), humanizeBytes(st.GetCapacityBytes()),
 			humanizeBytes(st.GetAvailableBytes()), st.GetChunkCount(), plural(int(st.GetChunkCount())))
+	}
+	printVolumes(w, resp.GetVolumes())
+	printBackupStatus(w, resp.GetRespondingNodeId(), resp.GetBackup())
+}
+
+// printVolumes renders the volume table. ALLOCATED is extents written times
+// the extent size, so it rounds up to whole extents; it reads 0 B on a node
+// that does not hold a copy of that volume's extent map.
+func printVolumes(w io.Writer, vols []*statusv1.VolumeStatus) {
+	if len(vols) == 0 {
+		fmt.Fprintln(w, "\nVolumes: none yet (create one with 'siloctl volume create --size 10G /my-volume')")
+		return
+	}
+	fmt.Fprintf(w, "\nVolumes: %d\n", len(vols))
+	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "PATH\tSIZE\tALLOCATED\tWRITER")
+	for _, v := range vols {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+			v.GetPath(), volumeSize(v.GetSizeBytes()),
+			humanizeBytes(v.GetExtentsWritten()*v.GetExtentSizeBytes()),
+			orDash(v.GetLeaseHolder()))
+	}
+	_ = tw.Flush()
+}
+
+// volumeSize shows a dash for a volume created without a size, which cannot be
+// attached as a block device until it has one.
+func volumeSize(n int64) string {
+	if n <= 0 {
+		return "—"
+	}
+	return humanizeBytes(n)
+}
+
+// printBackupStatus renders the responding node's backup schedule and last
+// result.
+func printBackupStatus(w io.Writer, node string, b *statusv1.BackupStatus) {
+	if !b.GetConfigured() {
+		fmt.Fprintf(w, "\nBackup: not configured on %s (set SILO_BACKUP_TARGET to enable)\n", node)
+		return
+	}
+	fmt.Fprintf(w, "\nBackup: %s, every %s\n", termSafe(b.GetTarget()), time.Duration(b.GetIntervalSeconds())*time.Second)
+	if b.GetRunning() {
+		fmt.Fprintln(w, "  running now")
+	}
+	switch last := b.GetLastRun(); {
+	case last == nil:
+		fmt.Fprintln(w, "  last run: none yet")
+	case last.GetOk():
+		fmt.Fprintf(w, "  last run: ok %s (%d uploaded, %d already stored)\n", humanizeAge(last.GetFinishedUnix()), last.GetChunksUploaded(), last.GetChunksSkipped())
+	default:
+		fmt.Fprintf(w, "  last run: FAILED %s: %s\n", humanizeAge(last.GetFinishedUnix()), termSafe(last.GetError()))
+	}
+	if b.GetNextRunUnix() == 0 {
+		fmt.Fprintln(w, "  next run: not scheduled")
+		return
+	}
+	fmt.Fprintf(w, "  next run: %s\n", humanizeUntil(b.GetNextRunUnix()))
+}
+
+// humanizeUntil renders an epoch-seconds timestamp as a time from now.
+func humanizeUntil(unix int64) string {
+	d := time.Unix(unix, 0).Sub(statusNow())
+	switch {
+	case d <= 0:
+		return "due now"
+	case d < time.Minute:
+		return fmt.Sprintf("in %ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("in %dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("in %dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("in %dd", int(d.Hours())/24)
 	}
 }
 

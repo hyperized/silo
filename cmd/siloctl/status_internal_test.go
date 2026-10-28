@@ -184,3 +184,132 @@ func TestNodeStateStringAndHelpers(t *testing.T) {
 		t.Error("plural")
 	}
 }
+
+func TestPrintStatus_Volumes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		vols []*statusv1.VolumeStatus
+		want []string
+	}{
+		{name: "empty", want: []string{"Volumes: none yet", "siloctl volume create"}},
+		{
+			name: "table",
+			vols: []*statusv1.VolumeStatus{
+				{Path: "/db", SizeBytes: 1 << 30, ExtentSizeBytes: 64 << 10, ExtentsWritten: 16, LeaseHolder: "silo-a"},
+				{Path: "/unsized", ExtentSizeBytes: 4096},
+			},
+			want: []string{"Volumes: 2", "PATH", "ALLOCATED", "WRITER", "/db", "1.0 GiB", "1.0 MiB", "silo-a", "/unsized", "0 B"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printStatus(&buf, &statusv1.GetStatusResponse{RespondingNodeId: "n", Version: "v", Volumes: tc.vols})
+			for _, want := range tc.want {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("missing %q in:\n%s", want, buf.String())
+				}
+			}
+		})
+	}
+}
+
+func TestVolumeSize(t *testing.T) {
+	if got := volumeSize(0); got != "—" {
+		t.Errorf("volumeSize(0) = %q, want a dash", got)
+	}
+	if got := volumeSize(2048); got != "2.0 KiB" {
+		t.Errorf("volumeSize(2048) = %q", got)
+	}
+}
+
+func TestPrintBackupStatus(t *testing.T) {
+	prev := statusNow
+	t.Cleanup(func() { statusNow = prev })
+	now := time.Unix(2_000_000_000, 0)
+	statusNow = func() time.Time { return now }
+	ago := func(d time.Duration) int64 { return now.Add(-d).Unix() }
+	in := func(d time.Duration) int64 { return now.Add(d).Unix() }
+
+	tests := []struct {
+		name string
+		b    *statusv1.BackupStatus
+		want []string
+		not  []string
+	}{
+		{"nil", nil, []string{"Backup: not configured on silo-a (set SILO_BACKUP_TARGET to enable)"}, []string{"last run"}},
+		{"not configured", &statusv1.BackupStatus{}, []string{"not configured on silo-a"}, nil},
+		{"ok", &statusv1.BackupStatus{
+			Configured: true, Target: "s3://b/p", IntervalSeconds: 6 * 3600, NextRunUnix: in(3 * time.Hour),
+			LastRun: &statusv1.BackupRun{Ok: true, FinishedUnix: ago(2 * time.Hour), ChunksUploaded: 3, ChunksSkipped: 10},
+		}, []string{"Backup: s3://b/p, every 6h0m0s", "  last run: ok 2h ago (3 uploaded, 10 already stored)", "  next run: in 3h"}, []string{"running now"}},
+		{"failed and running", &statusv1.BackupStatus{
+			Configured: true, Target: "s3://b/p", IntervalSeconds: 3600, Running: true, NextRunUnix: in(30 * time.Second),
+			LastRun: &statusv1.BackupRun{FinishedUnix: ago(5 * time.Minute), Error: "target unreachable"},
+		}, []string{"  running now", "  last run: FAILED 5m ago: target unreachable", "  next run: in 30s"}, nil},
+		{"control characters in run error and target", &statusv1.BackupStatus{
+			Configured: true, Target: "s3://b/\x1b[2Jp", IntervalSeconds: 3600,
+			LastRun: &statusv1.BackupRun{FinishedUnix: ago(time.Minute), Error: "\x1b[31mboom\x07"},
+		}, []string{"Backup: s3://b/?[2Jp, every", "FAILED 1m ago: ?[31mboom?"}, []string{"\x1b", "\x07"}},
+		{"none yet, unscheduled", &statusv1.BackupStatus{Configured: true, Target: "/mnt/b", IntervalSeconds: 60}, []string{"  last run: none yet", "  next run: not scheduled"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printStatus(&buf, &statusv1.GetStatusResponse{RespondingNodeId: "silo-a", Backup: tt.b})
+			got := buf.String()
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("missing %q in:\n%s", w, got)
+				}
+			}
+			for _, w := range tt.not {
+				if strings.Contains(got, w) {
+					t.Errorf("unexpected %q in:\n%s", w, got)
+				}
+			}
+		})
+	}
+}
+
+func TestHumanizeUntil(t *testing.T) {
+	prev := statusNow
+	t.Cleanup(func() { statusNow = prev })
+	base := time.Unix(2_000_000_000, 0)
+	statusNow = func() time.Time { return base }
+
+	for _, tt := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{-time.Minute, "due now"},
+		{0, "due now"},
+		{45 * time.Second, "in 45s"},
+		{90 * time.Minute / 2, "in 45m"},
+		{5 * time.Hour, "in 5h"},
+		{49 * time.Hour, "in 2d"},
+	} {
+		if got := humanizeUntil(base.Add(tt.d).Unix()); got != tt.want {
+			t.Errorf("humanizeUntil(%v) = %q, want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
+func TestPrintStatus_SectionOrder(t *testing.T) {
+	var buf bytes.Buffer
+	printStatus(&buf, &statusv1.GetStatusResponse{
+		RespondingNodeId: "silo-a", Version: "v",
+		Nodes:   []*statusv1.NodeStatus{{Id: "silo-a", State: statusv1.NodeState_NODE_STATE_ALIVE}},
+		Storage: &statusv1.StorageStatus{DataDir: "/d"},
+		Volumes: []*statusv1.VolumeStatus{{Path: "/db"}},
+		Backup:  &statusv1.BackupStatus{Configured: true, Target: "s3://b/p", IntervalSeconds: 3600},
+	})
+	got := buf.String()
+	last := -1
+	for _, heading := range []string{"Cluster:", "NODE", "\nStorage on", "\nVolumes:", "\nBackup:"} {
+		i := strings.Index(got, heading)
+		if i <= last {
+			t.Fatalf("%q at %d, want after the previous section (%d) in:\n%s", heading, i, last, got)
+		}
+		last = i
+	}
+}

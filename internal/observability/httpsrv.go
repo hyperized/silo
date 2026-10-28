@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -27,6 +28,10 @@ type Server struct {
 	// the profiles expose runtime internals and carry a small always-on
 	// sampling cost, so they are a leak/latency diagnostic, not a default.
 	debugProfiles bool
+	// ui and statusJSON are optional; without ui the catch-all route answers
+	// with a JSON hint instead of the bare ServeMux 404.
+	ui         http.Handler
+	statusJSON http.Handler
 
 	mu sync.Mutex // guards ln; race detector caught a Start/Addr race
 	ln net.Listener
@@ -50,6 +55,20 @@ func WithDebugProfiles() Option {
 	return func(s *Server) { s.debugProfiles = true }
 }
 
+// WithUI mounts handler as the catch-all route at /. It must reject methods
+// other than GET and HEAD with 405 itself. Every other route on the
+// server is more specific, so /healthz, /metrics, /api/v1/status and
+// /debug/pprof/ keep precedence over the UI's client-side route fallback.
+func WithUI(handler http.Handler) Option {
+	return func(s *Server) { s.ui = handler }
+}
+
+// WithStatusJSON mounts handler at /api/v1/status for any method; the handler
+// owns method checks so a wrong method gets a JSON error, not a plain-text 405.
+func WithStatusJSON(handler http.Handler) Option {
+	return func(s *Server) { s.statusJSON = handler }
+}
+
 // NewServer wires the routes but does not bind the socket; call Start
 // for that. The split matters because bind failures should surface
 // during silod startup, not during ServeMux construction in tests.
@@ -67,6 +86,18 @@ func NewServer(addr, nodeID, version string, logger *slog.Logger, opts ...Option
 	if s.metrics != nil {
 		mux.Handle("GET /metrics", s.metrics)
 	}
+	if s.statusJSON != nil {
+		mux.Handle("/api/v1/status", s.statusJSON)
+	}
+	// The catch-all has no method in its pattern because "GET /" would
+	// conflict with the method-less pprof routes. That means it also receives
+	// POST /healthz and friends, so both catch-all handlers must answer a
+	// non-GET with 405 themselves.
+	if s.ui != nil {
+		mux.Handle("/", s.ui)
+	} else {
+		mux.HandleFunc("/", handleUIDisabled)
+	}
 	if s.debugProfiles {
 		// Standard net/http/pprof wiring: Index serves the profile list and the
 		// named profiles (heap, goroutine, allocs, …) under /debug/pprof/<name>;
@@ -77,10 +108,18 @@ func NewServer(addr, nodeID, version string, logger *slog.Logger, opts ...Option
 		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
+	// Every route here is a small GET, so tight limits cost nothing and stop a
+	// slow or idle client from pinning a connection on an unauthenticated port.
+	// WriteTimeout covers the status endpoint's own 5 s cap with room to spare.
+	// The pprof profile, trace and delta-profile handlers extend the deadline
+	// by their "seconds" parameter themselves, so a 30 s CPU profile still works.
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	return s
 }
@@ -135,5 +174,27 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	fmt.Fprintf(w, `{"status":"ok","node":%q,"version":%q}`+"\n", s.nodeID, s.version)
+}
+
+// handleUIDisabled answers every path no other route claims when the web UI is
+// off, so a browser pointed at the node learns why there is nothing to see.
+func handleUIDisabled(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeJSONError(w, http.StatusMethodNotAllowed, "this server is read-only; send a GET request")
+		return
+	}
+	writeJSONError(w, http.StatusNotFound, "nothing is served here: the web UI is turned off on this node; set SILO_UI_ENABLED=true and restart silod to serve it (the health check at /healthz keeps working either way)")
+}
+
+func writeJSONError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(struct {
+		Error string `json:"error"`
+	}{msg})
 }

@@ -49,9 +49,52 @@ message StorageStatus {
   int64 chunk_count = 5;
 }
 
+// VolumeStatus is one volume as the responding node's namespace replica sees it.
+message VolumeStatus {
+  string path = 1;
+  string inode = 2;
+  int64 size_bytes = 3;
+  int64 extent_size_bytes = 4;
+  // lease_holder is the writer currently attached, or empty when none.
+  string lease_holder = 5;
+  // extents_written counts extents that hold data; extents_written × extent_size_bytes
+  // approximates the bytes actually allocated.
+  int64 extents_written = 6;
+}
+
 message GetStatusResponse {
   string responding_node_id = 1;
   string version = 2;
   repeated NodeStatus nodes = 3;
   StorageStatus storage = 4;
+  BackupStatus backup = 5;
+  repeated VolumeStatus volumes = 6;
+}
+
+// BackupStatus is the responding node's backup configuration and the outcome
+// of its most recent run. Unconfigured nodes report configured=false.
+message BackupStatus {
+  bool configured = 1;
+  // target is the destination URL without credentials, e.g. s3://bucket/prefix.
+  string target = 2;
+  int64 interval_seconds = 3;
+  // next_run_unix is 0 when no run is scheduled.
+  int64 next_run_unix = 4;
+  bool running = 5;
+  // last_run is unset until a run has finished.
+  BackupRun last_run = 6;
+}
+
+message BackupRun {
+  int64 started_unix = 1;
+  int64 finished_unix = 2;
+  bool ok = 3;
+  // error is empty when ok; otherwise it tells the operator what to do next.
+  string error = 4;
+  int64 chunks_uploaded = 5;
+  // chunks_skipped were already present on the target.
+  int64 chunks_skipped = 6;
+  int64 bytes_uploaded = 7;
+  // manifest is the object key of the manifest this run wrote.
+  string manifest = 8;
 }

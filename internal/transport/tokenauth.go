@@ -58,6 +58,7 @@ var methodCapabilities = map[string]captoken.Capability{
 
 	"/silo.status.v1.ClusterStatus/GetStatus": captoken.CapStatusRead,
 	"/silo.node.v1.NodeAdmin/Drain":           captoken.CapNodeAdmin,
+	"/silo.node.v1.NodeAdmin/RunBackup":       captoken.CapNodeAdmin,
 }
 
 // UnaryInterceptor authorises a unary RPC. Stream RPCs go through

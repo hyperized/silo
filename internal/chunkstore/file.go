@@ -77,8 +77,13 @@ func NewFileStore(root string, cipher *crypto.Cipher, opts ...Option) (*FileStor
 	return s, nil
 }
 
-func (s *FileStore) path(id string) string {
-	return filepath.Join(s.root, id+chunkExt)
+func (s *FileStore) path(id string) string { return FilePath(s.root, id) }
+
+// FilePath is where a FileStore rooted at root keeps chunk id. Restore tools
+// use it to lay chunks out exactly as silod expects to find them at boot. The
+// caller must have validated id with ValidateID.
+func FilePath(root, id string) string {
+	return filepath.Join(root, id+chunkExt)
 }
 
 // Put validates the id, encrypts the chunk, and writes it atomically

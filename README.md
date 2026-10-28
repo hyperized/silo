@@ -22,6 +22,12 @@ before it returns.
   node plugin restart instead of returning I/O errors to the pod.
 - **Encrypted at rest and in flight.** AES-GCM with per-chunk keys, mTLS between
   nodes, and keys from a file or a cloud KMS.
+- **Incremental, restorable backups.** Nodes copy their still-encrypted chunks
+  and checksummed metadata to S3 or any S3-compatible store (MinIO, Backblaze B2,
+  Hetzner and others), GCS or Azure, and `siloctl backup restore` rebuilds a
+  node from any of them.
+- **Built-in status page.** A read-only web UI in every silod shows the nodes,
+  their capacity, your volumes and the last backup, with no extra service to run.
 
 You give up `ReadWriteMany` on block volumes, erasure coding, and some write
 latency for this. The full capability list, the reasoning, and the current status
@@ -35,9 +41,11 @@ Grafana, then creates and snapshots a volume.
 ```sh
 git clone https://github.com/hyperized/silo && cd silo
 
-make up        # build + boot 3 silod nodes (+ Prometheus on :9090, Grafana on :3030)
+make up        # build + boot 3 silod nodes (+ Prometheus :9090, Grafana :3030, backup storage :9001)
 make build     # compile ./bin/{silod,siloctl,silo-csi}
 ```
+
+Once it is up, open <http://localhost:7080/> for the read-only status page.
 
 `make up` scrapes silo-a's bootstrap token from the container logs and prints a
 paste-ready `siloctl auth init` command. Run it to claim your operator credentials.
@@ -58,6 +66,14 @@ Now drive the cluster. Every command authenticates over mTLS automatically:
 ./bin/siloctl volume snapshot /db /db-backup      # instant copy-on-write snapshot
 ./bin/siloctl ns ls /                             # list the namespace
 ./bin/siloctl auth status                         # show your cluster credentials
+```
+
+Every node backs up hourly to a bucket on a local S3-compatible server. The backup
+storage console (RustFS) is at http://localhost:9001/rustfs/console/ (login from `SILO_S3_ACCESS_KEY`
+and `SILO_S3_SECRET_KEY` in `deploy/.env`). Trigger a backup now and list the result:
+
+```sh
+make backup-demo
 ```
 
 Watch it heal: `docker kill silo-b`, then `make status` and re-list. The cluster

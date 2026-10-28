@@ -19,7 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NodeAdmin_Drain_FullMethodName = "/silo.node.v1.NodeAdmin/Drain"
+	NodeAdmin_Drain_FullMethodName     = "/silo.node.v1.NodeAdmin/Drain"
+	NodeAdmin_RunBackup_FullMethodName = "/silo.node.v1.NodeAdmin/RunBackup"
 )
 
 // NodeAdminClient is the client API for NodeAdmin service.
@@ -36,6 +37,11 @@ type NodeAdminClient interface {
 	// it is removed — drain is not shutdown. Watch silo_replication_shortfall_chunks
 	// fall to zero before removing the node.
 	Drain(ctx context.Context, in *DrainRequest, opts ...grpc.CallOption) (*DrainResponse, error)
+	// RunBackup starts a backup on the receiving node now and waits for it to
+	// finish. It fails with FAILED_PRECONDITION when backups are not configured
+	// on the node or a run is already in progress. A run the caller stops
+	// waiting for keeps going on the node; `siloctl status` shows its outcome.
+	RunBackup(ctx context.Context, in *RunBackupRequest, opts ...grpc.CallOption) (*RunBackupResponse, error)
 }
 
 type nodeAdminClient struct {
@@ -56,6 +62,16 @@ func (c *nodeAdminClient) Drain(ctx context.Context, in *DrainRequest, opts ...g
 	return out, nil
 }
 
+func (c *nodeAdminClient) RunBackup(ctx context.Context, in *RunBackupRequest, opts ...grpc.CallOption) (*RunBackupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RunBackupResponse)
+	err := c.cc.Invoke(ctx, NodeAdmin_RunBackup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NodeAdminServer is the server API for NodeAdmin service.
 // All implementations should embed UnimplementedNodeAdminServer
 // for forward compatibility.
@@ -70,6 +86,11 @@ type NodeAdminServer interface {
 	// it is removed — drain is not shutdown. Watch silo_replication_shortfall_chunks
 	// fall to zero before removing the node.
 	Drain(context.Context, *DrainRequest) (*DrainResponse, error)
+	// RunBackup starts a backup on the receiving node now and waits for it to
+	// finish. It fails with FAILED_PRECONDITION when backups are not configured
+	// on the node or a run is already in progress. A run the caller stops
+	// waiting for keeps going on the node; `siloctl status` shows its outcome.
+	RunBackup(context.Context, *RunBackupRequest) (*RunBackupResponse, error)
 }
 
 // UnimplementedNodeAdminServer should be embedded to have
@@ -81,6 +102,9 @@ type UnimplementedNodeAdminServer struct{}
 
 func (UnimplementedNodeAdminServer) Drain(context.Context, *DrainRequest) (*DrainResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Drain not implemented")
+}
+func (UnimplementedNodeAdminServer) RunBackup(context.Context, *RunBackupRequest) (*RunBackupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RunBackup not implemented")
 }
 func (UnimplementedNodeAdminServer) testEmbeddedByValue() {}
 
@@ -120,6 +144,24 @@ func _NodeAdmin_Drain_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NodeAdmin_RunBackup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunBackupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeAdminServer).RunBackup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeAdmin_RunBackup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeAdminServer).RunBackup(ctx, req.(*RunBackupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NodeAdmin_ServiceDesc is the grpc.ServiceDesc for NodeAdmin service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -130,6 +172,10 @@ var NodeAdmin_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Drain",
 			Handler:    _NodeAdmin_Drain_Handler,
+		},
+		{
+			MethodName: "RunBackup",
+			Handler:    _NodeAdmin_RunBackup_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

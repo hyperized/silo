@@ -14,9 +14,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/hyperized/silo/internal/backup"
 	"github.com/hyperized/silo/internal/bootstraptoken"
 	"github.com/hyperized/silo/internal/chunkstore"
 	"github.com/hyperized/silo/internal/clockskew"
+	"github.com/hyperized/silo/internal/clusterstatus"
 	"github.com/hyperized/silo/internal/clustertls"
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
@@ -32,6 +34,7 @@ import (
 	"github.com/hyperized/silo/internal/observability"
 	"github.com/hyperized/silo/internal/replication"
 	"github.com/hyperized/silo/internal/transport"
+	"github.com/hyperized/silo/internal/webui"
 
 	"google.golang.org/grpc/credentials"
 )
@@ -61,19 +64,28 @@ type subsystem interface {
 // Factories for each subsystem are package-level so tests can swap in
 // fakes without spinning up real listeners.
 var (
-	newHTTPSubsystem = func(cfg *config.Config, version string, logger *slog.Logger, metrics http.Handler) subsystem {
+	newHTTPSubsystem = func(cfg *config.Config, version string, logger *slog.Logger, metrics http.Handler, status *clusterstatus.Builder) subsystem {
 		opts := []observability.Option{observability.WithMetricsHandler(metrics)}
+		if cfg.UIEnabled {
+			opts = append(opts,
+				observability.WithUI(webui.Handler()),
+				observability.WithStatusJSON(clusterstatus.Handler(status)))
+		}
 		// SILO_PPROF mounts /debug/pprof/ for live heap/goroutine profiling.
 		// Opt-in so the profiling surface is absent unless an operator asks for
 		// it while diagnosing memory or latency.
-		if os.Getenv("SILO_PPROF") != "" {
+		if cfg.Pprof {
 			opts = append(opts, observability.WithDebugProfiles())
 		}
 		return &httpSub{srv: observability.NewServer(cfg.HTTPAddr, cfg.NodeID, version, logger, opts...)}
 	}
-	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, extStore transport.ExtentStore, extDeleter transport.ExtentDeleter, extSnapshotter transport.ExtentSnapshotter, members transport.StatusMembers, drainer transport.Drainer, version string, logger *slog.Logger) subsystem {
+	newGRPCSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokenAuth *transport.TokenAuthenticator, store chunkstore.Store, coord transport.Coordinator, ns transport.NamespaceOps, extStore transport.ExtentStore, extDeleter transport.ExtentDeleter, extSnapshotter transport.ExtentSnapshotter, status transport.StatusBuilder, drainer transport.Drainer, backupSub *backup.Subsystem, logger *slog.Logger) subsystem {
+		var adminOpts []transport.NodeAdminOption
+		if backupSub != nil {
+			adminOpts = append(adminOpts, transport.WithBackupRunner(backupSub))
+		}
 		opts := []transport.GRPCOption{
-			transport.WithStatusService(transport.NewStatusService(members, store, cfg.DataDir, cfg.NodeID, version, logger)),
+			transport.WithStatusService(transport.NewStatusService(status)),
 			transport.WithExtentService(transport.NewExtentService(extStore, logger)),
 			transport.WithNamespaceExtentDeleter(extDeleter),
 		}
@@ -85,7 +97,7 @@ var (
 			opts = append(opts, transport.WithNamespaceExtentSnapshotter(extSnapshotter))
 		}
 		if drainer != nil {
-			opts = append(opts, transport.WithNodeAdminService(transport.NewNodeAdminService(drainer, cfg.NodeID, logger)))
+			opts = append(opts, transport.WithNodeAdminService(transport.NewNodeAdminService(drainer, cfg.NodeID, logger, adminOpts...)))
 		}
 		if tokenAuth != nil {
 			opts = append(opts, transport.WithTokenAuth(tokenAuth))
@@ -455,7 +467,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// silently corrupts write order.
 	skew := clockskew.New(cfg.MaxClockSkew, logger)
 	clock := hlc.New(cfg.NodeID)
-	ns, err := newNamespace(clock, filepath.Join(cfg.DataDir, "namespace.json"), logger, namespace.WithPeerClockObserver(skew.Observe))
+	ns, err := newNamespace(clock, filepath.Join(cfg.DataDir, config.NamespaceFileName), logger, namespace.WithPeerClockObserver(skew.Observe))
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not open the namespace state (%w)", err)
 	}
@@ -480,7 +492,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	// gossiping it — so a large map no longer overflows the gossip per-message
 	// cap and a volume can be served on any node. The store is this node's local
 	// replica; extPeers dials the same mTLS data plane as chunks.
-	extStore, err := extentmap.Open(filepath.Join(cfg.DataDir, "extents"), logger)
+	extStore, err := extentmap.Open(filepath.Join(cfg.DataDir, config.ExtentsDirName), logger)
 	if err != nil {
 		return fmt.Errorf("silod.Run: could not open the extent-map store (%w)", err)
 	}
@@ -538,9 +550,30 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		}
 	}
 
+	// The backup subsystem is built before the status builder and the gRPC
+	// server so status can report on it and node-admin can trigger it.
+	var backupSub *backup.Subsystem
+	if cfg.BackupTarget != "" {
+		backupSub, err = newBackupSubsystem(cfg, store, ns, extStore, version, logger)
+		if err != nil {
+			return err
+		}
+		exp.Register(backupSub)
+	}
+
+	// One status builder feeds both `siloctl status` (gRPC) and the web UI's
+	// JSON endpoint, so the two can never report different things.
+	statusOpts := []clusterstatus.Option{clusterstatus.WithVolumes(ns), clusterstatus.WithExtentCounts(extStore)}
+	if backupSub != nil {
+		// Guarded rather than passed through: a nil *backup.Subsystem in the
+		// interface would not compare equal to nil inside the builder.
+		statusOpts = append(statusOpts, clusterstatus.WithBackup(backupSub))
+	}
+	status := clusterstatus.New(members, store, cfg.DataDir, cfg.NodeID, version, logger, statusOpts...)
+
 	subs := []subsystem{
-		newHTTPSubsystem(cfg, version, logger, exp.Handler()),
-		newGRPCSubsystem(cfg, serverTLS, tokenAuth, store, coord, ns, extStore, extCoord, extCoord, members, gossipDrainer(gossipSubsys), version, logger),
+		newHTTPSubsystem(cfg, version, logger, exp.Handler(), status),
+		newGRPCSubsystem(cfg, serverTLS, tokenAuth, store, coord, ns, extStore, extCoord, extCoord, status, gossipDrainer(gossipSubsys), backupSub, logger),
 		newBootstrapSubsystem(cfg, bootstrapTLS, tokens, transport.NewClientCertMinter(ca), logger),
 		gossipSubsys,
 		scrubberSubsys,
@@ -552,12 +585,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	if cfg.NBDAddr != "" {
 		subs = append(subs, newNBDSubsystem(cfg, ns, coord, extCoord, clock, logger))
 	}
-	if cfg.BackupTarget != "" {
-		backupSub, err := newBackupSubsystem(cfg, store, ns, extStore, logger)
-		if err != nil {
-			return err
-		}
-		exp.Register(backupSub)
+	if backupSub != nil {
 		subs = append(subs, backupSub)
 	}
 

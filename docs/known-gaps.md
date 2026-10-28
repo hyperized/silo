@@ -38,15 +38,17 @@ The library covers the **core** opcodes. Deferred:
 
 ## Backup, transports, and observability (deferred)
 
-- **Automated restore.** Backup *export* ships (encrypted chunks + namespace to
-  local/S3/GCS/Azure, `SILO_BACKUP_TARGET`); restoring is a manual procedure
-  today (recreate the data dir from the export, start with the same cluster
-  key). A `siloctl restore` command is future work.
 - **nvme-tcp target.** An alternative block transport to NBD. Deferred to a
   dedicated effort on a host with a kernel nvme-tcp initiator; it is the
   largest kernel-bound piece and is **v1.1-scoped**. The pure NVMe/TCP PDU
   codec could be built and unit-tested first (as the FUSE protocol layer was),
   with the kernel round-trip validated on a real host.
+- **Backup manifests are not authenticated.** Manifests carry checksums that
+  detect damage and mix-ups, but they are not signed. Anyone with write access to
+  the bucket can replace or forge backup metadata together with the matching
+  checksums. Mitigate it with bucket versioning or Object Lock (see
+  [Protecting the bucket](operations.md#protecting-the-bucket)), and by giving
+  prune (silod) and restore separate credentials.
 - **Data-key cache hit-rate metric.** silod currently unwraps each chunk's data
   key on demand; there is no DEK cache to measure. Closing this is two steps:
   add a wrapped-DEK cache in `internal/crypto`, then expose
