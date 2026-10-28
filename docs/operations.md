@@ -933,6 +933,8 @@ make nbd-demo-vm   # boots a throwaway aarch64 Linux guest under QEMU with the
 
 ## Web UI
 
+![The status page showing a warning: one suspect node, one disk at 84%, a failed backup](images/ui-warning-light.png)
+
 silod serves a read-only status page at `http://<node>:7080/`, on the same
 listener as `/healthz` and `/metrics`. It shows:
 
