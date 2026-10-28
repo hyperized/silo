@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>silo status</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.5; }
+      code { background: rgba(127, 127, 127, 0.15); padding: 0.1rem 0.3rem; border-radius: 0.25rem; }
+    </style>
+  </head>
+  <body>
+    <h1>silo is running</h1>
+    <p>This build of silod does not include the web UI. silod itself works normally.</p>
+    <p>To get the UI, build it and rebuild silod:</p>
+    <pre><code>make ui
+make build</code></pre>
+    <p>Until then, <code>siloctl status</code> shows the same information on the command line, and
+      <a href="/api/v1/status">/api/v1/status</a> serves it as JSON.</p>
+  </body>
+</html>

@@ -27,7 +27,7 @@ func TestNewGRPCServer_WithAllOptions(t *testing.T) {
 
 	srv := NewGRPCServer("127.0.0.1:0", serverTLS, store, nil, nil, logger,
 		WithTokenAuth(auth),
-		WithStatusService(NewStatusService(fakeStatusMembers{}, fakeStatusStore{}, "/d", "n", "v", logger)),
+		WithStatusService(NewStatusService(fakeStatusBuilder{})),
 		WithNodeAdminService(NewNodeAdminService(&fakeDrainer{}, "n", logger)),
 	)
 	if srv == nil {

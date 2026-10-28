@@ -16,8 +16,12 @@ import (
 func newTestServer(t *testing.T, opts ...Option) *Server {
 	t.Helper()
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := NewServer("127.0.0.1:0", "node-test", "v0.0.0-test", lg, opts...)
+	return startServer(t, NewServer("127.0.0.1:0", "node-test", "v0.0.0-test", lg, opts...))
+}
 
+// startServer runs an already-built Server, so a test can adjust it first.
+func startServer(t *testing.T, s *Server) *Server {
+	t.Helper()
 	started := make(chan struct{})
 	go func() {
 		// Start blocks; signal as soon as Start enters Serve.
@@ -204,5 +208,76 @@ func TestServer_StartReturnsErrorWhenListenerClosedAbruptly(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Start did not return within 2s after listener close")
+	}
+}
+
+func TestServer_UIAndStatusRoutes(t *testing.T) {
+	tagged := func(tag string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, tag) })
+	}
+	enabled := newTestServer(t,
+		WithMetricsHandler(tagged("metrics")),
+		WithDebugProfiles(),
+		WithUI(tagged("ui")),
+		WithStatusJSON(tagged("status")),
+	)
+	disabled := newTestServer(t)
+
+	for _, tc := range []struct {
+		name, method, path string
+		srv                *Server
+		code               int
+		body               string
+		nosniff            bool
+	}{
+		{name: "ui at root", method: http.MethodGet, path: "/", srv: enabled, code: 200, body: "ui"},
+		{name: "ui client route", method: http.MethodGet, path: "/volumes/a", srv: enabled, code: 200, body: "ui"},
+		{name: "status json", method: http.MethodGet, path: "/api/v1/status", srv: enabled, code: 200, body: "status"},
+		{name: "status json owns its methods", method: http.MethodPost, path: "/api/v1/status", srv: enabled, code: 200, body: "status"},
+		{name: "healthz beats ui", method: http.MethodGet, path: "/healthz", srv: enabled, code: 200, body: `"status":"ok"`, nosniff: true},
+		{name: "metrics beats ui", method: http.MethodGet, path: "/metrics", srv: enabled, code: 200, body: "metrics"},
+		{name: "pprof beats ui", method: http.MethodGet, path: "/debug/pprof/", srv: enabled, code: 200, body: "profiles"},
+		{name: "disabled root hints", method: http.MethodGet, path: "/", srv: disabled, code: 404, body: "SILO_UI_ENABLED", nosniff: true},
+		{name: "disabled status absent", method: http.MethodGet, path: "/api/v1/status", srv: disabled, code: 404, body: "SILO_UI_ENABLED"},
+		{name: "disabled post healthz still 405", method: http.MethodPost, path: "/healthz", srv: disabled, code: 405, body: "GET", nosniff: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, _ := http.NewRequest(tc.method, "http://"+tc.srv.Addr()+tc.path, nil)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", tc.method, tc.path, err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != tc.code || !strings.Contains(string(body), tc.body) {
+				t.Errorf("got %d %q, want %d containing %q", resp.StatusCode, body, tc.code, tc.body)
+			}
+			if tc.nosniff && resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+				t.Error("JSON response is missing X-Content-Type-Options: nosniff")
+			}
+		})
+	}
+}
+
+// A CPU profile streams for its "seconds" parameter, longer than WriteTimeout
+// in this test. net/http/pprof extends the deadline itself; this guards the
+// server config against ever breaking that.
+func TestServer_ProfileOutlivesWriteTimeout(t *testing.T) {
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := NewServer("127.0.0.1:0", "n", "v", lg, WithDebugProfiles())
+	if s.srv.ReadTimeout == 0 || s.srv.WriteTimeout == 0 || s.srv.IdleTimeout == 0 {
+		t.Fatalf("server timeouts must all be set, got read=%v write=%v idle=%v", s.srv.ReadTimeout, s.srv.WriteTimeout, s.srv.IdleTimeout)
+	}
+	s.srv.WriteTimeout = 300 * time.Millisecond
+	startServer(t, s)
+
+	resp, err := http.Get("http://" + s.Addr() + "/debug/pprof/profile?seconds=1")
+	if err != nil {
+		t.Fatalf("GET profile: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != http.StatusOK || len(body) == 0 {
+		t.Fatalf("profile: status %d, %d bytes, err %v; want a complete 200", resp.StatusCode, len(body), err)
 	}
 }

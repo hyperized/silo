@@ -14,12 +14,18 @@ LDFLAGS := -s -w -X main.version=$(VERSION)
 GO_TEST_FLAGS ?= -race -timeout 60s
 GO_PKGS := ./...
 
+UI_DIR := ui
+NPM ?= npm
+# SKIP_UI=1 makes `make build` skip the web UI step (CI sets it after
+# downloading the UI it built in an earlier job).
+SKIP_UI ?=
+
 # Default to an execs budget (Nx) so `make fuzz` stops deterministically and
 # exits cleanly; override with a duration for a longer run, e.g.
 # `make fuzz FUZZTIME=60s` per target.
 FUZZTIME ?= 1000000x
 
-.PHONY: help up up-local down restart build images test test-cover test-integration test-nbd-kernel bench bench-cluster fuzz lint fmt vet clean clean-creds logs status check proto nbd-demo nbd-demo-vm backup-demo
+.PHONY: help up up-local down restart build images test test-cover test-integration test-nbd-kernel bench bench-cluster fuzz lint fmt vet clean clean-creds logs status check proto nbd-demo nbd-demo-vm backup-demo ui ui-dev ui-test ui-lint
 .DEFAULT_GOAL := up
 
 help: ## Show this help and exit.
@@ -52,6 +58,7 @@ up: deploy/.env ## Build and start a 3-node silo cluster locally; print a ready-
 	@printf "  make logs       follow logs across the cluster\n"
 	@printf "  make down       stop everything (volumes + creds removed)\n\n"
 	@printf "Endpoints:\n"
+	@printf "  http://localhost:7080/          web UI (silo-a)\n"
 	@printf "  http://localhost:7080/healthz   silo-a\n"
 	@printf "  http://localhost:7081/healthz   silo-b\n"
 	@printf "  http://localhost:7082/healthz   silo-c\n"
@@ -146,7 +153,14 @@ deploy/.env:
 
 # --- Build & test ------------------------------------------------------------
 
-build: ## Build all Go binaries into bin/.
+build: ## Build all Go binaries into bin/ (builds the web UI first when npm is installed; SKIP_UI=1 skips that).
+	@if [ -z "$(SKIP_UI)" ]; then \
+	  if command -v $(NPM) >/dev/null 2>&1; then \
+	    $(MAKE) --no-print-directory ui; \
+	  else \
+	    printf "warning: npm not found; building silod with the placeholder web UI (install Node.js and run 'make ui' for the real one)\n" >&2; \
+	  fi; \
+	fi
 	@mkdir -p $(BIN)
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/silod ./cmd/silod
 	@CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BIN)/siloctl ./cmd/siloctl
@@ -234,6 +248,26 @@ vet: ## Run go vet.
 	@go vet $(GO_PKGS)
 
 check: fmt vet lint test ## Run formatters, linters, and tests.
+
+# --- Web UI ------------------------------------------------------------------
+
+ui: ## Build the web UI into internal/webui/dist/ (needs Node.js; silod embeds the result).
+	@if ! command -v $(NPM) >/dev/null 2>&1; then \
+	  printf "npm is not installed, so the web UI cannot be built.\nInstall Node.js LTS from https://nodejs.org/, then re-run 'make ui'.\n" >&2; \
+	  exit 1; \
+	fi
+	@rm -rf internal/webui/dist/assets
+	@cd $(UI_DIR) && $(NPM) ci && $(NPM) run build
+	@printf "Built the web UI into internal/webui/dist/ (rebuild silod to embed it)\n"
+
+ui-dev: ## Run the web UI dev server with hot reload (talks to a local silod on :7080).
+	@cd $(UI_DIR) && $(NPM) run dev
+
+ui-test: ## Run the web UI unit tests.
+	@cd $(UI_DIR) && $(NPM) run test -- --run
+
+ui-lint: ## Lint the web UI.
+	@cd $(UI_DIR) && $(NPM) run lint
 
 # --- Housekeeping ------------------------------------------------------------
 

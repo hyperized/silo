@@ -119,6 +119,10 @@ type Config struct {
 	GossipAddr         string
 	GossipAdvertise    string
 	HTTPAddr           string
+	// UIEnabled (SILO_UI_ENABLED, default true) serves the read-only status web
+	// UI and its JSON feed at /api/v1/status on HTTPAddr. Turning it off removes
+	// both routes; /healthz and /metrics are unaffected.
+	UIEnabled bool
 	// NBDAddr is the host:port the NBD block-device server listens on. Empty
 	// (the default) leaves NBD off: it is unauthenticated block I/O, so it is
 	// opt-in. Set SILO_NBD_ADDR (e.g. 0.0.0.0:10809) to serve volumes.
@@ -282,6 +286,9 @@ type Config struct {
 	// restart, then unset it. Default false: silod prints a token only
 	// on the very first boot when the store is empty.
 	PrintBootstrapToken bool
+	// Pprof (SILO_PPROF, default false) mounts net/http/pprof under
+	// /debug/pprof/ on HTTPAddr.
+	Pprof bool
 }
 
 // EnvFunc resolves an env-var name to its value. Injected into Load so
@@ -305,43 +312,41 @@ func LoadFromEnv() (*Config, error) {
 func Load(env EnvFunc) (*Config, error) {
 	rawCACert := env("SILO_TLS_CA_CERT")
 	cfg := &Config{
-		NodeID:              env("SILO_NODE_ID"),
-		GRPCAddr:            envDefault(env, "SILO_GRPC_ADDR", DefaultGRPCAddr),
-		GRPCAdvertise:       env("SILO_GRPC_ADVERTISE"),
-		GRPCPeerAdvertise:   env("SILO_GRPC_PEER_ADVERTISE"),
-		BootstrapAddr:       envDefault(env, "SILO_BOOTSTRAP_ADDR", DefaultBootstrapAddr),
-		BootstrapAdvertise:  env("SILO_BOOTSTRAP_ADVERTISE"),
-		GossipAddr:          envDefault(env, "SILO_GOSSIP_ADDR", DefaultGossipAddr),
-		GossipAdvertise:     env("SILO_GOSSIP_ADVERTISE"),
-		HTTPAddr:            envDefault(env, "SILO_HTTP_ADDR", DefaultHTTPAddr),
-		NBDAddr:             env("SILO_NBD_ADDR"),
-		Domain:              env("SILO_DOMAIN"),
-		DataDir:             envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
-		KeySource:           KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),
-		KeyPath:             env("SILO_ENCRYPTION_KEY_PATH"),
-		BackupTarget:        env("SILO_BACKUP_TARGET"),
-		BackupS3Endpoint:    env("SILO_BACKUP_S3_ENDPOINT"),
-		BackupS3Region:      env("SILO_BACKUP_S3_REGION"),
-		KMSKeyID:            env("SILO_KMS_KEY_ID"),
-		KMSVaultURL:         env("SILO_KMS_VAULT_URL"),
-		KMSKeyName:          env("SILO_KMS_KEY_NAME"),
-		ExtentReplication:   envBoolDefault(env, "SILO_EXTENT_REPLICATION", true),
-		ChunkGCEnable:       envBoolDefault(env, "SILO_CHUNK_GC_ENABLE", true),
-		LogLevel:            envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
-		LogFormat:           envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
-		CACertPath:          rawCACert,
-		CAKeyPath:           env("SILO_TLS_CA_KEY"),
-		NodeCertPath:        env("SILO_TLS_NODE_CERT"),
-		NodeKeyPath:         env("SILO_TLS_NODE_KEY"),
-		CRLPath:             env("SILO_TLS_CRL"),
-		RequireTokens:       envBool(env, "SILO_REQUIRE_TOKENS"),
-		DiskSteering:        envBoolDefault(env, "SILO_DISK_PRESSURE_STEERING", true),
-		CAExternal:          rawCACert != "",
-		CASeed:              envBool(env, "SILO_TLS_CA_SEED"),
-		PrintBootstrapToken: envBool(env, "SILO_PRINT_BOOTSTRAP_TOKEN"),
+		NodeID:             env("SILO_NODE_ID"),
+		GRPCAddr:           envDefault(env, "SILO_GRPC_ADDR", DefaultGRPCAddr),
+		GRPCAdvertise:      env("SILO_GRPC_ADVERTISE"),
+		GRPCPeerAdvertise:  env("SILO_GRPC_PEER_ADVERTISE"),
+		BootstrapAddr:      envDefault(env, "SILO_BOOTSTRAP_ADDR", DefaultBootstrapAddr),
+		BootstrapAdvertise: env("SILO_BOOTSTRAP_ADVERTISE"),
+		GossipAddr:         envDefault(env, "SILO_GOSSIP_ADDR", DefaultGossipAddr),
+		GossipAdvertise:    env("SILO_GOSSIP_ADVERTISE"),
+		HTTPAddr:           envDefault(env, "SILO_HTTP_ADDR", DefaultHTTPAddr),
+		NBDAddr:            env("SILO_NBD_ADDR"),
+		Domain:             env("SILO_DOMAIN"),
+		DataDir:            envDefault(env, "SILO_DATA_DIR", DefaultDataDir),
+		KeySource:          KeySource(envDefault(env, "SILO_ENCRYPTION_KEY_SOURCE", string(DefaultKeySource))),
+		KeyPath:            env("SILO_ENCRYPTION_KEY_PATH"),
+		BackupTarget:       env("SILO_BACKUP_TARGET"),
+		BackupS3Endpoint:   env("SILO_BACKUP_S3_ENDPOINT"),
+		BackupS3Region:     env("SILO_BACKUP_S3_REGION"),
+		KMSKeyID:           env("SILO_KMS_KEY_ID"),
+		KMSVaultURL:        env("SILO_KMS_VAULT_URL"),
+		KMSKeyName:         env("SILO_KMS_KEY_NAME"),
+		LogLevel:           envDefault(env, "SILO_LOG_LEVEL", DefaultLogLevel),
+		LogFormat:          envDefault(env, "SILO_LOG_FORMAT", DefaultLogFormat),
+		CACertPath:         rawCACert,
+		CAKeyPath:          env("SILO_TLS_CA_KEY"),
+		NodeCertPath:       env("SILO_TLS_NODE_CERT"),
+		NodeKeyPath:        env("SILO_TLS_NODE_KEY"),
+		CRLPath:            env("SILO_TLS_CRL"),
+		CAExternal:         rawCACert != "",
 	}
 
 	cfg.Seeds = parseSeeds(env("SILO_SEEDS"))
+
+	if err := loadBools(env, cfg); err != nil {
+		return nil, err
+	}
 
 	disk, err := diskThresholds(env)
 	if err != nil {
@@ -402,7 +407,11 @@ func Load(env EnvFunc) (*Config, error) {
 		}
 		cfg.BackupRetainFor = retainFor
 	}
-	cfg.BackupS3PathStyle = envBoolDefault(env, "SILO_BACKUP_S3_PATH_STYLE", cfg.BackupS3Endpoint != "")
+	pathStyle, err := envBool(env, "SILO_BACKUP_S3_PATH_STYLE", cfg.BackupS3Endpoint != "")
+	if err != nil {
+		return nil, err
+	}
+	cfg.BackupS3PathStyle = pathStyle
 	if cfg.BackupS3Endpoint != "" && cfg.BackupS3Region == "" {
 		cfg.BackupS3Region = DefaultBackupS3Region
 	}
@@ -656,30 +665,48 @@ func envInt(env EnvFunc, key string, fallback int) (int, error) {
 	return n, nil
 }
 
-// envBool reads a boolean env var with a permissive truthy set ("1",
-// "true", "yes", case-insensitive). Missing or "0"/"false"/"no"/"" is
-// false. Strict parsing would force operators to know the exact spelling;
-// a permissive set matches the docker-compose ergonomics they already
-// expect from variables like SILO_LOG_FORMAT.
-func envBool(env EnvFunc, key string) bool {
-	switch strings.ToLower(env(key)) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
+// loadBools parses every boolean toggle. Each one is strict: a value that is
+// neither a true nor a false spelling is an error rather than a silent
+// default, because a typo like SILO_UI_ENABLED=disabled must not leave a
+// surface switched on that the operator meant to switch off.
+func loadBools(env EnvFunc, cfg *Config) error {
+	for _, b := range []struct {
+		key      string
+		dst      *bool
+		fallback bool
+	}{
+		{"SILO_UI_ENABLED", &cfg.UIEnabled, true},
+		{"SILO_EXTENT_REPLICATION", &cfg.ExtentReplication, true},
+		{"SILO_CHUNK_GC_ENABLE", &cfg.ChunkGCEnable, true},
+		{"SILO_DISK_PRESSURE_STEERING", &cfg.DiskSteering, true},
+		{"SILO_REQUIRE_TOKENS", &cfg.RequireTokens, false},
+		{"SILO_TLS_CA_SEED", &cfg.CASeed, false},
+		{"SILO_PRINT_BOOTSTRAP_TOKEN", &cfg.PrintBootstrapToken, false},
+		{"SILO_PPROF", &cfg.Pprof, false},
+	} {
+		v, err := envBool(env, b.key, b.fallback)
+		if err != nil {
+			return err
+		}
+		*b.dst = v
 	}
+	return nil
 }
 
-// envBoolDefault is envBool with an explicit fallback for the unset case, so a
-// flag can default to true (e.g. an opt-out toggle) rather than always-false.
-func envBoolDefault(env EnvFunc, key string, fallback bool) bool {
-	switch strings.ToLower(env(key)) {
+// envBool reads a boolean env var. Unset or blank gives fallback. The accepted
+// spellings are case-insensitive and ignore surrounding whitespace, which is
+// how values pasted into compose files and Helm values tend to arrive.
+func envBool(env EnvFunc, key string, fallback bool) (bool, error) {
+	raw := env(key)
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return fallback, nil
 	case "1", "true", "yes", "on":
-		return true
+		return true, nil
 	case "0", "false", "no", "off":
-		return false
+		return false, nil
 	default:
-		return fallback
+		return false, fmt.Errorf("%s must be true or false; got %q. Use true or false (1/0, yes/no and on/off also work), or unset it to keep the default (%t)", key, raw, fallback)
 	}
 }
 

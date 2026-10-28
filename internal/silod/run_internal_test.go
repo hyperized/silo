@@ -16,9 +16,9 @@ import (
 	"time"
 
 	"github.com/hyperized/silo/internal/backup"
-
 	"github.com/hyperized/silo/internal/bootstraptoken"
 	"github.com/hyperized/silo/internal/chunkstore"
+	"github.com/hyperized/silo/internal/clusterstatus"
 	"github.com/hyperized/silo/internal/clustertls"
 	"github.com/hyperized/silo/internal/config"
 	"github.com/hyperized/silo/internal/crypto"
@@ -99,24 +99,28 @@ func (f *fakeSubsystem) Shutdown(_ context.Context) error {
 	return f.shutdownErr
 }
 
-// TestNewHTTPSubsystem_PprofGate drives the real HTTP subsystem factory (not a
-// fake) through both sides of the SILO_PPROF gate: unset omits the pprof
-// endpoint, set appends the debug-profiles option. NewServer only wires routes
-// (it does not bind a socket), so this stays a pure unit test.
-func TestNewHTTPSubsystem_PprofGate(t *testing.T) {
+// TestNewHTTPSubsystem_Gates drives the real HTTP subsystem factory (not a
+// fake) through both sides of the SILO_PPROF and SILO_UI_ENABLED gates.
+// NewServer only wires routes (it does not bind a socket), so this stays a
+// pure unit test.
+func TestNewHTTPSubsystem_Gates(t *testing.T) {
 	cfg := testConfig(t)
 	lg := discardLogger()
 
-	// Default: no SILO_PPROF in the environment.
-	t.Setenv("SILO_PPROF", "")
-	if sub := newHTTPSubsystem(cfg, "v-test", lg, nil); sub == nil {
-		t.Fatal("newHTTPSubsystem returned nil without SILO_PPROF")
-	}
-
-	// Set: exercises the gate's true branch (appends WithDebugProfiles).
-	t.Setenv("SILO_PPROF", "1")
-	if sub := newHTTPSubsystem(cfg, "v-test", lg, nil); sub == nil {
-		t.Fatal("newHTTPSubsystem returned nil with SILO_PPROF set")
+	for _, tc := range []struct {
+		name      string
+		pprof, ui bool
+	}{
+		{name: "defaults", ui: true},
+		{name: "pprof on, ui off", pprof: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.Pprof = tc.pprof
+			cfg.UIEnabled = tc.ui
+			if sub := newHTTPSubsystem(cfg, "v-test", lg, nil, nil); sub == nil {
+				t.Fatal("newHTTPSubsystem returned nil")
+			}
+		})
 	}
 }
 
@@ -144,8 +148,10 @@ func installFakes(t *testing.T, httpSub, grpcSub, bootSub, gossipSubFake *fakeSu
 		loadClusterTLS = prevTLS
 		openTokenStore = prevTokens
 	})
-	newHTTPSubsystem = func(_ *config.Config, _ string, _ *slog.Logger, _ http.Handler) subsystem { return httpSub }
-	newGRPCSubsystem = func(_ *config.Config, _ *tls.Config, _ *transport.TokenAuthenticator, _ chunkstore.Store, _ transport.Coordinator, _ transport.NamespaceOps, _ transport.ExtentStore, _ transport.ExtentDeleter, _ transport.ExtentSnapshotter, _ transport.StatusMembers, _ transport.Drainer, _ *backup.Subsystem, _ string, _ *slog.Logger) subsystem {
+	newHTTPSubsystem = func(_ *config.Config, _ string, _ *slog.Logger, _ http.Handler, _ *clusterstatus.Builder) subsystem {
+		return httpSub
+	}
+	newGRPCSubsystem = func(_ *config.Config, _ *tls.Config, _ *transport.TokenAuthenticator, _ chunkstore.Store, _ transport.Coordinator, _ transport.NamespaceOps, _ transport.ExtentStore, _ transport.ExtentDeleter, _ transport.ExtentSnapshotter, _ transport.StatusBuilder, _ transport.Drainer, _ *backup.Subsystem, _ *slog.Logger) subsystem {
 		return grpcSub
 	}
 	newBootstrapSubsystem = func(_ *config.Config, _ *tls.Config, _ transport.TokenRedeemer, _ transport.ClientCertMinter, _ *slog.Logger) subsystem {
@@ -1182,7 +1188,7 @@ func TestNewGRPCSubsystem_WiresOptionalServices(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := testConfig(t)
 			cfg.ExtentReplication = tc.extRepl
-			sub := newGRPCSubsystem(cfg, &tls.Config{MinVersion: tls.VersionTLS13}, tc.auth, nil, nil, nil, nil, nil, tc.snap, nil, tc.drainer, tc.backupSub, "v0", discardLogger())
+			sub := newGRPCSubsystem(cfg, &tls.Config{MinVersion: tls.VersionTLS13}, tc.auth, nil, nil, nil, nil, nil, tc.snap, nil, tc.drainer, tc.backupSub, discardLogger())
 			if sub == nil {
 				t.Fatal("newGRPCSubsystem returned nil")
 			}
@@ -1205,9 +1211,18 @@ func TestRun_BackupTarget(t *testing.T) {
 		bootSub := newFakeSubsystem("bootstrap", nil, nil, true)
 		gossipSub := newFakeSubsystem("gossip", nil, nil, true)
 		installFakes(t, httpSub, grpcSub, bootSub, gossipSub)
-		var got *backup.Subsystem
-		newGRPCSubsystem = func(_ *config.Config, _ *tls.Config, _ *transport.TokenAuthenticator, _ chunkstore.Store, _ transport.Coordinator, _ transport.NamespaceOps, _ transport.ExtentStore, _ transport.ExtentDeleter, _ transport.ExtentSnapshotter, _ transport.StatusMembers, _ transport.Drainer, b *backup.Subsystem, _ string, _ *slog.Logger) subsystem {
+		var (
+			got        *backup.Subsystem
+			grpcStatus transport.StatusBuilder
+			httpStatus *clusterstatus.Builder
+		)
+		newHTTPSubsystem = func(_ *config.Config, _ string, _ *slog.Logger, _ http.Handler, st *clusterstatus.Builder) subsystem {
+			httpStatus = st
+			return httpSub
+		}
+		newGRPCSubsystem = func(_ *config.Config, _ *tls.Config, _ *transport.TokenAuthenticator, _ chunkstore.Store, _ transport.Coordinator, _ transport.NamespaceOps, _ transport.ExtentStore, _ transport.ExtentDeleter, _ transport.ExtentSnapshotter, st transport.StatusBuilder, _ transport.Drainer, b *backup.Subsystem, _ *slog.Logger) subsystem {
 			got = b
+			grpcStatus = st
 			return grpcSub
 		}
 
@@ -1222,6 +1237,8 @@ func TestRun_BackupTarget(t *testing.T) {
 		<-grpcSub.startCh
 		<-bootSub.startCh
 		<-gossipSub.startCh
+		// Built while Run is still up, so the store the builder reads is open.
+		backupConfigured := httpStatus != nil && httpStatus.Build(context.Background()).GetBackup().GetConfigured()
 		cancel()
 
 		select {
@@ -1234,6 +1251,12 @@ func TestRun_BackupTarget(t *testing.T) {
 		}
 		if got == nil {
 			t.Error("the gRPC subsystem did not receive the backup subsystem")
+		}
+		if httpStatus == nil || grpcStatus != transport.StatusBuilder(httpStatus) {
+			t.Errorf("HTTP and gRPC got different status builders (%p vs %v); both surfaces must share one", httpStatus, grpcStatus)
+		}
+		if !backupConfigured {
+			t.Error("the shared status builder does not report the configured backup")
 		}
 	})
 
