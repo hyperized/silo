@@ -1,7 +1,7 @@
 // Kept apart from mock.ts so choosing a scenario never pulls the fixture into
 // the production bundle; mock.ts is only loaded through a dynamic import.
 
-export const MOCK_SCENARIOS = ['healthy', 'attention', 'degraded', 'empty', 'unconfigured', 'error'] as const
+export const MOCK_SCENARIOS = ['healthy', 'attention', 'degraded', 'incident', 'empty', 'unconfigured', 'error'] as const
 export type MockScenario = (typeof MOCK_SCENARIOS)[number]
 
 /**

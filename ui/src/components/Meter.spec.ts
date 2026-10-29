@@ -39,4 +39,29 @@ describe('Meter', () => {
     expect(w.find('[role="meter"]').exists()).toBe(false)
     expect(w.attributes('aria-hidden')).toBe('true')
   })
+
+  describe('size', () => {
+    function sized(size?: 'xs' | 'sm' | 'md', capacity = 100) {
+      return mount(Meter, {
+        props: { usedBytes: 10, capacityBytes: capacity, label: 'Disk', ...(size ? { size } : {}) },
+      })
+    }
+
+    it.each([
+      [undefined, 'h-1'],
+      ['xs', 'h-1'],
+      ['sm', 'h-1.5'],
+      ['md', 'h-2'],
+    ] as const)('maps size %s to %s on the meter', (size, cls) => {
+      expect(sized(size).get('[role="meter"]').classes()).toContain(cls)
+    })
+
+    it.each([
+      [undefined, 'h-1'],
+      ['sm', 'h-1.5'],
+      ['md', 'h-2'],
+    ] as const)('maps size %s to %s on the unknown-capacity track', (size, cls) => {
+      expect(sized(size, 0).classes()).toContain(cls)
+    })
+  })
 })

@@ -85,6 +85,8 @@
 @theme {
   --font-sans: 'Plex Sans', ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* 1100 px: where six instrument tiles and the 8 / 4 column split still fit. */
+  --breakpoint-wide: 68.75rem;
 }
 
 @layer base {
@@ -163,25 +165,5 @@
     color: var(--c-ink-3);
     font-family: var(--font-sans);
     font-size: 12px;
-  }
-}
-
-@keyframes flash {
-  from {
-    opacity: 1;
-  }
-
-  to {
-    opacity: 0;
-  }
-}
-
-@utility animate-flash {
-  @media (prefers-reduced-motion: no-preference) {
-    animation: flash 400ms ease-out forwards;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    opacity: 0;
   }
 }

@@ -2,42 +2,57 @@ import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import type { Finding } from '../lib/health'
 import IssueList from './IssueList.vue'
+import Skeleton from './Skeleton.vue'
 
-const FINDINGS: Finding[] = [
-  { level: 'degraded', text: 'node-b down for 5 min' },
-  { level: 'attention', text: 'Backup failed 1 h ago', detail: 'access denied' },
-]
+function list(findings: Finding[] | null) {
+  return mount(IssueList, { props: { findings } })
+}
 
 describe('IssueList', () => {
-  it('shows the number of findings in the heading', () => {
-    expect(mount(IssueList, { props: { findings: FINDINGS } }).get('h2').text()).toBe('Issues2')
+  it('shows skeletons and no count while the first answer is pending', () => {
+    const w = list(null)
+    expect(w.findAllComponents(Skeleton)).toHaveLength(2)
+    expect(w.get('h2').text()).toBe('Issues')
+    expect(w.find('ul').exists()).toBe(false)
   })
 
-  it('renders one item per finding', () => {
-    const items = mount(IssueList, { props: { findings: FINDINGS } }).findAll('li')
+  it('says there are no open issues', () => {
+    const w = list([])
+    expect(w.text()).toContain('No open issues')
+    expect(w.get('h2').text()).toBe('Issues')
+    expect(w.find('ul').exists()).toBe(false)
+  })
+
+  it('lists findings with the level as a word', () => {
+    const w = list([
+      { level: 'degraded', text: 'Cluster degraded' },
+      { level: 'attention', text: 'Backups overdue' },
+    ])
+    const items = w.findAll('li')
     expect(items).toHaveLength(2)
-    expect(items[0]?.text()).toContain('node-b down for 5 min')
-    expect(items[1]?.text()).toContain('Backup failed 1 h ago')
-  })
-
-  it('names the severity in words for assistive technology', () => {
-    const items = mount(IssueList, { props: { findings: FINDINGS } }).findAll('li')
+    expect(items[0]?.text()).toBe('Critical: Cluster degraded')
     expect(items[0]?.get('.sr-only').text()).toBe('Critical:')
-    expect(items[0]?.classes().length).toBeGreaterThan(0)
-    expect(items[0]?.get('span').classes()).toContain('text-crit')
+    expect(items[1]?.text()).toBe('Warning: Backups overdue')
     expect(items[1]?.get('.sr-only').text()).toBe('Warning:')
-    expect(items[1]?.get('span').classes()).toContain('text-warn')
+    expect(w.text()).not.toContain('No open issues')
   })
 
-  it('shows the detail in a code element only when present', () => {
-    const items = mount(IssueList, { props: { findings: FINDINGS } }).findAll('li')
-    expect(items[0]?.find('code').exists()).toBe(false)
-    expect(items[1]?.get('code').text()).toBe('access denied')
+  it('counts the findings in the heading', () => {
+    const w = list([
+      { level: 'attention', text: 'a' },
+      { level: 'attention', text: 'b' },
+      { level: 'attention', text: 'c' },
+    ])
+    expect(w.get('h2').text()).toBe('Issues3')
   })
 
-  it('renders an empty list with a zero count', () => {
-    const w = mount(IssueList, { props: { findings: [] } })
-    expect(w.get('h2').text()).toBe('Issues0')
-    expect(w.findAll('li')).toHaveLength(0)
+  it('prints a finding detail verbatim in a code block', () => {
+    const w = list([
+      { level: 'attention', text: 'Last backup failed', detail: 'upload: 403\n  forbidden' },
+      { level: 'attention', text: 'No detail here' },
+    ])
+    const codes = w.findAll('code')
+    expect(codes).toHaveLength(1)
+    expect(codes[0]?.text()).toBe('upload: 403\n  forbidden')
   })
 })
