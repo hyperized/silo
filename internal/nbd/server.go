@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,6 +95,11 @@ type Server struct {
 	backend    Backend
 	logger     *slog.Logger
 	drainGrace time.Duration
+
+	// attachMu guards attached, the number of transmitting connections per
+	// export name, which Attached reads for the operator status.
+	attachMu sync.Mutex
+	attached map[string]int
 }
 
 // ServerOption configures a Server.
@@ -115,7 +121,7 @@ func NewServer(backend Backend, logger *slog.Logger, opts ...ServerOption) *Serv
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Server{backend: backend, logger: logger, drainGrace: defaultDrainGrace}
+	s := &Server{backend: backend, logger: logger, drainGrace: defaultDrainGrace, attached: make(map[string]int)}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -267,8 +273,37 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn, register func(net
 	if register != nil && !register(conn, cs) {
 		return nil
 	}
+	s.markAttached(export, 1)
+	defer s.markAttached(export, -1)
 	s.logger.Info("nbd export attached", "export", export, "size", dev.Size())
 	return s.transmit(cs)
+}
+
+// AttachedExports returns the export names clients currently have open on
+// this server, past the handshake and transmitting, sorted and without
+// duplicates. Names are as the clients sent them. The slice is the caller's.
+// Safe for concurrent use.
+func (s *Server) AttachedExports() []string {
+	s.attachMu.Lock()
+	out := make([]string, 0, len(s.attached))
+	for export := range s.attached {
+		out = append(out, export)
+	}
+	s.attachMu.Unlock()
+	slices.Sort(out)
+	return out
+}
+
+// markAttached adjusts export's connection count, deleting the entry at zero
+// so the map does not grow with every export a node has ever served.
+func (s *Server) markAttached(export string, delta int) {
+	s.attachMu.Lock()
+	defer s.attachMu.Unlock()
+	if n := s.attached[export] + delta; n > 0 {
+		s.attached[export] = n
+	} else {
+		delete(s.attached, export)
+	}
 }
 
 // handshake performs the fixed-newstyle greeting and option haggling, returning

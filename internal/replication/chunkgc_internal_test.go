@@ -22,19 +22,24 @@ type fakeChunkLister struct {
 	statErr   map[string]error
 	statCalls int
 	mtimes    map[string]time.Time // per-chunk CreatedAt; zero value => epoch (old)
+	sizes     map[string]int64     // per-chunk StoredBytes
+	listHook  func()               // optional: runs inside List
 	delErr    map[string]error
 	deleted   []string
 	listedCh  chan struct{} // optional: one signal per List call
 }
 
 func newFakeChunkLister(ids ...string) *fakeChunkLister {
-	return &fakeChunkLister{ids: ids, statErr: map[string]error{}, mtimes: map[string]time.Time{}, delErr: map[string]error{}}
+	return &fakeChunkLister{ids: ids, statErr: map[string]error{}, mtimes: map[string]time.Time{}, sizes: map[string]int64{}, delErr: map[string]error{}}
 }
 
 func (f *fakeChunkLister) List(context.Context) ([]string, error) {
 	f.mu.Lock()
 	f.listCalls++
 	f.mu.Unlock()
+	if f.listHook != nil {
+		f.listHook()
+	}
 	if f.listedCh != nil {
 		select {
 		case f.listedCh <- struct{}{}:
@@ -51,7 +56,7 @@ func (f *fakeChunkLister) Stat(_ context.Context, id string) (chunkstore.Info, e
 	if err := f.statErr[id]; err != nil {
 		return chunkstore.Info{}, err
 	}
-	return chunkstore.Info{ID: id, CreatedAt: f.mtimes[id]}, nil
+	return chunkstore.Info{ID: id, CreatedAt: f.mtimes[id], StoredBytes: f.sizes[id]}, nil
 }
 
 func (f *fakeChunkLister) Delete(_ context.Context, id string) error {
@@ -615,5 +620,101 @@ func TestChunkGC_IncompleteViewTakesPrecedenceOverDivergence(t *testing.T) {
 	}
 	if len(lister.snapNoSync()) != 0 {
 		t.Error("nothing may be reclaimed on an incomplete view")
+	}
+}
+
+// --- operator status ---------------------------------------------------------
+
+func TestChunkGC_StatusBeforeFirstSweep(t *testing.T) {
+	g := NewChunkGC(newFakeChunkLister(), fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog())
+	if got := g.Status(); got != (ChunkGCStatus{Enabled: true}) {
+		t.Errorf("Status before any sweep = %+v, want only Enabled", got)
+	}
+}
+
+func TestChunkGC_StatusRecordsLastSweep(t *testing.T) {
+	ext := fakeExtRefs{vols: map[string][]crdt.MapEntry[uint64, string]{"v1": nil}}
+	for _, tc := range []struct {
+		name        string
+		setup       func(*fakeChunkLister, *ChunkGC) context.Context
+		ns          fakeNSRefs
+		wantDeleted int64
+		wantFreed   int64
+		wantErr     string
+	}{
+		{
+			name: "completed sweep counts deletions and stored bytes",
+			setup: func(l *fakeChunkLister, _ *ChunkGC) context.Context {
+				l.sizes["o1"], l.sizes["o2"] = 100, 50
+				return context.Background()
+			},
+			wantDeleted: 2, wantFreed: 150,
+		},
+		{
+			name:    "incomplete view",
+			setup:   func(*fakeChunkLister, *ChunkGC) context.Context { return context.Background() },
+			ns:      fakeNSRefs{volumes: []string{"v1", "v2"}},
+			wantErr: gcErrIncomplete,
+		},
+		{
+			name: "diverged maps",
+			setup: func(_ *fakeChunkLister, g *ChunkGC) context.Context {
+				g.agreement = &fakeAgreement{who: "v1"}
+				return context.Background()
+			},
+			wantErr: gcErrDiverged,
+		},
+		{
+			name: "list failure",
+			setup: func(l *fakeChunkLister, _ *ChunkGC) context.Context {
+				l.listErr = errors.New("readdir boom")
+				return context.Background()
+			},
+			wantErr: gcErrList + "readdir boom",
+		},
+		{
+			name: "shutdown mid-sweep",
+			setup: func(l *fakeChunkLister, _ *ChunkGC) context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				l.listHook = cancel
+				return ctx
+			},
+			wantErr: gcErrShutdown,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lister := newFakeChunkLister("o1", "o2")
+			g := NewChunkGC(lister, tc.ns, ext, "a", time.Hour, time.Hour, true, quietLog())
+			base := time.Unix(1_000_000, 0)
+			ticks := 0
+			g.now = func() time.Time { ticks++; return base.Add(time.Duration(ticks) * time.Second) }
+			ctx := tc.setup(lister, g)
+
+			g.runOnce(ctx)
+
+			st := g.Status()
+			if st.Running || !st.Enabled || st.LastRun.IsZero() || st.LastDuration <= 0 {
+				t.Errorf("status bookkeeping: %+v", st)
+			}
+			if st.LastDeleted != tc.wantDeleted || st.LastBytesFreed != tc.wantFreed || st.LastError != tc.wantErr {
+				t.Errorf("got deleted=%d freed=%d err=%q, want %d/%d/%q", st.LastDeleted, st.LastBytesFreed, st.LastError, tc.wantDeleted, tc.wantFreed, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestChunkGC_StatusRunningDuringSweep(t *testing.T) {
+	lister := newFakeChunkLister()
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, false, quietLog())
+	var during ChunkGCStatus
+	lister.listHook = func() { during = g.Status() }
+
+	g.runOnce(context.Background())
+
+	if !during.Running {
+		t.Error("Status during a sweep should report Running")
+	}
+	if g.Status().Running {
+		t.Error("Status after the sweep should not report Running")
 	}
 }

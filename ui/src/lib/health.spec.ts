@@ -1,12 +1,21 @@
 import { describe, it, expect } from 'vitest'
-import type { Backup, BackupRun, ClusterNode, NodeState, Status } from '../api/status'
+import type { Backup, BackupRun, ClusterHealth, ClusterNode, Gc, NodeState, Status, Volume } from '../api/status'
 import {
   backupKind,
   deriveHealth,
   fillLevel,
+  GC_NEVER_AFTER_MS,
+  gcKind,
+  maxSkewMs,
   nodeLevel,
   OVERDUE_GRACE_MS,
+  replicationKind,
+  SKEW_CRIT_MS,
+  SKEW_WARN_MS,
+  skewLevel,
+  stateById,
   usageRatio,
+  volumeDegraded,
   worst,
   type Level,
 } from './health'
@@ -27,6 +36,8 @@ function node(id: string, state: NodeState = 'alive', over: Partial<ClusterNode>
     lastChange: null,
     capacityBytes: 100,
     usedBytes: 30,
+    pressured: false,
+    clockSkewMs: 0,
     ...over,
   }
 }
@@ -57,6 +68,46 @@ function backup(over: Partial<Backup> = {}): Backup {
   }
 }
 
+function cluster(over: Partial<ClusterHealth> = {}): ClusterHealth {
+  return {
+    replicationFactor: 3,
+    aliveNodes: 3,
+    isolated: false,
+    rejoinAttempts: 0,
+    clockSkewMs: 0,
+    clockSkewAlerts: 0,
+    startedAt: ago(48 * HOUR),
+    ...over,
+  }
+}
+
+function gc(over: Partial<Gc> = {}): Gc {
+  return {
+    enabled: true,
+    running: false,
+    lastRunAt: ago(HOUR),
+    lastDurationMs: 1000,
+    lastOrphansDeleted: 1,
+    lastBytesFreed: 1,
+    lastError: '',
+    ...over,
+  }
+}
+
+function vol(path: string, over: Partial<Volume> = {}): Volume {
+  return {
+    path,
+    sizeBytes: 100,
+    allocatedBytes: 0,
+    extentSizeBytes: 1,
+    leaseHolder: '',
+    replicas: ['a', 'b', 'c'],
+    mapDamaged: false,
+    attachedHere: false,
+    ...over,
+  }
+}
+
 function status(over: Partial<Status> = {}): Status {
   return {
     respondingNodeId: 'a',
@@ -65,6 +116,8 @@ function status(over: Partial<Status> = {}): Status {
     storage: null,
     backup: backup(),
     volumes: [],
+    health: null,
+    gc: null,
     ...over,
   }
 }
@@ -176,6 +229,68 @@ describe('backupKind', () => {
 
   it('has no missed schedule when nextRunAt is unknown', () => {
     expect(backupKind(backup({ nextRunAt: null, lastRun: null }), NOW)).toBe('never')
+  })
+})
+
+describe('skewLevel', () => {
+  it.each<[number, Level]>([
+    [0, 'healthy'],
+    [SKEW_WARN_MS - 1, 'healthy'],
+    [SKEW_WARN_MS, 'attention'],
+    [-SKEW_WARN_MS, 'attention'],
+    [SKEW_CRIT_MS - 1, 'attention'],
+    [SKEW_CRIT_MS, 'degraded'],
+    [-5000, 'degraded'],
+  ])('%d ms is %s', (ms, want) => {
+    expect(skewLevel(ms)).toBe(want)
+  })
+})
+
+describe('replicationKind', () => {
+  it.each<[string, ClusterHealth | null, ReturnType<typeof replicationKind>]>([
+    ['no report', null, null],
+    ['no replication factor', cluster({ replicationFactor: 0 }), null],
+    ['all alive', cluster(), 'healthy'],
+    ['more alive than replicas', cluster({ aliveNodes: 5 }), 'healthy'],
+    ['one short', cluster({ aliveNodes: 2 }), 'degraded'],
+    ['none alive', cluster({ aliveNodes: 0 }), 'degraded'],
+  ])('%s', (_n, h, want) => {
+    expect(replicationKind(h)).toBe(want)
+  })
+})
+
+describe('gcKind', () => {
+  it.each<[string, Gc, ReturnType<typeof gcKind>]>([
+    ['disabled, even with an error', gc({ enabled: false, lastError: 'x' }), 'off'],
+    ['running, even after a failure', gc({ running: true, lastError: 'x' }), 'running'],
+    ['failed', gc({ lastError: 'x' }), 'failed'],
+    ['ok', gc(), 'ok'],
+    ['never', gc({ lastRunAt: null }), 'never'],
+  ])('%s', (_n, g, want) => {
+    expect(gcKind(g)).toBe(want)
+  })
+})
+
+describe('volumeDegraded', () => {
+  const states = stateById([node('a'), node('b'), node('c', 'suspect')])
+
+  it.each<[string, Volume, number, boolean]>([
+    ['all replicas alive', vol('/v', { replicas: ['a', 'b'] }), 2, false],
+    ['a replica not alive', vol('/v', { replicas: ['a', 'c'] }), 2, true],
+    ['a replica missing from the node table', vol('/v', { replicas: ['a', 'z'] }), 2, true],
+    ['a set shorter than the factor', vol('/v', { replicas: ['a', 'b'] }), 3, true],
+    ['nothing reported by an older silod', vol('/v', { replicas: [] }), 0, false],
+  ])('%s', (_n, v, rf, want) => {
+    expect(volumeDegraded(v, states, rf)).toBe(want)
+  })
+})
+
+describe('maxSkewMs', () => {
+  it('takes the largest absolute value of the summary and the nodes', () => {
+    const nodes = [node('a'), node('b', 'alive', { clockSkewMs: -900 }), node('c', 'alive', { clockSkewMs: 300 })]
+    expect(maxSkewMs(status({ nodes, health: cluster({ clockSkewMs: 400 }) }))).toBe(900)
+    expect(maxSkewMs(status({ nodes, health: cluster({ clockSkewMs: 1200 }) }))).toBe(1200)
+    expect(maxSkewMs(status({ nodes: [node('a')] }))).toBe(0)
   })
 })
 
@@ -359,5 +474,129 @@ describe('deriveHealth', () => {
       'b disk 85% full',
       'Backup failed 2 h ago',
     ])
+  })
+
+  describe('cluster health', () => {
+    const texts = (over: Partial<Status>): string[] => deriveHealth(status(over), NOW).findings.map((f) => f.text)
+
+    it('stays healthy with every new field at its healthy value', () => {
+      const h = deriveHealth(status({ health: cluster(), gc: gc(), volumes: [vol('/v')] }), NOW)
+      expect(h.level).toBe('healthy')
+      expect(h.findings).toEqual([])
+    })
+
+    it('degrades when fewer nodes are alive than the replication factor', () => {
+      const h = deriveHealth(status({ health: cluster({ aliveNodes: 1 }) }), NOW)
+      expect(h.level).toBe('degraded')
+      expect(h.findings).toEqual([{ level: 'degraded', text: 'Cluster degraded: 1 node alive, replication factor 3' }])
+      expect(texts({ health: cluster({ aliveNodes: 2 }) })).toEqual(['Cluster degraded: 2 nodes alive, replication factor 3'])
+    })
+
+    it('degrades when the responding node is isolated, with rejoin attempts when there are any', () => {
+      expect(deriveHealth(status({ health: cluster({ isolated: true }) }), NOW).findings).toEqual([
+        { level: 'degraded', text: 'a isolated from its peers' },
+      ])
+      expect(texts({ health: cluster({ isolated: true, rejoinAttempts: 1 }) })).toEqual([
+        'a isolated from its peers, 1 rejoin attempt',
+      ])
+      expect(texts({ health: cluster({ isolated: true, rejoinAttempts: 12 }) })).toEqual([
+        'a isolated from its peers, 12 rejoin attempts',
+      ])
+    })
+
+    it.each<[number, Level | null]>([
+      [499, null],
+      [500, 'attention'],
+      [1999, 'attention'],
+      [2000, 'degraded'],
+    ])('flags a clock skew of %d ms as %s', (ms, want) => {
+      const f = deriveHealth(status({ health: cluster({ clockSkewMs: ms }) }), NOW).findings
+      expect(f).toEqual(want ? [{ level: want, text: `Clock skew ${ms.toLocaleString('en')} ms` }] : [])
+    })
+
+    it('flags node skew even without a health report', () => {
+      expect(texts({ nodes: [node('a'), node('b', 'alive', { clockSkewMs: -600 })] })).toEqual(['Clock skew 600 ms'])
+    })
+
+    it('needs attention for a pressured node but ignores one that left', () => {
+      const nodes = [node('a'), node('b', 'alive', { pressured: true }), node('c', 'left', { pressured: true })]
+      expect(deriveHealth(status({ nodes }), NOW).findings).toEqual([{ level: 'attention', text: 'b pressured' }])
+    })
+
+    it('counts degraded volumes and damaged maps', () => {
+      const nodes = [node('a'), node('b'), node('c', 'dead')]
+      const volumes = [
+        vol('/one', { replicas: ['a', 'b'] }),
+        vol('/two', { replicas: ['a', 'b', 'c'], mapDamaged: true }),
+        vol('/three', { replicas: ['a', 'b', 'c'] }),
+      ]
+      const h = deriveHealth(status({ nodes, volumes, health: cluster({ aliveNodes: 3 }) }), NOW)
+      expect(h.findings).toEqual([
+        { level: 'degraded', text: 'c down' },
+        { level: 'degraded', text: '1 volume map damaged' },
+        { level: 'attention', text: '3 volumes degraded' },
+      ])
+      expect(texts({ volumes: [vol('/a', { mapDamaged: true }), vol('/b', { mapDamaged: true })] })).toEqual([
+        '2 volume maps damaged',
+      ])
+      expect(texts({ volumes: [vol('/a', { replicas: ['a', 'z'] })] })).toEqual(['1 volume degraded'])
+    })
+
+    it('does not call a volume degraded for a short set when the factor is unknown', () => {
+      expect(texts({ volumes: [vol('/a', { replicas: ['a'] })] })).toEqual([])
+    })
+
+    describe('gc', () => {
+      it('failed carries the error and the age of the last run', () => {
+        expect(deriveHealth(status({ gc: gc({ lastError: 'disk gone' }) }), NOW).findings).toEqual([
+          { level: 'attention', text: 'GC failed 1 h ago', detail: 'disk gone' },
+        ])
+      })
+
+      it('failed without a finished run has no age', () => {
+        expect(texts({ gc: gc({ lastError: 'x', lastRunAt: null }) })).toEqual(['GC failed'])
+      })
+
+      it('needs attention when it never ran after a day of uptime', () => {
+        expect(deriveHealth(status({ health: cluster(), gc: gc({ lastRunAt: null }) }), NOW).findings).toEqual([
+          { level: 'attention', text: 'GC has not run since silod started 2 d ago' },
+        ])
+      })
+
+      it.each<[string, Partial<Status>]>([
+        ['within the first day', { health: cluster({ startedAt: ago(GC_NEVER_AFTER_MS) }), gc: gc({ lastRunAt: null }) }],
+        ['without a start time', { health: cluster({ startedAt: null }), gc: gc({ lastRunAt: null }) }],
+        ['without a health report', { gc: gc({ lastRunAt: null }) }],
+        ['while disabled', { health: cluster(), gc: gc({ enabled: false, lastRunAt: null }) }],
+        ['while running', { health: cluster(), gc: gc({ running: true, lastRunAt: null }) }],
+      ])('does not flag a missing run %s', (_n, over) => {
+        expect(texts(over)).toEqual([])
+      })
+    })
+
+    it('orders cluster findings before node, volume, backup and GC findings within a level', () => {
+      const nodes = [node('a', 'alive', { pressured: true }), node('b', 'suspect'), node('c')]
+      const h = deriveHealth(
+        status({
+          nodes,
+          health: cluster({ aliveNodes: 2, isolated: true, clockSkewMs: 700 }),
+          volumes: [vol('/v')],
+          gc: gc({ lastError: 'x' }),
+          backup: backup({ lastRun: run({ ok: false }) }),
+        }),
+        NOW,
+      )
+      expect(h.level).toBe('degraded')
+      expect(h.findings.map((f) => f.text)).toEqual([
+        'Cluster degraded: 2 nodes alive, replication factor 3',
+        'a isolated from its peers',
+        'b suspect',
+        'a pressured',
+        'Clock skew 700 ms',
+        '1 volume degraded',
+        'Backup failed 2 h ago',
+        'GC failed 1 h ago',
+      ])
+    })
   })
 })

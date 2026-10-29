@@ -138,6 +138,23 @@ func (m *Monitor) Alerts() uint64 {
 	return m.alerts
 }
 
+// PeerSkews returns the latest signed skew to each peer observed within the
+// stale window, keyed by peer node id; positive means the peer is ahead. The
+// map is a fresh copy owned by the caller. Stale readings are skipped, not
+// pruned, so a status read never changes what the metrics scrape reports.
+func (m *Monitor) PeerSkews() map[string]time.Duration {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make(map[string]time.Duration, len(m.peers))
+	for peer, r := range m.peers {
+		if now.Sub(r.at) <= m.staleAfter {
+			out[peer] = r.skew
+		}
+	}
+	return out
+}
+
 // MetricPrefix namespaces the monitor's metrics under the HLC subsystem.
 func (m *Monitor) MetricPrefix() string { return "silo_hlc" }
 

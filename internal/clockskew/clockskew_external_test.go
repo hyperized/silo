@@ -183,3 +183,26 @@ func TestMonitor_NilLoggerDoesNotPanic(t *testing.T) {
 		t.Errorf("alerts = %d, want 1", m.Alerts())
 	}
 }
+
+func TestMonitor_PeerSkewsSkipsStaleWithoutPruning(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	m := clockskew.New(time.Second, discardLogger(),
+		clockskew.WithNow(func() time.Time { return now }),
+		clockskew.WithStaleAfter(time.Minute))
+	m.Observe("old", now.Add(-3*time.Second).UnixNano())
+	now = now.Add(2 * time.Minute)
+	m.Observe("fresh", now.Add(250*time.Millisecond).UnixNano())
+
+	got := m.PeerSkews()
+	if len(got) != 1 || got["fresh"] != 250*time.Millisecond {
+		t.Errorf("PeerSkews = %v, want only fresh at 250ms", got)
+	}
+	got["fresh"] = 0 // the caller owns the copy
+	if m.PeerSkews()["fresh"] != 250*time.Millisecond {
+		t.Error("mutating the returned map changed the monitor")
+	}
+	// A status read must not disturb what the scrape reports.
+	if n := len(m.CollectMetrics()); n != 2 {
+		t.Errorf("CollectMetrics returned %d series, want fresh + alerts", n)
+	}
+}

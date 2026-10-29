@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1164,5 +1165,35 @@ func TestServer_ShutdownCutsHandshakingConnections(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Serve did not return")
+	}
+}
+
+func TestServer_AttachedTracksTransmittingExports(t *testing.T) {
+	b := &backend{dev: &memDevice{data: make([]byte, 4096)}}
+	srv := nbd.NewServer(b, discardLogger())
+	cli, ser := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close() })
+	done := make(chan error, 1)
+	go func() { done <- srv.ServeConn(context.Background(), ser) }()
+
+	if got := srv.AttachedExports(); len(got) != 0 {
+		t.Fatalf("nothing should be attached before the handshake, got %v", got)
+	}
+	c := &testClient{t: t, conn: cli}
+	c.greet(cFlagNoZeroes)
+	c.exportName("vol", true)
+	// A round trip guarantees the server is past the handshake and transmitting.
+	if errc, _ := c.request(3, 0, 0, nil); errc != 0 {
+		t.Fatalf("flush err = %d", errc)
+	}
+	if got := srv.AttachedExports(); !slices.Equal(got, []string{"vol"}) {
+		t.Errorf("AttachedExports = %v, want [vol]", got)
+	}
+	c.disconnect()
+	if err := <-done; err != nil {
+		t.Fatalf("ServeConn: %v", err)
+	}
+	if got := srv.AttachedExports(); len(got) != 0 {
+		t.Errorf("nothing should be attached after the client disconnected, got %v", got)
 	}
 }

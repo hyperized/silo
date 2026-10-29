@@ -938,12 +938,18 @@ make nbd-demo-vm   # boots a throwaway aarch64 Linux guest under QEMU with the
 silod serves a read-only status page at `http://<node>:7080/`, on the same
 listener as `/healthz` and `/metrics`. It shows:
 
-- the cluster members as this node sees them: state, addresses and capacity
-- this node's local storage usage
-- the volumes: path, size, roughly how much is allocated, and which writer is
-  attached. The allocated figure comes from the node's own copy of each
-  volume's extent map (the table of which regions hold data), so a node that
-  does not keep a copy of a given volume's map shows 0 for it
+- the cluster members as this node sees them: state, addresses, capacity,
+  whether each one has advertised disk pressure, and this node's clock skew to
+  each of them
+- this node's health: the replication factor it runs with, how many members it
+  sees alive, whether it is isolated, and its clock skew
+- this node's local storage usage and its chunk GC
+- the volumes: path, size, roughly how much is allocated, which writer is
+  attached, which nodes hold the volume's extent map, whether the volume is
+  attached on this node, and whether this node's copy of the map is damaged.
+  The allocated figure comes from the node's own copy of each volume's extent
+  map (the table of which regions hold data), so a node that does not keep a
+  copy of a given volume's map shows 0 for it
 - this node's backups: where they go, how often, whether one is running, and
   how the last run went (see [Backups](#backups))
 
@@ -961,6 +967,36 @@ strings, so convert them before doing arithmetic:
 ```sh
 curl -s http://localhost:7080/api/v1/status | jq .
 ```
+
+Every field below is always present. A peer's capacity arrives over gossip, so
+a node that has only just joined can show `"0"` for its peers for a probe round
+or two.
+
+| Field | Meaning |
+|---|---|
+| `nodes[].capacityBytes`, `usedBytes` | The member's advertised backing-store size and usage; `"0"` until it has advertised them |
+| `nodes[].pressured` | The member advertised disk pressure (it is above the soft high-watermark, see [Disk high-watermarks](#disk-high-watermarks-diskpressure)) |
+| `nodes[].clockSkewMs` | This node's last reading of its clock skew to the member, in milliseconds. Positive means the member's clock is ahead. It includes one-way gossip latency. `"0"` for the responding node and for a member with no reading in the last five minutes |
+| `health.replicationFactor` | `SILO_REPLICATION` on the responding node |
+| `health.aliveNodes` | Members this node sees as alive, itself included |
+| `health.isolated` | The node sees fewer alive peers than it needs and is retrying its seeds; same as `silo_gossip_isolated` |
+| `health.rejoinAttempts` | Seed dials made to get back in after losing peers; same as `silo_gossip_rejoin_attempts_total` |
+| `health.clockSkewMs` | The largest absolute skew to any member, in milliseconds; from the same readings as `silo_hlc_peer_clock_skew_seconds` |
+| `health.clockSkewAlerts` | Times since start a peer ran ahead by more than `SILO_MAX_CLOCK_SKEW` (counted at most once a minute); same as `silo_hlc_clock_skew_alerts_total` |
+| `health.startedUnix` | When the responding silod started |
+| `gc.enabled` | `false` when `SILO_CHUNK_GC_ENABLE` is off: sweeps still count orphans but delete nothing |
+| `gc.running` | A sweep is in progress |
+| `gc.lastRunUnix`, `lastDurationMs` | When the last sweep finished and how long it took; `"0"` before the first sweep since start |
+| `gc.lastOrphansDeleted`, `lastBytesFreed` | What the last sweep reclaimed (bytes as stored on disk) |
+| `gc.lastError` | Empty when the last sweep completed, otherwise why it stopped or skipped |
+| `volumes[].replicas` | Node ids that hold the volume's extent map, as this node's placement ring resolves them now |
+| `volumes[].mapDamaged` | This node found its copy of the volume's extent map damaged and has not rebuilt it yet (see the [runbook](runbook.md#a-volume-will-not-attach-after-an-unclean-reboot-damaged-extent-map)) |
+| `volumes[].attachedHere` | An NBD client has the volume open on this node |
+
+`siloctl status` prints the same data: a `Health:` line with a warning for
+isolation, under-replication and clock-skew alerts, `PRESSURE` and a `SKEW`
+column in the node table, a `Chunk GC:` section, and `REPLICAS` and `NOTES`
+columns in the volume table.
 
 The endpoint reuses one answer for two seconds, so polling it faster than that
 returns the same data. A request waits at most five seconds for silod to

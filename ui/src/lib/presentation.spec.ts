@@ -1,7 +1,20 @@
 import { describe, it, expect } from 'vitest'
 import type { NodeState } from '../api/status'
-import type { BackupKind, Level } from './health'
-import { BACKUP_PRESENTATION, HIDDEN_TARGET, LEVEL_PRESENTATION, NODE_PRESENTATION, redactTarget } from './presentation'
+import type { BackupKind, GcKind, Level, ReplicationKind } from './health'
+import {
+  BACKUP_PRESENTATION,
+  GC_PRESENTATION,
+  HIDDEN_TARGET,
+  LEVEL_PRESENTATION,
+  MAP_DAMAGED_PRESENTATION,
+  MEMBERSHIP_PRESENTATION,
+  NODE_PRESENTATION,
+  PRESSURED_PRESENTATION,
+  redactTarget,
+  REPLICATION_PRESENTATION,
+  skewPresentation,
+  VOLUME_DEGRADED_PRESENTATION,
+} from './presentation'
 
 describe('redactTarget', () => {
   it.each<[string, string]>([
@@ -39,6 +52,8 @@ describe('presentation tables', () => {
   const levels: Level[] = ['healthy', 'attention', 'degraded']
   const states: NodeState[] = ['alive', 'suspect', 'dead', 'left', 'unknown']
   const kinds: BackupKind[] = ['unconfigured', 'running', 'never', 'ok', 'failed', 'overdue']
+  const gcKinds: GcKind[] = ['off', 'running', 'never', 'ok', 'failed']
+  const replication: ReplicationKind[] = ['healthy', 'degraded']
 
   it.each<[Level, string]>([
     ['healthy', 'Healthy'],
@@ -73,6 +88,13 @@ describe('presentation tables', () => {
     ...levels.map((l) => [`level ${l}`, LEVEL_PRESENTATION[l]] as const),
     ...states.map((s) => [`node ${s}`, NODE_PRESENTATION[s]] as const),
     ...kinds.map((k) => [`backup ${k}`, BACKUP_PRESENTATION[k]] as const),
+    ...gcKinds.map((k) => [`gc ${k}`, GC_PRESENTATION[k]] as const),
+    ...replication.map((k) => [`replication ${k}`, REPLICATION_PRESENTATION[k]] as const),
+    ['membership connected', MEMBERSHIP_PRESENTATION.connected] as const,
+    ['membership isolated', MEMBERSHIP_PRESENTATION.isolated] as const,
+    ['pressured', PRESSURED_PRESENTATION] as const,
+    ['volume degraded', VOLUME_DEGRADED_PRESENTATION] as const,
+    ['map damaged', MAP_DAMAGED_PRESENTATION] as const,
   ]
 
   it.each(tips)('%s has a tone, an icon and a tip of at most eight words when present', (_name, p) => {
@@ -84,5 +106,16 @@ describe('presentation tables', () => {
   it('gives the states that need explaining a tip', () => {
     for (const s of states) expect(NODE_PRESENTATION[s].tip).toBeTruthy()
     for (const k of ['unconfigured', 'never', 'overdue'] as const) expect(BACKUP_PRESENTATION[k].tip).toBeTruthy()
+    for (const k of ['off', 'never'] as const) expect(GC_PRESENTATION[k].tip).toBeTruthy()
+    for (const k of replication) expect(REPLICATION_PRESENTATION[k].tip).toBeTruthy()
+    expect(MEMBERSHIP_PRESENTATION.isolated.tip).toBeTruthy()
+  })
+
+  it.each<[Level, string, string]>([
+    ['healthy', 'neutral', 'check'],
+    ['attention', 'warn', 'alert'],
+    ['degraded', 'crit', 'octagon'],
+  ])('skew at level %s is %s with icon %s', (level, tone, icon) => {
+    expect(skewPresentation('750 ms', level)).toEqual({ label: '750 ms', tone, icon })
   })
 })

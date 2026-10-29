@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -336,5 +337,34 @@ func TestProjected_KeepsBackup(t *testing.T) {
 	}
 	if !body.Backup.Configured || body.Backup.Target != "s3://bucket/p" {
 		t.Errorf("projected backup = %+v, want it passed through untouched", body.Backup)
+	}
+}
+
+func TestToInt32Clamps(t *testing.T) {
+	for _, tc := range []struct {
+		in   int
+		want int32
+	}{{-1, 0}, {0, 0}, {3, 3}, {math.MaxInt32, math.MaxInt32}, {math.MaxInt32 + 1, math.MaxInt32}} {
+		if got := toInt32(tc.in); got != tc.want {
+			t.Errorf("toInt32(%d) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestWorstSkewIsAbsolute(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		skews map[string]time.Duration
+		want  time.Duration
+	}{
+		{name: "none", want: 0},
+		{name: "behind beats ahead", skews: map[string]time.Duration{"a": time.Second, "b": -3 * time.Second}, want: 3 * time.Second},
+		{name: "ahead", skews: map[string]time.Duration{"a": 2 * time.Second}, want: 2 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := worstSkew(tc.skews); got != tc.want {
+				t.Errorf("worstSkew = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

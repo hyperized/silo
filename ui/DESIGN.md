@@ -44,24 +44,69 @@ Nodes 2 / 3 | Capacity 47 % ___ | Volumes 2 | Backup Failed | Version 0.16.0
 ! node-c disk 84% full
 ! Backup failed 48 min ago
   upload to s3://... denied (403) ...                                         mono
-+-- Nodes ----------------------------------+  +-- Backups -------------+
-| table: node, state, data addr, capacity,  |  | key / value rows        |
-|        since                              |  | error text in mono      |
++-- Nodes ----------------------------------+  +-- Health --------------+
+| table: node, state (+ pressured), data    |  | replication, membership,|
+|        addr, capacity, skew, since        |  | clock skew, silod       |
 | local disk row: node-a, dir, bar, chunks  |  +-------------------------+
-+-------------------------------------------+
-+-- Volumes --------------------------------+
-| path, size, allocated, extent, lease      |
-+-------------------------------------------+
++-------------------------------------------+  +-- Garbage collection --+
++-- Volumes --------------------------------+  | state, last run, freed, |
+| path (+ markers), size, allocated, extent,|  | error                   |
+| replicas, lease                           |  +-------------------------+
++-------------------------------------------+  +-- Backups -------------+
+                                               | key / value rows        |
+                                               +-------------------------+
 ```
+
+The main column holds tables, the side column holds key / value panels. Health and
+garbage collection are key / value panels, so they sit in the side column above
+Backups, in the order an operator reads them: is the cluster whole, is this node
+cleaning up, is it backed up. Their problems also show in the issue list at the top,
+so on narrow screens, where the side column falls below the tables, nothing is missed.
+
+The stats strip stays at five cells. Degraded volumes and alive nodes against the
+replication factor were considered for it, but a sixth and seventh cell would break
+the instrument row; both numbers are in the Health panel and the issue list instead.
 
 Max width 1400 px. Two columns from 1100 px (main plus a 22 rem side column), one
 below. Panels are flat: 1 px border, 6 px radius, no shadow, a 36 px title row. Tables
 use 36 px rows with hover tint. Below 640 px each table row becomes a key / value block
 so nothing scrolls sideways.
 
+## Thresholds and issues
+
+The issue list uses two levels, Warning (amber, alert icon) and Critical (red,
+octagon). The overall state in the top bar is the worst open issue.
+
+| Issue | Level | Rule |
+|---|---|---|
+| Cluster degraded | Critical | alive nodes below the replication factor |
+| Node isolated | Critical | the responding node reports it cannot reach any peer |
+| Node down | Critical | state dead |
+| Node suspect, state unknown | Warning | |
+| Node pressured | Warning | the node reports resource pressure |
+| Clock skew | Warning at 500 ms, Critical at 2000 ms | largest absolute skew from the health report or any node |
+| Disk full | Warning at 80 %, Critical at 90 % | |
+| Volume map damaged | Critical | count of volumes whose extent map is damaged |
+| Volume degraded | Warning | count of volumes with a replica on a node that is not up (or not in the node table), or fewer replicas than the replication factor |
+| Backup failed, overdue | Warning | |
+| GC failed | Warning | the last GC run left an error |
+| GC never ran | Warning | GC enabled, no run yet, silod up for more than 24 h |
+
+Half a second of skew is worth a look; at two seconds lease expiry and timestamp
+ordering can disagree between nodes. Replication is Healthy when alive nodes are at
+least the replication factor and Degraded below it.
+
+Fields that an older silod does not send take their zero value, and the page hides
+what it cannot judge: the Skew column only appears when some node has a non-zero
+skew, the Replicas column only when some volume reports a replica set, and the Health
+and GC panels say "not reported" when silod sends no report at all.
+
 ## States
 
 - Loading: skeleton stats and table rows in the final geometry, no shimmer.
+- Replica chips: one per node of the set, with the node's state icon and colour
+  (unknown when the id is not in the node table). Volume markers sit under the path:
+  Map damaged, Degraded, and an "attached" tag for volumes attached on this node.
 - Empty: "No nodes"; "No volumes" with `siloctl volume create --size 10G /name`.
 - Error with no data: one line, the instruction from `src/api/status.ts`, retry
   countdown and a Retry button.

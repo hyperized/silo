@@ -80,6 +80,27 @@ describe('parseStatus', () => {
       lastChange: new Date(1761640000 * 1000),
       capacityBytes: 107374182400,
       usedBytes: 32212254720,
+      pressured: false,
+      clockSkewMs: 0,
+    })
+    expect(s.nodes.map((n) => n.clockSkewMs)).toEqual([0, 42, -17])
+    expect(s.health).toEqual({
+      replicationFactor: 3,
+      aliveNodes: 3,
+      isolated: false,
+      rejoinAttempts: 0,
+      clockSkewMs: 42,
+      clockSkewAlerts: 0,
+      startedAt: new Date(1761400000 * 1000),
+    })
+    expect(s.gc).toEqual({
+      enabled: true,
+      running: false,
+      lastRunAt: new Date(1761637000 * 1000),
+      lastDurationMs: 1840,
+      lastOrphansDeleted: 312,
+      lastBytesFreed: 1308622848,
+      lastError: '',
     })
     expect(s.storage).toEqual({
       dataDir: '',
@@ -115,6 +136,9 @@ describe('parseStatus', () => {
       allocatedBytes: 1800 * 4194304,
       extentSizeBytes: 4194304,
       leaseHolder: 'csi-node-3',
+      replicas: ['node-a', 'node-b', 'node-c'],
+      mapDamaged: false,
+      attachedHere: true,
     })
     expect(s.volumes[0]?.allocatedBytes).toBe(0)
   })
@@ -193,6 +217,83 @@ describe('parseStatus', () => {
     expect(s.volumes).toEqual([])
   })
 
+  describe('fields newer than the first release', () => {
+    const health = (w: Raw): Raw => w.health as Raw
+    const gc = (w: Raw): Raw => w.gc as Raw
+
+    it.each([
+      ['null', null],
+      ['absent', undefined],
+    ])('treats %s health and gc as null', (_name, value) => {
+      const s = parseStatus(
+        mutated((w) => {
+          if (value === undefined) {
+            Reflect.deleteProperty(w, 'health')
+            Reflect.deleteProperty(w, 'gc')
+          } else {
+            w.health = value
+            w.gc = value
+          }
+        }),
+      )
+      expect(s.health).toBeNull()
+      expect(s.gc).toBeNull()
+    })
+
+    it.each([
+      ['absent', (o: Raw, k: string) => Reflect.deleteProperty(o, k)],
+      ['null', (o: Raw, k: string) => (o[k] = null)],
+    ])('gives %s fields their zero value', (_name, drop) => {
+      const s = parseStatus(
+        mutated((w) => {
+          for (const n of nodes(w)) for (const k of ['pressured', 'clockSkewMs']) drop(n, k)
+          for (const v of volumes(w)) for (const k of ['replicas', 'mapDamaged', 'attachedHere']) drop(v, k)
+          for (const k of Object.keys(health(w))) drop(health(w), k)
+          for (const k of Object.keys(gc(w))) drop(gc(w), k)
+        }),
+      )
+      expect(s.nodes.every((n) => !n.pressured && n.clockSkewMs === 0)).toBe(true)
+      expect(s.volumes.every((v) => v.replicas.length === 0 && !v.mapDamaged && !v.attachedHere)).toBe(true)
+      expect(s.health).toEqual({
+        replicationFactor: 0,
+        aliveNodes: 0,
+        isolated: false,
+        rejoinAttempts: 0,
+        clockSkewMs: 0,
+        clockSkewAlerts: 0,
+        startedAt: null,
+      })
+      expect(s.gc).toEqual({
+        enabled: false,
+        running: false,
+        lastRunAt: null,
+        lastDurationMs: 0,
+        lastOrphansDeleted: 0,
+        lastBytesFreed: 0,
+        lastError: '',
+      })
+    })
+
+    it('parses set values', () => {
+      const s = parseStatus(
+        mutated((w) => {
+          Object.assign(nodes(w)[1] as Raw, { pressured: true })
+          Object.assign(volumes(w)[0] as Raw, { mapDamaged: true })
+          Object.assign(health(w), { isolated: true, rejoinAttempts: '4', clockSkewMs: '-2500', clockSkewAlerts: 7 })
+          Object.assign(gc(w), { running: true, lastError: 'disk gone' })
+        }),
+      )
+      expect(s.nodes[1]?.pressured).toBe(true)
+      expect(s.volumes.find((v) => v.path === '/db')?.mapDamaged).toBe(true)
+      expect(s.health).toMatchObject({ isolated: true, rejoinAttempts: 4, clockSkewMs: 2500, clockSkewAlerts: 7 })
+      expect(s.gc).toMatchObject({ running: true, lastError: 'disk gone' })
+    })
+
+    it('turns a zero gc last run into null', () => {
+      expect(parseStatus(mutated((w) => (gc(w).lastRunUnix = '0'))).gc?.lastRunAt).toBeNull()
+    })
+  })
+
   describe('rejects malformed payloads with StatusFormatError', () => {
     it.each([
       ['string root', 'nope'],
@@ -225,6 +326,16 @@ describe('parseStatus', () => {
       ['non-object node item', (w) => (nodes(w)[2] = 'x' as unknown as Raw), 'nodes[2] is not an object'],
       ['null node item', (w) => (nodes(w)[0] = null as unknown as Raw), 'nodes[0] is not an object'],
       ['non-object volume item', (w) => (volumes(w)[1] = 4 as unknown as Raw), 'volumes[1] is not an object'],
+      ['non-boolean pressured', (w) => ((nodes(w)[0] as Raw).pressured = 'no'), 'nodes[0].pressured'],
+      ['non-integer clock skew', (w) => ((nodes(w)[0] as Raw).clockSkewMs = 'x'), 'nodes[0].clockSkewMs'],
+      ['non-array replicas', (w) => ((volumes(w)[0] as Raw).replicas = 'node-a'), 'volumes[0].replicas is not a list'],
+      ['non-string replica', (w) => ((volumes(w)[0] as Raw).replicas = ['node-a', 3]), 'volumes[0].replicas[1]'],
+      ['non-boolean mapDamaged', (w) => ((volumes(w)[0] as Raw).mapDamaged = 1), 'volumes[0].mapDamaged'],
+      ['non-object health', (w) => (w.health = 'ok'), 'health is not an object'],
+      ['non-integer replication factor', (w) => ((w.health as Raw).replicationFactor = 'x'), 'health.replicationFactor'],
+      ['non-boolean isolated', (w) => ((w.health as Raw).isolated = 'no'), 'health.isolated'],
+      ['non-object gc', (w) => (w.gc = []), 'gc is not an object'],
+      ['non-string gc error', (w) => ((w.gc as Raw).lastError = 5), 'gc.lastError'],
     ])('%s', (_n, fn, where) => {
       const raw = mutated(fn)
       expect(() => parseStatus(raw)).toThrow(StatusFormatError)

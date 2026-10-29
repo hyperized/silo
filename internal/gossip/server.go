@@ -111,17 +111,23 @@ func (s *Subsystem) viewSnapshot() []membership.Event {
 	members := s.members.Members()
 	out := make([]membership.Event, 0, len(members))
 	for _, n := range members {
-		out = append(out, membership.Event{
-			ID:            n.ID,
-			Address:       n.Address,
-			DataAddress:   n.DataAddress,
-			State:         n.State,
-			Incarnation:   n.Incarnation,
-			At:            n.LastChange,
-			CapacityBytes: n.CapacityBytes,
-			UsedBytes:     n.UsedBytes,
-			Pressured:     n.Pressured,
-		})
+		out = append(out, nodeEvent(n))
 	}
 	return out
+}
+
+// nodeEvent turns a table entry into the event that re-announces it, capacity
+// advert included.
+func nodeEvent(n membership.Node) membership.Event {
+	return membership.Event{
+		ID:            n.ID,
+		Address:       n.Address,
+		DataAddress:   n.DataAddress,
+		State:         n.State,
+		Incarnation:   n.Incarnation,
+		At:            n.LastChange,
+		CapacityBytes: n.CapacityBytes,
+		UsedBytes:     n.UsedBytes,
+		Pressured:     n.Pressured,
+	}
 }

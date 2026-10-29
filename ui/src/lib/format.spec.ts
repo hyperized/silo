@@ -7,7 +7,9 @@ import {
   formatDuration,
   formatIn,
   formatInterval,
+  formatMillis,
   formatPercent,
+  formatSkew,
   formatUsedOf,
 } from './format'
 
@@ -141,5 +143,30 @@ describe('formatDateTime', () => {
     const text = formatDateTime(new Date(Date.UTC(2026, 9, 28, 12, 0)))
     expect(text.length).toBeGreaterThan(0)
     expect(text).toContain('2026')
+  })
+})
+
+describe('formatMillis', () => {
+  it.each([
+    [0, '0 ms'],
+    [-3, '0 ms'],
+    [849.6, '850 ms'],
+    [999, '999 ms'],
+    [1000, '1 s'],
+    [1840, '1 s'],
+    [125_000, '2 min'],
+  ])('formats %d as %s', (ms, want) => {
+    expect(formatMillis(ms)).toBe(want)
+  })
+})
+
+describe('formatSkew', () => {
+  it.each([
+    [0, '0 ms'],
+    [42, '+42 ms'],
+    [-17, '-17 ms'],
+    [2500, '+2,500 ms'],
+  ])('formats %d as %s', (ms, want) => {
+    expect(formatSkew(ms)).toBe(want)
   })
 })

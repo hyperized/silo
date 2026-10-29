@@ -48,6 +48,18 @@ export function formatDuration(seconds: number): string {
   return `${String(Math.floor(s / step.size))} ${step.unit}`
 }
 
+/** A span of milliseconds: "850 ms" below a second, else as formatDuration ("2 min"). */
+export function formatMillis(ms: number): string {
+  if (ms < 1000) return `${String(Math.max(0, Math.round(ms)))} ms`
+  return formatDuration(ms / 1000)
+}
+
+/** A signed clock offset: "+42 ms", "-17 ms", "0 ms". */
+export function formatSkew(ms: number): string {
+  const sign = ms > 0 ? '+' : ms < 0 ? '-' : ''
+  return `${sign}${COUNT.format(Math.abs(ms))} ms`
+}
+
 /** "48 min ago", or "now" within the first few seconds. */
 export function formatAgo(date: Date, nowMs: number): string {
   const s = (nowMs - date.getTime()) / 1000

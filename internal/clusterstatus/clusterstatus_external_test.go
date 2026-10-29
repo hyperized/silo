@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/hyperized/silo/internal/diskusage"
 	"github.com/hyperized/silo/internal/membership"
 	"github.com/hyperized/silo/internal/namespace"
+	"github.com/hyperized/silo/internal/replication"
 	"github.com/hyperized/silo/internal/transport"
 )
 
@@ -45,6 +47,42 @@ type fakeBackup struct{ st backup.Status }
 
 func (f fakeBackup) Status() backup.Status { return f.st }
 
+type fakeSkew struct {
+	peers  map[string]time.Duration
+	alerts uint64
+}
+
+func (f fakeSkew) PeerSkews() map[string]time.Duration { return f.peers }
+func (f fakeSkew) Alerts() uint64                      { return f.alerts }
+
+type fakeGossip struct {
+	isolated bool
+	attempts uint64
+}
+
+func (f fakeGossip) Isolated() bool         { return f.isolated }
+func (f fakeGossip) RejoinAttempts() uint64 { return f.attempts }
+
+type fakeGC struct{ st replication.ChunkGCStatus }
+
+func (f fakeGC) Status() replication.ChunkGCStatus { return f.st }
+
+type fakeDamage map[string]bool
+
+func (f fakeDamage) Lost(id string) bool { return f[id] }
+
+// fakeReplicas returns the first n of a fixed node list, prefixed by the
+// volume id so the test can see which volume a set was resolved for.
+type fakeReplicas []string
+
+func (f fakeReplicas) MetaReplicas(volumeID string, n int) []string {
+	return append([]string{volumeID}, f[:n-1]...)
+}
+
+type fakeAttached []string
+
+func (f fakeAttached) AttachedExports() []string { return f }
+
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 var changed = time.Unix(1_700_000_000, 0)
@@ -52,7 +90,8 @@ var changed = time.Unix(1_700_000_000, 0)
 func fullBuilder() *clusterstatus.Builder {
 	members := fakeMembers{nodes: []membership.Node{
 		{ID: "silo-a", Address: "silo-a:7100", DataAddress: "silo-a:7000", State: membership.StateAlive, Incarnation: 3, LastChange: changed, CapacityBytes: 2000, UsedBytes: 500},
-		{ID: "silo-b", Address: "silo-b:7100", DataAddress: "silo-b:7000", State: membership.StateSuspect, Incarnation: 1, LastChange: changed},
+		{ID: "silo-b", Address: "silo-b:7100", DataAddress: "silo-b:7000", State: membership.StateSuspect, Incarnation: 1, LastChange: changed, CapacityBytes: 4000, UsedBytes: 3900, Pressured: true},
+		{ID: "silo-c", Address: "silo-c:7100", DataAddress: "silo-c:7000", State: membership.StateAlive, Incarnation: 2, LastChange: changed},
 	}}
 	vols := fakeVolumes{
 		{Path: "/legacy", Inode: "inode-1", Size: 1 << 20, ExtentSize: 4096, InlineExtents: 5},
@@ -69,6 +108,16 @@ func fullBuilder() *clusterstatus.Builder {
 			Configured: true, Target: "s3://bucket/prefix", Interval: time.Hour,
 			LastRun: &backup.Run{StartedAt: changed, FinishedAt: changed.Add(time.Minute), OK: true, ChunksUploaded: 4, Manifest: "manifests/silo-a/latest.json"},
 		}}),
+		// silo-a's own entry is never reported with a skew, even if the
+		// monitor somehow held one for it.
+		clusterstatus.WithClockSkew(fakeSkew{peers: map[string]time.Duration{"silo-a": time.Hour, "silo-b": -1500 * time.Millisecond, "silo-c": 40 * time.Millisecond}, alerts: 2}),
+		clusterstatus.WithGossipHealth(fakeGossip{isolated: true, attempts: 5}),
+		clusterstatus.WithGC(fakeGC{replication.ChunkGCStatus{Enabled: true, LastRun: changed, LastDuration: 1500 * time.Millisecond, LastDeleted: 3, LastBytesFreed: 4096, LastError: "skipped"}}),
+		clusterstatus.WithMapDamage(fakeDamage{"inode-2": true}),
+		clusterstatus.WithReplicaSet(fakeReplicas{"silo-b", "silo-c"}),
+		clusterstatus.WithAttached(fakeAttached{"vols//db"}),
+		clusterstatus.WithReplicationFactor(3),
+		clusterstatus.WithStartTime(changed.Add(-time.Hour)),
 	)
 }
 
@@ -77,8 +126,8 @@ func TestBuilder_Build(t *testing.T) {
 	if resp.GetRespondingNodeId() != "silo-a" || resp.GetVersion() != "v1.2.3" {
 		t.Errorf("identity = (%q, %q)", resp.GetRespondingNodeId(), resp.GetVersion())
 	}
-	if len(resp.GetNodes()) != 2 {
-		t.Fatalf("nodes = %d, want 2", len(resp.GetNodes()))
+	if len(resp.GetNodes()) != 3 {
+		t.Fatalf("nodes = %d, want 3", len(resp.GetNodes()))
 	}
 	a := resp.GetNodes()[0]
 	if a.GetId() != "silo-a" || a.GetGossipAddress() != "silo-a:7100" || a.GetDataAddress() != "silo-a:7000" ||
@@ -86,8 +135,23 @@ func TestBuilder_Build(t *testing.T) {
 		a.GetCapacityBytes() != 2000 || a.GetUsedBytes() != 500 {
 		t.Errorf("node a = %+v", a)
 	}
-	if resp.GetNodes()[1].GetState() != statusv1.NodeState_NODE_STATE_SUSPECT {
-		t.Errorf("node b state = %v, want SUSPECT", resp.GetNodes()[1].GetState())
+	if a.GetPressured() || a.GetClockSkewMs() != 0 {
+		t.Errorf("self entry: pressured=%v skew=%d, want false/0", a.GetPressured(), a.GetClockSkewMs())
+	}
+	if nb := resp.GetNodes()[1]; nb.GetState() != statusv1.NodeState_NODE_STATE_SUSPECT || !nb.GetPressured() ||
+		nb.GetCapacityBytes() != 4000 || nb.GetClockSkewMs() != -1500 {
+		t.Errorf("node b = %+v, want SUSPECT, pressured, capacity 4000, skew -1500ms", nb)
+	}
+	if nc := resp.GetNodes()[2]; nc.GetClockSkewMs() != 40 || nc.GetCapacityBytes() != 0 {
+		t.Errorf("node c = %+v, want skew 40ms and unreported capacity", nc)
+	}
+	if h := resp.GetHealth(); h.GetReplicationFactor() != 3 || h.GetAliveNodes() != 2 || !h.GetIsolated() || h.GetRejoinAttempts() != 5 ||
+		h.GetClockSkewMs() != 3_600_000 || h.GetClockSkewAlerts() != 2 || h.GetStartedUnix() != changed.Add(-time.Hour).Unix() {
+		t.Errorf("health = %+v", h)
+	}
+	if gc := resp.GetGc(); !gc.GetEnabled() || gc.GetRunning() || gc.GetLastRunUnix() != changed.Unix() || gc.GetLastDurationMs() != 1500 ||
+		gc.GetLastOrphansDeleted() != 3 || gc.GetLastBytesFreed() != 4096 || gc.GetLastError() != "skipped" {
+		t.Errorf("gc = %+v", gc)
 	}
 	st := resp.GetStorage()
 	if st.GetDataDir() != "/var/lib/silo" || st.GetCapacityBytes() != 1000 || st.GetUsedBytes() != 600 || st.GetAvailableBytes() != 400 || st.GetChunkCount() != 3 {
@@ -97,10 +161,12 @@ func TestBuilder_Build(t *testing.T) {
 	for _, tc := range []struct {
 		name, path, holder string
 		written            int64
+		damaged, attached  bool
+		replicas           []string
 	}{
-		{name: "inline count wins when larger", path: "/legacy", written: 5},
-		{name: "out-of-band count", path: "/vols/db", holder: "silo-a", written: 7},
-		{name: "not held on this node", path: "/vols/elsewhere", written: 0},
+		{name: "inline count wins when larger", path: "/legacy", written: 5, replicas: []string{"inode-1", "silo-b", "silo-c"}},
+		{name: "out-of-band count, damaged, attached under a sloppy export name", path: "/vols/db", holder: "silo-a", written: 7, damaged: true, attached: true, replicas: []string{"inode-2", "silo-b", "silo-c"}},
+		{name: "not held on this node", path: "/vols/elsewhere", written: 0, replicas: []string{"inode-3", "silo-b", "silo-c"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var got *statusv1.VolumeStatus
@@ -114,6 +180,9 @@ func TestBuilder_Build(t *testing.T) {
 			}
 			if got.GetExtentsWritten() != tc.written || got.GetLeaseHolder() != tc.holder {
 				t.Errorf("volume %q = %+v, want written=%d holder=%q", tc.path, got, tc.written, tc.holder)
+			}
+			if got.GetMapDamaged() != tc.damaged || got.GetAttachedHere() != tc.attached || !slices.Equal(got.GetReplicas(), tc.replicas) {
+				t.Errorf("volume %q: damaged=%v attached=%v replicas=%v, want %v/%v/%v", tc.path, got.GetMapDamaged(), got.GetAttachedHere(), got.GetReplicas(), tc.damaged, tc.attached, tc.replicas)
 			}
 		})
 	}
@@ -147,6 +216,22 @@ func TestBuilder_DegradesAndOptionalSources(t *testing.T) {
 	if bk := resp.GetBackup(); bk == nil || bk.GetConfigured() {
 		t.Errorf("backup without a reporter = %+v, want present with configured=false", bk)
 	}
+	// Health and GC are always present; without their sources only what the
+	// membership table knows is filled in.
+	if h := resp.GetHealth(); h == nil || h.GetAliveNodes() != 1 || h.GetReplicationFactor() != 0 || h.GetIsolated() ||
+		h.GetClockSkewMs() != 0 || h.GetClockSkewAlerts() != 0 || h.GetStartedUnix() != 0 {
+		t.Errorf("health without sources = %+v", h)
+	}
+	if gc := resp.GetGc(); gc == nil || gc.GetEnabled() || gc.GetLastRunUnix() != 0 {
+		t.Errorf("gc without a reporter = %+v, want present and zero", gc)
+	}
+	// A GC that has not finished a sweep reports last_run_unix 0, not year 1.
+	neverRan := clusterstatus.New(fakeMembers{}, fakeChunks{}, "/d", "n", "v", discard(),
+		clusterstatus.WithDiskUsage(func(string) (diskusage.Usage, error) { return diskusage.Usage{}, nil }),
+		clusterstatus.WithGC(fakeGC{replication.ChunkGCStatus{Enabled: true, Running: true}}))
+	if gc := neverRan.Build(context.Background()).GetGc(); gc.GetLastRunUnix() != 0 || !gc.GetRunning() {
+		t.Errorf("gc before its first sweep = %+v", gc)
+	}
 	nilReporter := clusterstatus.New(fakeMembers{}, fakeChunks{}, "/d", "n", "v", discard(),
 		clusterstatus.WithDiskUsage(func(string) (diskusage.Usage, error) { return diskusage.Usage{}, nil }),
 		clusterstatus.WithBackup(nil))
@@ -158,8 +243,21 @@ func TestBuilder_DegradesAndOptionalSources(t *testing.T) {
 	b = clusterstatus.New(fakeMembers{}, fakeChunks{}, "/d", "n", "v", discard(),
 		clusterstatus.WithDiskUsage(func(string) (diskusage.Usage, error) { return diskusage.Usage{}, nil }),
 		clusterstatus.WithVolumes(fakeVolumes{{Path: "/v", Inode: "i", InlineExtents: 4}}))
-	if got := b.Build(context.Background()).GetVolumes()[0].GetExtentsWritten(); got != 4 {
-		t.Errorf("extents written without an extent store = %d, want 4", got)
+	v := b.Build(context.Background()).GetVolumes()[0]
+	if v.GetExtentsWritten() != 4 {
+		t.Errorf("extents written without an extent store = %d, want 4", v.GetExtentsWritten())
+	}
+	if v.GetReplicas() != nil || v.GetMapDamaged() || v.GetAttachedHere() {
+		t.Errorf("volume without replica/damage/NBD sources = %+v", v)
+	}
+
+	// A resolver without a replication factor lists no replica set.
+	b = clusterstatus.New(fakeMembers{}, fakeChunks{}, "/d", "n", "v", discard(),
+		clusterstatus.WithDiskUsage(func(string) (diskusage.Usage, error) { return diskusage.Usage{}, nil }),
+		clusterstatus.WithVolumes(fakeVolumes{{Path: "/v", Inode: "i"}}),
+		clusterstatus.WithReplicaSet(fakeReplicas{"x"}))
+	if got := b.Build(context.Background()).GetVolumes()[0].GetReplicas(); got != nil {
+		t.Errorf("replicas without a replication factor = %v, want none", got)
 	}
 }
 
@@ -190,7 +288,7 @@ func TestHandler_JSONContract(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	for _, key := range []string{"respondingNodeId", "version", "nodes", "storage", "volumes", "backup"} {
+	for _, key := range []string{"respondingNodeId", "version", "nodes", "storage", "volumes", "backup", "health", "gc"} {
 		if _, ok := body[key]; !ok {
 			t.Errorf("key %q missing from %v", key, body)
 		}
@@ -202,10 +300,25 @@ func TestHandler_JSONContract(t *testing.T) {
 	if node["capacityBytes"] != "2000" || node["incarnation"] != "3" {
 		t.Errorf("64-bit fields must be JSON strings, got capacityBytes=%#v incarnation=%#v", node["capacityBytes"], node["incarnation"])
 	}
+	if node["pressured"] != false || node["clockSkewMs"] != "0" {
+		t.Errorf("node health keys = pressured %#v clockSkewMs %#v", node["pressured"], node["clockSkewMs"])
+	}
+	h := body["health"].(map[string]any)
+	if h["replicationFactor"] != float64(3) || h["aliveNodes"] != float64(2) || h["isolated"] != true ||
+		h["rejoinAttempts"] != "5" || h["clockSkewMs"] != "3600000" || h["clockSkewAlerts"] != "2" {
+		t.Errorf("HTTP health = %#v", h)
+	}
+	gc := body["gc"].(map[string]any)
+	for _, k := range []string{"enabled", "running", "lastRunUnix", "lastDurationMs", "lastOrphansDeleted", "lastBytesFreed", "lastError"} {
+		if _, ok := gc[k]; !ok {
+			t.Errorf("HTTP gc is missing %q: %#v", k, gc)
+		}
+	}
 	vol := body["volumes"].([]any)[2].(map[string]any)
 	// EmitUnpopulated: a vacant, empty volume still carries every key.
-	if vol["leaseHolder"] != "" || vol["extentsWritten"] != "0" || vol["sizeBytes"] != "1073741824" {
-		t.Errorf("volume = %#v, want empty holder and string-encoded numbers", vol)
+	if vol["leaseHolder"] != "" || vol["extentsWritten"] != "0" || vol["sizeBytes"] != "1073741824" ||
+		vol["mapDamaged"] != false || vol["attachedHere"] != false || len(vol["replicas"].([]any)) != 3 {
+		t.Errorf("volume = %#v, want empty holder, string-encoded numbers and the health keys", vol)
 	}
 
 	// The HTTP projection blanks the data directory and inode ids (keys stay,

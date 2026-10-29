@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -56,15 +57,18 @@ func printStatus(w io.Writer, resp *statusv1.GetStatusResponse) {
 		counts[n.GetState()]++
 	}
 	fmt.Fprintf(w, "Cluster: %d node%s%s\n", len(nodes), plural(len(nodes)), healthSummary(counts))
-	fmt.Fprintf(w, "Queried %s (silo %s)\n\n", resp.GetRespondingNodeId(), resp.GetVersion())
+	fmt.Fprintf(w, "Queried %s (silo %s)\n", resp.GetRespondingNodeId(), resp.GetVersion())
+	printHealth(w, resp.GetRespondingNodeId(), resp.GetHealth())
+	fmt.Fprintln(w)
 
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NODE\tSTATE\tGOSSIP\tDATA\tCAPACITY\tLAST CHANGE")
+	fmt.Fprintln(tw, "NODE\tSTATE\tGOSSIP\tDATA\tCAPACITY\tSKEW\tLAST CHANGE")
 	for _, n := range nodes {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			n.GetId(), nodeStateString(n.GetState()),
 			orDash(n.GetGossipAddress()), orDash(n.GetDataAddress()),
-			capacitySummary(n.GetUsedBytes(), n.GetCapacityBytes()),
+			nodeCapacity(n),
+			nodeSkew(n, resp.GetRespondingNodeId()),
 			humanizeAge(n.GetLastChangeUnix()))
 	}
 	_ = tw.Flush()
@@ -75,8 +79,96 @@ func printStatus(w io.Writer, resp *statusv1.GetStatusResponse) {
 			humanizeBytes(st.GetUsedBytes()), humanizeBytes(st.GetCapacityBytes()),
 			humanizeBytes(st.GetAvailableBytes()), st.GetChunkCount(), plural(int(st.GetChunkCount())))
 	}
+	printGC(w, resp.GetGc())
 	printVolumes(w, resp.GetVolumes())
 	printBackupStatus(w, resp.GetRespondingNodeId(), resp.GetBackup())
+}
+
+// printHealth renders the responding node's health line and a warning line
+// for each signal that needs the operator. A server too old to send a health
+// block prints nothing.
+func printHealth(w io.Writer, node string, h *statusv1.ClusterHealth) {
+	if h == nil {
+		return
+	}
+	line := fmt.Sprintf("Health: replication %d, %d alive, max clock skew %s", h.GetReplicationFactor(), h.GetAliveNodes(), skewString(h.GetClockSkewMs()))
+	if h.GetStartedUnix() > 0 {
+		line += ", up " + humanizeDuration(statusNow().Sub(time.Unix(h.GetStartedUnix(), 0)))
+	}
+	fmt.Fprintln(w, line)
+	if h.GetIsolated() {
+		fmt.Fprintf(w, "  WARNING: %s sees fewer alive peers than it needs and is retrying its seeds (%d rejoin attempt%s); check SILO_SEEDS and gossip reachability\n",
+			node, h.GetRejoinAttempts(), pluralCount(h.GetRejoinAttempts()))
+	}
+	if int64(h.GetReplicationFactor()) > int64(h.GetAliveNodes()) {
+		fmt.Fprintf(w, "  WARNING: fewer alive nodes than the replication factor; new writes cannot reach a full replica set\n")
+	}
+	if a := h.GetClockSkewAlerts(); a > 0 {
+		fmt.Fprintf(w, "  WARNING: %d clock-skew alert%s since start; check time sync (NTP/chrony) on every node\n", a, pluralCount(a))
+	}
+}
+
+// printGC renders the chunk GC's mode and its last sweep. A server too old to
+// send a GC block prints nothing.
+func printGC(w io.Writer, gc *statusv1.GCStatus) {
+	if gc == nil {
+		return
+	}
+	mode := "reclaiming"
+	if !gc.GetEnabled() {
+		mode = "dry run (SILO_CHUNK_GC_ENABLE is off)"
+	}
+	fmt.Fprintf(w, "\nChunk GC: %s\n", mode)
+	if gc.GetRunning() {
+		fmt.Fprintln(w, "  sweeping now")
+	}
+	switch {
+	case gc.GetLastRunUnix() == 0:
+		fmt.Fprintln(w, "  last sweep: none since start")
+	case gc.GetLastError() != "":
+		fmt.Fprintf(w, "  last sweep: %s, did not complete: %s\n", humanizeAge(gc.GetLastRunUnix()), termSafe(gc.GetLastError()))
+	default:
+		fmt.Fprintf(w, "  last sweep: %s in %s, %d chunk%s reclaimed (%s)\n",
+			humanizeAge(gc.GetLastRunUnix()), time.Duration(gc.GetLastDurationMs())*time.Millisecond,
+			gc.GetLastOrphansDeleted(), pluralCount(gc.GetLastOrphansDeleted()), humanizeBytes(gc.GetLastBytesFreed()))
+	}
+}
+
+// nodeCapacity is capacitySummary plus a marker when the node advertised disk
+// pressure.
+func nodeCapacity(n *statusv1.NodeStatus) string {
+	s := capacitySummary(n.GetUsedBytes(), n.GetCapacityBytes())
+	if n.GetPressured() {
+		s += " PRESSURE"
+	}
+	return s
+}
+
+// nodeSkew shows the responding node's skew reading for a peer, and a dash for
+// the responding node itself, which has nothing to compare against.
+func nodeSkew(n *statusv1.NodeStatus, self string) string {
+	if n.GetId() == self {
+		return "—"
+	}
+	return skewString(n.GetClockSkewMs())
+}
+
+func skewString(ms int64) string {
+	return (time.Duration(ms) * time.Millisecond).String()
+}
+
+// humanizeDuration renders an uptime coarsely: seconds, minutes, hours, days.
+func humanizeDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(max(d, 0).Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours())/24)
+	}
 }
 
 // printVolumes renders the volume table. ALLOCATED is extents written times
@@ -89,14 +181,30 @@ func printVolumes(w io.Writer, vols []*statusv1.VolumeStatus) {
 	}
 	fmt.Fprintf(w, "\nVolumes: %d\n", len(vols))
 	tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "PATH\tSIZE\tALLOCATED\tWRITER")
+	fmt.Fprintln(tw, "PATH\tSIZE\tALLOCATED\tWRITER\tREPLICAS\tNOTES")
 	for _, v := range vols {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			v.GetPath(), volumeSize(v.GetSizeBytes()),
 			humanizeBytes(v.GetExtentsWritten()*v.GetExtentSizeBytes()),
-			orDash(v.GetLeaseHolder()))
+			orDash(v.GetLeaseHolder()),
+			orDash(strings.Join(v.GetReplicas(), ",")),
+			volumeNotes(v))
 	}
 	_ = tw.Flush()
+}
+
+// volumeNotes flags what an operator should know about a volume on the
+// responding node: whether it is attached here and whether this node's copy of
+// its extent map is waiting to be rebuilt.
+func volumeNotes(v *statusv1.VolumeStatus) string {
+	notes := make([]string, 0, 2)
+	if v.GetAttachedHere() {
+		notes = append(notes, "attached here")
+	}
+	if v.GetMapDamaged() {
+		notes = append(notes, "MAP DAMAGED")
+	}
+	return orDash(strings.Join(notes, ", "))
 }
 
 // volumeSize shows a dash for a volume created without a size, which cannot be
@@ -243,6 +351,14 @@ func orDash(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// pluralCount is plural for the wire's 64-bit counters.
+func pluralCount[T int64 | uint64](n T) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func plural(n int) string {
