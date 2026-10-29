@@ -6,17 +6,25 @@ import AppBar from './components/AppBar.vue'
 import BackupPanel from './components/BackupPanel.vue'
 import ErrorView from './components/ErrorView.vue'
 import GcPanel from './components/GcPanel.vue'
-import HealthPanel from './components/HealthPanel.vue'
 import IssueList from './components/IssueList.vue'
-import NodesPanel from './components/NodesPanel.vue'
+import IssueStrip from './components/IssueStrip.vue'
+import LocalDiskPanel from './components/LocalDiskPanel.vue'
+import NodeCards from './components/NodeCards.vue'
 import StaleBanner from './components/StaleBanner.vue'
-import StatsStrip from './components/StatsStrip.vue'
+import BackupTile from './components/tiles/BackupTile.vue'
+import CapacityTile from './components/tiles/CapacityTile.vue'
+import NodesTile from './components/tiles/NodesTile.vue'
+import ReplicationTile from './components/tiles/ReplicationTile.vue'
+import SkewTile from './components/tiles/SkewTile.vue'
+import VolumesTile from './components/tiles/VolumesTile.vue'
+import UsedCapacityChart from './components/UsedCapacityChart.vue'
 import VolumesPanel from './components/VolumesPanel.vue'
+import { useHistory } from './composables/useHistory'
 import { useNow } from './composables/useNow'
 import { usePageVisible } from './composables/usePageVisible'
 import { STALE_AFTER_MS, useStatusPoll } from './composables/useStatusPoll'
 import { formatAgo } from './lib/format'
-import { deriveHealth, maxSkewMs } from './lib/health'
+import { deriveHealth, maxSkewMs, stateById, volumeDegraded } from './lib/health'
 
 // Mock data is a development aid only; production builds compile this to null.
 const scenario =
@@ -32,6 +40,7 @@ const visible = usePageVisible()
 const now = useNow(visible)
 const poll = useStatusPoll(fetcher, { active: visible })
 const { data, error, lastSuccessAt, nextAttemptAt, inFlight, paused } = poll
+const history = useHistory(data, now)
 
 const health = computed(() => (data.value ? deriveHealth(data.value, now.value) : null))
 
@@ -45,6 +54,30 @@ const stale = computed(() => {
 
 const retryInSeconds = computed(() =>
   nextAttemptAt.value === null ? null : Math.max(0, Math.ceil((nextAttemptAt.value - now.value) / 1000)),
+)
+
+const volumeCounts = computed(() => {
+  const s = data.value
+  if (!s) return { degraded: 0, damaged: 0 }
+  const states = stateById(s.nodes)
+  const rf = s.health?.replicationFactor ?? 0
+  return {
+    degraded: s.volumes.filter((v) => volumeDegraded(v, states, rf)).length,
+    damaged: s.volumes.filter((v) => v.mapDamaged).length,
+  }
+})
+
+const skew = computed(() => {
+  const s = data.value
+  if (!s) return { ms: null, reported: false }
+  return { ms: maxSkewMs(s), reported: s.health !== null || s.nodes.some((n) => n.clockSkewMs !== 0) }
+})
+
+const nodeSparks = computed(() =>
+  Object.fromEntries((data.value?.nodes ?? []).map((n) => [n.id, history.nodeWriteSparkline(n.id)])),
+)
+const volumeSparks = computed(() =>
+  Object.fromEntries((data.value?.volumes ?? []).map((v) => [v.path, history.volumeWriteSparkline(v.path)])),
 )
 </script>
 
@@ -62,12 +95,17 @@ const retryInSeconds = computed(() =>
     :now="now"
     :paused="paused"
     :in-flight="inFlight"
+    :version="data?.version ?? ''"
     @toggle-pause="poll.togglePause()"
+  />
+  <IssueStrip
+    v-if="health && health.findings.length > 0"
+    :findings="health.findings"
   />
 
   <main
     id="main"
-    class="mx-auto max-w-[1400px] space-y-4 px-4 py-4"
+    class="mx-auto flex w-full max-w-[1440px] flex-col gap-5 px-6 pt-5 pb-12 max-sm:gap-3.5 max-sm:px-4 max-sm:pt-4"
     :aria-busy="data === null && error === null"
   >
     <ErrorView
@@ -87,51 +125,82 @@ const retryInSeconds = computed(() =>
         @retry="poll.refresh()"
       />
 
-      <StatsStrip
-        :health="health"
-        :volumes="data?.volumes ?? []"
-        :backup="data?.backup ?? null"
-        :version="data?.version ?? ''"
+      <section
+        aria-label="Instruments"
+        class="grid grid-cols-2 gap-4 max-sm:gap-3 sm:grid-cols-3 wide:grid-cols-6"
+      >
+        <CapacityTile
+          :capacity="health ? health.capacity : undefined"
+          :rate-per-hour="history.clusterUsedRatePerHour.value"
+          :seconds-until-full="history.secondsUntilFull.value"
+        />
+        <NodesTile
+          :nodes="data?.nodes ?? null"
+          :isolated="data?.health?.isolated ?? false"
+        />
+        <ReplicationTile :health="data ? data.health : undefined" />
+        <VolumesTile
+          :volumes="data?.volumes ?? null"
+          :degraded="volumeCounts.degraded"
+          :damaged="volumeCounts.damaged"
+          :spark="history.clusterWriteSparkline.value"
+          :write-rate="history.writeRateBytesPerSec.value"
+        />
+        <SkewTile
+          :skew-ms="skew.ms"
+          :alerts="data?.health?.clockSkewAlerts ?? 0"
+          :reported="skew.reported"
+        />
+        <BackupTile
+          :backup="data ? data.backup : undefined"
+          :runs="history.backupRuns.value"
+          :now="now"
+        />
+      </section>
+
+      <div class="grid gap-4 max-sm:gap-3.5 wide:grid-cols-12">
+        <UsedCapacityChart
+          v-model:span="history.span.value"
+          class="wide:col-span-8"
+          :used-by-node="history.usedByNode.value"
+          :capacity-bytes="health?.capacity?.capacityBytes ?? 0"
+          :now="now"
+        />
+        <LocalDiskPanel
+          class="wide:col-span-4"
+          :nodes="data?.nodes ?? null"
+          :storage="data ? data.storage : undefined"
+          :rate-per-hour="history.clusterUsedRatePerHour.value"
+        />
+      </div>
+
+      <NodeCards
+        :nodes="data?.nodes ?? null"
+        :responding-node-id="data?.respondingNodeId ?? ''"
         :now="now"
+        :sparks="nodeSparks"
       />
 
-      <IssueList
-        v-if="health && health.findings.length > 0"
-        :findings="health.findings"
-      />
-
-      <div class="grid items-start gap-4 min-[1100px]:grid-cols-[minmax(0,1fr)_24rem]">
-        <div class="min-w-0 space-y-4">
-          <NodesPanel
-            :nodes="data?.nodes ?? null"
-            :responding-node-id="data?.respondingNodeId ?? ''"
-            :storage="data ? data.storage : undefined"
-            :now="now"
-          />
-          <VolumesPanel
-            :volumes="data?.volumes ?? null"
-            :nodes="data?.nodes ?? []"
-            :replication-factor="data?.health?.replicationFactor ?? 0"
-          />
-        </div>
-        <div class="min-w-0 space-y-4">
-          <HealthPanel
-            :health="data ? data.health : undefined"
-            :skew-ms="data ? maxSkewMs(data) : 0"
-            :version="data?.version ?? ''"
-            :node-id="data?.respondingNodeId ?? ''"
-            :now="now"
-          />
+      <div class="grid items-start gap-4 max-sm:gap-3.5 wide:grid-cols-12">
+        <VolumesPanel
+          class="wide:col-span-8"
+          :volumes="data?.volumes ?? null"
+          :nodes="data?.nodes ?? []"
+          :replication-factor="data?.health?.replicationFactor ?? 0"
+          :sparks="volumeSparks"
+        />
+        <div class="flex min-w-0 flex-col gap-4 max-sm:gap-3.5 wide:col-span-4">
           <GcPanel
             :gc="data ? data.gc : undefined"
-            :node-id="data?.respondingNodeId ?? ''"
+            :runs="history.gcRuns.value"
             :now="now"
           />
           <BackupPanel
             :backup="data ? data.backup : undefined"
-            :node-id="data?.respondingNodeId ?? ''"
+            :runs="history.backupRuns.value"
             :now="now"
           />
+          <IssueList :findings="health?.findings ?? null" />
         </div>
       </div>
     </template>

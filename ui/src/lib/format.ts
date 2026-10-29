@@ -93,3 +93,38 @@ export function formatUsedOf(used: number, total: number): string {
 export function formatDateTime(date: Date): string {
   return date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' })
 }
+
+/** "1.1 of 2.4 TiB" when both sides share a unit, else "512 MiB of 2.4 TiB". */
+export function formatOf(used: number, total: number): string {
+  return formatUsedOf(used, total).replace(' / ', ' of ')
+}
+
+/** A byte rate: "38 MiB/s", or per hour with a sign for growth: "+2.1 GiB/h", "-300 MiB/h". */
+export function formatRate(bytes: number, per: 's' | 'h'): string {
+  if (per === 's') return `${formatBytes(bytes)}/s`
+  const sign = bytes > 0 ? '+' : bytes < 0 ? '-' : ''
+  return `${sign}${formatBytes(Math.abs(bytes))}/h`
+}
+
+/**
+ * A long, rough horizon such as a time until full: "16 h", "12 d", "9 mo",
+ * "3 y". Months are 30 days; nobody plans disk purchases to the day.
+ */
+export function formatHorizon(seconds: number): string {
+  const d = seconds / 86400
+  if (d < 60) return formatDuration(seconds)
+  if (d < 730) return `${String(Math.floor(d / 30))} mo`
+  return `${String(Math.floor(d / 365))} y`
+}
+
+const COMPACT = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 })
+
+/** "4.2M", "41K", "312". */
+export function formatCompact(n: number): string {
+  return COMPACT.format(n)
+}
+
+/** Local wall-clock time, "08:52". */
+export function formatClock(date: Date): string {
+  return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })
+}

@@ -19,7 +19,7 @@ export const LEVEL_PRESENTATION: Readonly<Record<Level, Presentation>> = {
 }
 
 export const NODE_PRESENTATION: Readonly<Record<NodeState, Presentation>> = {
-  alive: { label: 'Up', tone: 'good', icon: 'check', tip: 'Up: answering heartbeats' },
+  alive: { label: 'Alive', tone: 'good', icon: 'check', tip: 'Alive: answering heartbeats' },
   suspect: { label: 'Suspect', tone: 'warn', icon: 'alert', tip: 'Suspect: missed heartbeats, may recover' },
   dead: { label: 'Down', tone: 'crit', icon: 'octagon', tip: 'Down: declared dead by its peers' },
   left: { label: 'Left', tone: 'neutral', icon: 'minus', tip: 'Left: removed from the cluster' },

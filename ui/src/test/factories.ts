@@ -1,5 +1,4 @@
 import type { Backup, BackupRun, ClusterHealth, ClusterNode, Gc, LocalStorage, Status, Volume } from '../api/status'
-import type { Health } from '../lib/health'
 
 export const GIB = 1024 ** 3
 
@@ -106,17 +105,6 @@ export function status(over: Partial<Status> = {}): Status {
     volumes: [volume()],
     health: null,
     gc: null,
-    ...over,
-  }
-}
-
-export function health(over: Partial<Health> = {}): Health {
-  return {
-    level: 'healthy',
-    findings: [],
-    backup: null,
-    nodes: { total: 1, up: 1, suspect: 0, down: 0 },
-    capacity: { usedBytes: 30 * GIB, capacityBytes: 100 * GIB },
     ...over,
   }
 }

@@ -1,107 +1,158 @@
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import type { Backup } from '../api/status'
-import { backup, backupRun } from '../test/factories'
+import type { BackupRunPoint } from '../composables/useHistory'
+import { backup, backupRun, GIB } from '../test/factories'
 import BackupPanel from './BackupPanel.vue'
 import Skeleton from './Skeleton.vue'
 
 const NOW = Date.UTC(2026, 9, 28, 12, 0, 0)
 const HOUR = 3600_000
 
-function panel(b: Backup | null | undefined, nodeId = 'node-a') {
-  return mount(BackupPanel, { props: { backup: b, nodeId, now: NOW } })
+function panel(b: Backup | null | undefined, runs: BackupRunPoint[] = []) {
+  return mount(BackupPanel, { props: { backup: b, runs, now: NOW } })
 }
 
-function row(w: ReturnType<typeof panel>, label: string): string | undefined {
+function cell(w: ReturnType<typeof panel>, label: string): string | undefined {
   const dt = w.findAll('dt').find((d) => d.text() === label)
   return dt?.element.nextElementSibling?.textContent.replace(/\s+/g, ' ').trim()
 }
 
-const finished = backupRun({ startedAt: new Date(NOW - HOUR - 2 * 60_000), finishedAt: new Date(NOW - HOUR) })
+function point(over: Partial<BackupRunPoint> = {}): BackupRunPoint {
+  return { at: NOW - HOUR, ok: true, bytesUploaded: GIB, ...over }
+}
+
+const finished = new Date(NOW - 2 * HOUR)
+const good = backup({ lastRun: backupRun({ finishedAt: finished }), nextRunAt: new Date(NOW + 4 * HOUR) })
 
 describe('BackupPanel', () => {
-  it('shows skeletons while loading', () => {
+  it('shows skeletons while loading, without a badge', () => {
     const w = panel(undefined)
-    expect(w.findAllComponents(Skeleton)).toHaveLength(5)
+    expect(w.findAllComponents(Skeleton)).toHaveLength(2)
     expect(w.find('dl').exists()).toBe(false)
+    expect(w.get('header').text()).toBe('Backups')
   })
 
   it.each([
-    ['null', null],
-    ['unconfigured', backup({ configured: false })],
-  ])('shows Off and how to enable it for %s', (_name, b) => {
+    ['not reported', null],
+    ['unconfigured', backup({ configured: false, target: '' })],
+  ])('points at SILO_BACKUP_TARGET when backups are %s', (_name, b) => {
     const w = panel(b)
-    expect(row(w, 'State')).toContain('Off')
-    expect(row(w, 'Target')).toBe('SILO_BACKUP_TARGET not set')
-    expect(row(w, 'Schedule')).toBeUndefined()
-    expect(row(w, 'Last run')).toBeUndefined()
-  })
-
-  it('shows the node id in the header only when known', () => {
-    expect(panel(null).get('header [title="Backups of the responding node"]').text()).toBe('node-a')
-    expect(panel(null, '').find('header [title]').exists()).toBe(false)
+    expect(w.text()).toContain("Set SILO_BACKUP_TARGET to back up this node's chunks.")
+    expect(w.get('header').text()).toContain('Off')
+    expect(w.find('dl').exists()).toBe(false)
+    expect(w.find('[title]').exists()).toBe(false)
   })
 
   describe('configured', () => {
-    it('hides credentials in the target', () => {
-      const w = panel(backup({ target: 's3://user:secret@bucket/silo?token=abc' }))
-      expect(row(w, 'Target')).toBe('s3://bucket/silo')
+    it('shows the badge word and a target with its credentials redacted', () => {
+      const w = panel(backup({ target: 's3://AKIA:secret@s3.example.com/bucket/silo;token=abc' }))
+      const meta = w.get('header').text()
+      expect(meta).toContain('Never')
+      expect(meta).toContain('s3://s3.example.com/bucket/silo')
+      expect(meta).not.toContain('secret')
+      expect(meta).not.toContain('AKIA')
+      expect(meta).not.toContain('token')
     })
 
-    it('shows the schedule', () => {
-      expect(row(panel(backup()), 'Schedule')).toBe('every 6 h')
+    it('says OK after a clean run', () => {
+      expect(panel(good).get('header').text()).toContain('OK')
     })
 
-    it('shows the last run age and how long it took', () => {
-      const w = panel(backup({ lastRun: finished }))
-      expect(row(w, 'Last run')).toBe('1 h ago, took 2 min')
+    it('says Running during a run', () => {
+      expect(panel(backup({ running: true })).get('header').text()).toContain('Running')
     })
 
-    it.each([
-      ['start missing', backupRun({ startedAt: null, finishedAt: new Date(NOW - HOUR) })],
-      ['finish missing', backupRun({ startedAt: new Date(NOW - HOUR), finishedAt: null })],
-    ])('omits the duration when the %s', (_name, run) => {
-      expect(row(panel(backup({ lastRun: run })), 'Last run')).toBe('1 h ago')
+    it('draws the scheduled dot only when a next run is set and nothing is running', () => {
+      const dots = (b: Backup) => panel(b, [point()]).findAll('[data-part="scheduled"]').length
+      expect(dots(backup({ nextRunAt: new Date(NOW + 4 * HOUR) }))).toBe(1)
+      expect(dots(backup({ nextRunAt: null }))).toBe(0)
+      expect(dots(backup({ nextRunAt: new Date(NOW + 4 * HOUR), running: true }))).toBe(0)
     })
 
-    it('says never without a run and hides the chunks row', () => {
+    it('labels the dots with the runs seen', () => {
+      const w = panel(good, [point(), point({ ok: false })])
+      expect(w.get('[role="img"]').attributes('aria-label')).toContain('Backup runs')
+      expect(w.get('[role="img"]').attributes('aria-label')).toContain('next in 4 h')
+    })
+  })
+
+  describe('Last, Uploaded, Next', () => {
+    it('shows the finish time, the bytes uploaded and the next run', () => {
+      const w = panel(good)
+      expect(cell(w, 'Last')).toBe('2 h ago')
+      expect(cell(w, 'Uploaded')).toBe('3 GiB')
+      expect(cell(w, 'Next')).toBe('in 4 h')
+    })
+
+    it('falls back to the start time while a run has not finished', () => {
+      const b = backup({ lastRun: backupRun({ startedAt: new Date(NOW - 30 * 60_000) }) })
+      expect(cell(panel(b), 'Last')).toBe('30 min ago')
+    })
+
+    it('says after this run while running', () => {
+      const b = backup({ running: true, nextRunAt: new Date(NOW + HOUR) })
+      expect(cell(panel(b), 'Next')).toBe('after this run')
+    })
+
+    it('says not scheduled without a next run', () => {
+      expect(cell(panel(backup()), 'Next')).toBe('not scheduled')
+    })
+
+    it('says never and n/a before any run', () => {
       const w = panel(backup())
-      expect(row(w, 'Last run')).toBe('never')
-      expect(row(w, 'Chunks')).toBeUndefined()
+      expect(cell(w, 'Last')).toBe('never')
+      expect(cell(w, 'Uploaded')).toBe('n/a')
+    })
+  })
+
+  describe('schedule sentence', () => {
+    it('states the interval', () => {
+      expect(panel(backup()).text()).toContain('Every 6 h.')
     })
 
-    it('summarises the chunks of the last run', () => {
-      expect(row(panel(backup({ lastRun: finished })), 'Chunks')).toBe('1,500 uploaded (3 GiB), 20 skipped')
+    it('says there is no schedule for an interval of zero', () => {
+      expect(panel(backup({ intervalSeconds: 0 })).text()).toContain('No schedule.')
     })
 
-    describe('next run', () => {
-      it('waits for the current run', () => {
-        expect(row(panel(backup({ running: true })), 'Next run')).toBe('after this run')
-      })
-
-      it('counts down to the schedule', () => {
-        expect(row(panel(backup({ nextRunAt: new Date(NOW + 5 * HOUR) })), 'Next run')).toBe('in 5 h')
-      })
-
-      it('says not scheduled otherwise', () => {
-        expect(row(panel(backup()), 'Next run')).toBe('not scheduled')
-      })
+    it('adds skipped chunks and the manifest after a run', () => {
+      const b = backup({ lastRun: backupRun({ finishedAt: finished, chunksSkipped: 2500, manifest: 'm-42' }) })
+      const text = panel(b).text()
+      expect(text).toContain('Every 6 h.')
+      expect(text).toContain('chunks skipped, already present.')
+      expect(text).toContain('Manifest m-42.')
     })
 
-    describe('error', () => {
-      it('is absent for a successful run', () => {
-        expect(row(panel(backup({ lastRun: finished })), 'Error')).toBeUndefined()
-      })
+    it('leaves the manifest out when the run produced none', () => {
+      const b = backup({ lastRun: backupRun({ finishedAt: finished, manifest: '' }) })
+      const text = panel(b).text()
+      expect(text).toContain('chunks skipped')
+      expect(text).not.toContain('Manifest')
+    })
 
-      it('shows the error text verbatim in code', () => {
-        const w = panel(backup({ lastRun: backupRun({ ...finished, ok: false, error: 'access denied' }) }))
-        expect(w.get('code.whitespace-pre-wrap').text()).toBe('access denied')
-      })
+    it('has no skipped or manifest sentence before any run', () => {
+      expect(panel(backup()).text()).not.toContain('skipped')
+    })
+  })
 
-      it('admits when there is no error text', () => {
-        const w = panel(backup({ lastRun: backupRun({ ...finished, ok: false, error: '' }) }))
-        expect(row(w, 'Error')).toBe('no error text')
-      })
+  describe('failed run', () => {
+    it('prints the error text', () => {
+      const b = backup({ lastRun: backupRun({ finishedAt: finished, ok: false, error: 'upload: 403 forbidden' }) })
+      const w = panel(b)
+      expect(w.get('header').text()).toContain('Failed')
+      expect(w.text()).toContain('The last run failed:')
+      expect(w.get('code').text()).toBe('upload: 403 forbidden')
+    })
+
+    it('says no error text when silod sent none', () => {
+      const b = backup({ lastRun: backupRun({ finishedAt: finished, ok: false, error: '' }) })
+      const w = panel(b)
+      expect(w.text()).toContain('no error text')
+      expect(w.find('code').exists()).toBe(false)
+    })
+
+    it('has no failure block after a good run', () => {
+      expect(panel(good).text()).not.toContain('The last run failed')
     })
   })
 })

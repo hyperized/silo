@@ -64,7 +64,7 @@ describe('presentation tables', () => {
   })
 
   it.each<[NodeState, string]>([
-    ['alive', 'Up'],
+    ['alive', 'Alive'],
     ['suspect', 'Suspect'],
     ['dead', 'Down'],
     ['left', 'Left'],

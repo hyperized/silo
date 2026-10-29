@@ -1,96 +1,122 @@
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import type { Gc } from '../api/status'
-import { gc } from '../test/factories'
+import type { GcRun } from '../composables/useHistory'
+import { gc, GIB } from '../test/factories'
 import GcPanel from './GcPanel.vue'
 import Skeleton from './Skeleton.vue'
 
 const NOW = Date.UTC(2026, 9, 28, 12, 0, 0)
 const HOUR = 3600_000
 
-function panel(g: Gc | null | undefined, nodeId = 'node-a') {
-  return mount(GcPanel, { props: { gc: g, nodeId, now: NOW } })
+function panel(g: Gc | null | undefined, runs: GcRun[] = []) {
+  return mount(GcPanel, { props: { gc: g, runs, now: NOW } })
 }
 
-function row(w: ReturnType<typeof panel>, label: string): string | undefined {
+function cell(w: ReturnType<typeof panel>, label: string): string | undefined {
   const dt = w.findAll('dt').find((d) => d.text() === label)
   return dt?.element.nextElementSibling?.textContent.replace(/\s+/g, ' ').trim()
+}
+
+function run(over: Partial<GcRun> = {}): GcRun {
+  return { at: NOW - HOUR, ok: true, bytesFreed: GIB, orphans: 10, durationMs: 1000, ...over }
 }
 
 const ran = gc({ lastRunAt: new Date(NOW - 2 * HOUR), lastDurationMs: 2000 })
 
 describe('GcPanel', () => {
-  it('shows skeletons while loading', () => {
+  it('shows skeletons while loading, without a badge', () => {
     const w = panel(undefined)
-    expect(w.findAllComponents(Skeleton)).toHaveLength(3)
+    expect(w.findAllComponents(Skeleton)).toHaveLength(2)
     expect(w.find('dl').exists()).toBe(false)
+    expect(w.text()).not.toMatch(/OK|Running|Off|Failed/)
   })
 
-  it('says not reported for an older silod', () => {
+  it('says not reported for an older silod, without a badge', () => {
     const w = panel(null)
-    expect(row(w, 'State')).toBe('not reported')
-    expect(row(w, 'Last run')).toBeUndefined()
+    expect(w.text()).toContain('not reported')
+    expect(w.find('dl').exists()).toBe(false)
+    expect(w.text()).not.toMatch(/OK|Running|Off|Failed|Never/)
   })
 
-  it('shows the node id in the header only when known', () => {
-    expect(panel(null).get('header [title="GC of the responding node"]').text()).toBe('node-a')
-    expect(panel(null, '').find('header [title]').exists()).toBe(false)
-  })
-
-  it('shows Off and still the last dry run when disabled', () => {
-    const w = panel(gc({ enabled: false, lastRunAt: new Date(NOW - HOUR), lastOrphansDeleted: 0 }))
-    expect(row(w, 'State')).toContain('Off')
-    expect(row(w, 'Last run')).toContain('1 h ago')
-    expect(row(w, 'Freed')).toContain('0 orphan chunks')
-  })
-
-  it('says never when no run finished, and hides Freed', () => {
-    const w = panel(gc())
-    expect(row(w, 'State')).toContain('Never')
-    expect(row(w, 'Last run')).toBe('never')
-    expect(row(w, 'Freed')).toBeUndefined()
-  })
-
-  describe('after a run', () => {
-    it('is OK and shows when it ran', () => {
+  describe('states', () => {
+    it('says OK after a clean run', () => {
       const w = panel(ran)
-      expect(row(w, 'State')).toContain('OK')
-      expect(row(w, 'Last run')).toBe('2 h ago, took 2 s')
+      expect(w.get('header').text()).toContain('OK')
+      expect(cell(w, 'Last run')).toBe('2 h ago')
+      expect(cell(w, 'Orphans')).toBe('312')
+      expect(cell(w, 'Freed')).toBe('1.2 GiB')
+      expect(w.text()).toContain('Took 2 s.')
     })
 
-    it.each([
-      [850, 'took 850 ms'],
-      [2000, 'took 2 s'],
-    ])('formats a %i ms duration', (ms, text) => {
-      expect(row(panel(gc({ lastRunAt: ran.lastRunAt, lastDurationMs: ms })), 'Last run')).toContain(text)
+    it('says Running while a sweep is in progress', () => {
+      expect(panel(gc({ ...ran, running: true })).get('header').text()).toContain('Running')
     })
 
-    it.each([
-      [1, '1 orphan chunk (1.2 GiB)'],
-      [312, '312 orphan chunks (1.2 GiB)'],
-      [0, '0 orphan chunks (1.2 GiB)'],
-    ])('reports %i orphans freed', (n, text) => {
-      expect(row(panel(gc({ lastRunAt: ran.lastRunAt, lastOrphansDeleted: n })), 'Freed')).toBe(text)
+    it('says Failed when the last run errored', () => {
+      expect(panel(gc({ ...ran, lastError: 'boom' })).get('header').text()).toContain('Failed')
     })
 
-    it('has no Error row without an error', () => {
-      expect(row(panel(ran), 'Error')).toBeUndefined()
+    it('says Off, relabels Freed as Would free and explains it', () => {
+      const w = panel(gc({ ...ran, enabled: false }))
+      expect(w.get('header').text()).toContain('Off')
+      expect(cell(w, 'Would free')).toBe('1.2 GiB')
+      expect(w.findAll('dt').some((d) => d.text() === 'Freed')).toBe(false)
+      expect(w.text()).toContain('GC is off: sweeps count orphans and delete nothing.')
+    })
+
+    it('says Off with n/a cells and no Took line when it never ran', () => {
+      const w = panel(gc({ enabled: false }))
+      expect(w.text()).toContain('GC is off')
+      expect(w.text()).not.toContain('Took')
+      expect(cell(w, 'Would free')).toBe('n/a')
     })
   })
 
-  it('is running while a pass is in progress', () => {
-    expect(row(panel(gc({ running: true })), 'State')).toContain('Running')
+  it('shows never and n/a for a gc that has not run yet', () => {
+    const w = panel(gc())
+    expect(w.get('header').text()).toContain('Never')
+    expect(cell(w, 'Last run')).toBe('never')
+    expect(cell(w, 'Orphans')).toBe('n/a')
+    expect(cell(w, 'Freed')).toBe('n/a')
+    expect(w.text()).not.toContain('Took')
+    expect(w.findAll('p')).toHaveLength(0)
   })
 
-  it('shows a failure with the error text verbatim in code', () => {
-    const w = panel(gc({ ...ran, lastError: 'disk read error' }))
-    expect(row(w, 'State')).toContain('Failed')
-    expect(w.get('code.whitespace-pre-wrap').text()).toBe('disk read error')
+  it('feeds the run bars from the runs seen', () => {
+    const w = panel(ran, [run(), run({ ok: false }), run()])
+    expect(w.get('[role="img"]').attributes('aria-label')).toBe('Bytes freed per GC run: 3 runs, 1 failed')
   })
 
-  it('shows the last error even while running', () => {
-    const w = panel(gc({ running: true, lastError: 'disk read error' }))
-    expect(row(w, 'State')).toContain('Running')
-    expect(row(w, 'Error')).toBe('disk read error')
+  describe('earlier failures', () => {
+    it('names failures that came before the latest run', () => {
+      const w = panel(ran, [run({ ok: false }), run(), run()])
+      expect(w.text()).toMatch(/1 of 3 runs failed, at \d{2}:\d{2}\./)
+    })
+
+    it('lists every earlier failure time', () => {
+      const w = panel(ran, [run({ ok: false }), run({ ok: false }), run()])
+      expect(w.text()).toMatch(/2 of 3 runs failed, at \d{2}:\d{2}, \d{2}:\d{2}\./)
+    })
+
+    it('leaves the latest failure to the error block', () => {
+      const w = panel(gc({ ...ran, lastError: 'boom' }), [run(), run({ ok: false })])
+      expect(w.text()).not.toContain('runs failed')
+    })
+
+    it('shows the sentence even before silod reports a run', () => {
+      const w = panel(gc(), [run({ ok: false }), run()])
+      expect(w.text()).toContain('1 of 2 runs failed')
+    })
+  })
+
+  it('prints the latest run error in full', () => {
+    const w = panel(gc({ ...ran, lastError: 'delete chunk: permission denied' }))
+    expect(w.text()).toContain('The latest run failed:')
+    expect(w.get('code').text()).toBe('delete chunk: permission denied')
+  })
+
+  it('has no error block on a clean run', () => {
+    expect(panel(ran).find('code').exists()).toBe(false)
   })
 })

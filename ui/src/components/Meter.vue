@@ -3,12 +3,19 @@ import { computed } from 'vue'
 import { formatBytes, formatPercent } from '../lib/format'
 import { fillLevel, usageRatio } from '../lib/health'
 
-const props = defineProps<{
-  usedBytes: number
-  capacityBytes: number
-  /** What is measured, for the meter's accessible name. */
-  label: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    usedBytes: number
+    capacityBytes: number
+    /** What is measured, for the meter's accessible name. */
+    label: string
+    /** Bar thickness: xs 4 px, sm 6 px, md 8 px. */
+    size?: 'xs' | 'sm' | 'md'
+  }>(),
+  { size: 'xs' },
+)
+
+const HEIGHT = { xs: 'h-1', sm: 'h-1.5', md: 'h-2' } as const
 
 const FILL = { healthy: 'bg-accent', attention: 'bg-warn-bar', degraded: 'bg-crit' } as const
 
@@ -33,7 +40,8 @@ const meter = computed(() => {
     aria-valuemax="100"
     :aria-valuenow="meter.now"
     :aria-valuetext="meter.text"
-    class="block h-1 overflow-hidden rounded-full bg-track"
+    class="block overflow-hidden rounded-full bg-track"
+    :class="HEIGHT[size]"
   >
     <span
       class="block h-full origin-left transition-transform duration-300 ease-out motion-reduce:transition-none"
@@ -43,7 +51,8 @@ const meter = computed(() => {
   </span>
   <span
     v-else
-    class="block h-1 rounded-full bg-track"
+    class="block rounded-full bg-track"
+    :class="HEIGHT[size]"
     aria-hidden="true"
   />
 </template>

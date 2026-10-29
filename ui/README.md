@@ -1,13 +1,18 @@
 # silo status page
 
-A read-only status page for a silo cluster. A sticky top bar carries the responding
-node, the overall status (Healthy, Warning or Degraded) and the time since the last
-update, with a pause control. Below it: a stats strip (nodes up, capacity, volumes,
-backup state, version), the open issues, a nodes table with this node's local disk,
-a volumes table with each volume's replica set, and a side column with cluster health
-(replication, membership, clock skew, uptime), garbage collection and the backup
-details. Below 640 px the tables turn into key / value
-rows.
+A read-only status page for a silo cluster, laid out as an operator dashboard. A sticky
+top bar carries the responding node, the overall status (Healthy, Warning or Degraded),
+the time since the last update with a pause control, and the silod version; the worst
+open issue sits on one line under it. Below that: a row of six instrument tiles
+(cluster capacity, nodes, replication, volumes, clock skew, backup), a chart of used
+capacity per node over the last 1, 6 or 24 hours next to each node's local disk, one
+card per node, the volumes table with each volume's replica set, write rate and state,
+and a side column with garbage collection, backups and the full issue list. Below
+640 px the tiles go two per row and the volume rows turn into key / value blocks.
+
+The curves come from the page itself: it samples each status into a bounded in-memory
+history (an hour at full rate, a day at one sample a minute), so they fill in while the
+page stays open and start empty after a reload.
 
 The page is built with Vue 3, TypeScript and Tailwind CSS 4, with IBM Plex Sans and
 JetBrains Mono bundled (latin subset only, no external font requests). The finished build is
@@ -33,7 +38,11 @@ VITE_MOCK=1 npm run dev
 ```
 
 or open the dev server with `?mock=<scenario>`, where the scenario is one of
-`healthy`, `attention`, `degraded`, `empty`, `unconfigured` or `error`. `VITE_MOCK=1` or
+`healthy`, `attention`, `degraded`, `incident`, `empty`, `unconfigured` or `error`.
+`incident` is the picture from the design mockup: one node at 84 % disk, one degraded
+volume and a GC run that fails now and then. The sample data changes over time (disks
+fill, volumes take writes, clocks drift a little, GC runs every minute and backups every
+two), so the charts have something to draw. `VITE_MOCK=1` or
 `?mock=1` alone shows `attention`, which puts something in every panel and the issue
 list. Sample data only
 exists in development builds and builds made with `VITE_MOCK=1`; a normal production

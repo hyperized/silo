@@ -14,11 +14,12 @@ interface Props {
   now: number
   paused: boolean
   inFlight: boolean
+  version: string
 }
 
 function bar(over: Partial<Props> = {}) {
   return mount(AppBar, {
-    props: { nodeId: 'node-a', level: 'healthy', lastSuccessAt: NOW - 3000, now: NOW, paused: false, inFlight: false, ...over },
+    props: { nodeId: 'node-a', level: 'healthy', lastSuccessAt: NOW - 3000, now: NOW, paused: false, inFlight: false, version: '0.17.0', ...over },
   })
 }
 
@@ -26,6 +27,11 @@ const age = (w: ReturnType<typeof bar>): string => w.get('span.whitespace-nowrap
 const live = (w: ReturnType<typeof bar>): string => w.get('[aria-live="polite"]').text()
 
 describe('AppBar', () => {
+  it('shows the silod version once known', () => {
+    expect(bar().get('[title="silod version"]').text()).toBe('0.17.0')
+    expect(bar({ version: '' }).find('[title="silod version"]').exists()).toBe(false)
+  })
+
   it('names the product and the responding node', () => {
     const h1 = bar().get('h1')
     expect(h1.text()).toContain('silo')

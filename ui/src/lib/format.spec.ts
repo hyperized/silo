@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import {
   formatAgo,
+  formatClock,
+  formatCompact,
+  formatHorizon,
+  formatOf,
+  formatRate,
   formatBytes,
   formatCount,
   formatDateTime,
@@ -168,5 +173,36 @@ describe('formatSkew', () => {
     [2500, '+2,500 ms'],
   ])('formats %d as %s', (ms, want) => {
     expect(formatSkew(ms)).toBe(want)
+  })
+})
+
+describe('dashboard formats', () => {
+  it('formats used of total', () => {
+    expect(formatOf(1.1 * 1024 ** 4, 2.4 * 1024 ** 4)).toBe('1.1 of 2.4 TiB')
+    expect(formatOf(512 * 1024 ** 2, 2 * 1024 ** 3)).toBe('512 MiB of 2 GiB')
+  })
+
+  it('formats rates per second and signed per hour', () => {
+    expect(formatRate(38 * 1024 ** 2, 's')).toBe('38 MiB/s')
+    expect(formatRate(2.1 * 1024 ** 3, 'h')).toBe('+2.1 GiB/h')
+    expect(formatRate(-300 * 1024 ** 2, 'h')).toBe('-300 MiB/h')
+    expect(formatRate(0, 'h')).toBe('0 B/h')
+  })
+
+  it('formats horizons in days, months and years', () => {
+    expect(formatHorizon(16 * 3600)).toBe('16 h')
+    expect(formatHorizon(12 * 86400)).toBe('12 d')
+    expect(formatHorizon(270 * 86400)).toBe('9 mo')
+    expect(formatHorizon(3 * 365 * 86400)).toBe('3 y')
+  })
+
+  it('formats compact counts', () => {
+    expect(formatCompact(4_200_000)).toBe('4.2M')
+    expect(formatCompact(41_000)).toBe('41K')
+    expect(formatCompact(312)).toBe('312')
+  })
+
+  it('formats a wall-clock time', () => {
+    expect(formatClock(new Date(2026, 9, 29, 8, 52))).toMatch(/^08:52/)
   })
 })
