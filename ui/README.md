@@ -1,5 +1,7 @@
 # silo status page
 
+![The dashboard in light mode during an incident](../docs/images/ui-dashboard-light.png)
+
 A read-only status page for a silo cluster, laid out as an operator dashboard. A sticky
 top bar carries the responding node, the overall status (Healthy, Warning or Degraded),
 the time since the last update with a pause control, and the silod version; the worst
@@ -96,3 +98,8 @@ than 30 seconds old.
 
 `DESIGN.md` covers the layout, type, colours, states, motion, and the thresholds behind
 each issue (clock skew warns at 500 ms and is critical at 2000 ms).
+
+## Screenshots
+
+The `incident` mock scenario at 1440 px in [light](../docs/images/ui-dashboard-light.png) and
+[dark](../docs/images/ui-dashboard-dark.png) mode, and at [390 px](../docs/images/ui-dashboard-phone.png).
