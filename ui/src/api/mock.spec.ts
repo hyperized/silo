@@ -10,11 +10,11 @@ describe('mockScenario', () => {
   })
 
   it.each<[string, string, string | undefined, MockScenario | null]>([
-    ['?mock=1 alone', '?mock=1', undefined, 'healthy'],
-    ['the env flag alone', '', '1', 'healthy'],
+    ['?mock=1 alone', '?mock=1', undefined, 'attention'],
+    ['the env flag alone', '', '1', 'attention'],
     ['a named scenario over the env flag', '?mock=degraded', '1', 'degraded'],
     ['an unknown value', '?mock=bogus', undefined, null],
-    ['an unknown value with the env flag', '?mock=bogus', '1', 'healthy'],
+    ['an unknown value with the env flag', '?mock=bogus', '1', 'attention'],
     ['an empty value', '?mock=', undefined, null],
     ['nothing', '', undefined, null],
     ['an env flag other than 1', '', '0', null],
@@ -37,6 +37,38 @@ describe('mockWire', () => {
     expect(Number(w.backup?.nextRunUnix)).toBe(Number(base.backup?.nextRunUnix) + delta)
     expect(Number(w.backup?.lastRun?.startedUnix)).toBe(Number(base.backup?.lastRun?.startedUnix) + delta)
     expect(Number(w.backup?.lastRun?.finishedUnix)).toBe(Number(base.backup?.lastRun?.finishedUnix) + delta)
+    expect(Number(w.health?.startedUnix)).toBe(Number(base.health?.startedUnix) + delta)
+    expect(Number(w.gc?.lastRunUnix)).toBe(Number(base.gc?.lastRunUnix) + delta)
+  })
+
+  it('tolerates a fixture from a silod without health or gc', async () => {
+    const old = structuredClone(base)
+    delete old.health
+    delete old.gc
+    for (const v of old.volumes) delete v.replicas
+    vi.resetModules()
+    vi.doMock('./__fixtures__/status.json', () => ({ default: old }))
+    const fresh = await import('./mock')
+    for (const sc of ['healthy', 'attention', 'degraded'] as const) {
+      const w = fresh.mockWire(sc, nowMs)
+      expect(w.health).toBeUndefined()
+      expect(w.gc).toBeUndefined()
+      expect(w.volumes.every((v) => !('replicas' in v))).toBe(true)
+    }
+    vi.doUnmock('./__fixtures__/status.json')
+  })
+
+  it('leaves zero health and gc timestamps untouched', async () => {
+    const zeroed = structuredClone(base)
+    if (zeroed.health) zeroed.health.startedUnix = '0'
+    if (zeroed.gc) delete zeroed.gc.lastRunUnix
+    vi.resetModules()
+    vi.doMock('./__fixtures__/status.json', () => ({ default: zeroed }))
+    const fresh = await import('./mock')
+    const w = fresh.mockWire('healthy', nowMs)
+    vi.doUnmock('./__fixtures__/status.json')
+    expect(w.health?.startedUnix).toBe('0')
+    expect(w.gc?.lastRunUnix).toBeUndefined()
   })
 
   it('leaves zero timestamps untouched', async () => {
@@ -126,6 +158,38 @@ describe('mockWire', () => {
     expect(Number(c?.usedBytes) / Number(c?.capacityBytes)).toBeCloseTo(0.84, 2)
     expect(w.backup?.lastRun?.ok).toBe(false)
     expect(w.backup?.lastRun?.error).toContain('denied')
+  })
+
+  it('attention adds a pressured node, clock skew and a GC error but keeps the replication factor covered', () => {
+    const w = mockWire('attention', nowMs)
+    expect(w.nodes[1]?.pressured).toBe(true)
+    expect(w.nodes[2]?.clockSkewMs).toBe('-750')
+    expect(w.health).toMatchObject({ clockSkewMs: '750', clockSkewAlerts: '2', replicationFactor: 2, aliveNodes: 2 })
+    expect(w.volumes.map((v) => v.replicas)).toEqual([['node-a', 'node-b'], ['node-b', 'node-a']])
+    expect(w.gc?.lastError).toContain('input/output error')
+  })
+
+  it('attention stays a warning overall', async () => {
+    const { deriveHealth } = await import('../lib/health')
+    const { parseStatus } = await import('./status')
+    const h = deriveHealth(parseStatus(mockWire('attention', nowMs)), nowMs)
+    expect(h.level).toBe('attention')
+    expect(h.findings.map((f) => f.text)).toEqual([
+      'node-b suspect for 40 s',
+      'node-b pressured',
+      'Clock skew 750 ms',
+      'node-c disk 84% full',
+      '2 volumes degraded',
+      expect.stringMatching(/^Backup failed /),
+      expect.stringMatching(/^GC failed /),
+    ])
+  })
+
+  it('degraded drops alive nodes below the replication factor and damages a map', () => {
+    const w = mockWire('degraded', nowMs)
+    expect(w.health?.aliveNodes).toBe(2)
+    expect(w.volumes.find((v) => v.path === '/db')?.mapDamaged).toBe(true)
+    expect(w.volumes.find((v) => v.path === '/cache')?.mapDamaged).toBe(false)
   })
 
   it('degraded makes one node dead and a backup run', () => {

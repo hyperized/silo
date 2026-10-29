@@ -4,7 +4,9 @@ A read-only status page for a silo cluster. A sticky top bar carries the respond
 node, the overall status (Healthy, Warning or Degraded) and the time since the last
 update, with a pause control. Below it: a stats strip (nodes up, capacity, volumes,
 backup state, version), the open issues, a nodes table with this node's local disk,
-a volumes table and the backup details. Below 640 px the tables turn into key / value
+a volumes table with each volume's replica set, and a side column with cluster health
+(replication, membership, clock skew, uptime), garbage collection and the backup
+details. Below 640 px the tables turn into key / value
 rows.
 
 The page is built with Vue 3, TypeScript and Tailwind CSS 4, with IBM Plex Sans and
@@ -31,7 +33,9 @@ VITE_MOCK=1 npm run dev
 ```
 
 or open the dev server with `?mock=<scenario>`, where the scenario is one of
-`healthy`, `attention`, `degraded`, `empty`, `unconfigured` or `error`. Sample data only
+`healthy`, `attention`, `degraded`, `empty`, `unconfigured` or `error`. `VITE_MOCK=1` or
+`?mock=1` alone shows `attention`, which puts something in every panel and the issue
+list. Sample data only
 exists in development builds and builds made with `VITE_MOCK=1`; a normal production
 build never contains it.
 
@@ -65,8 +69,12 @@ A few details of that encoding matter to the code in `src/api/status.ts`:
   into numbers in one place, `parseInt64`.
 - Node states arrive as enum names such as `NODE_STATE_ALIVE` and become
   `alive`, `suspect`, `dead`, `left` or `unknown`.
-- Every field is present, but the `storage`, `backup` and `backup.lastRun` objects can
-  be `null`. Timestamps of `0` mean "not set".
+- The original fields are always present, but the `storage`, `backup` and
+  `backup.lastRun` objects can be `null`. Timestamps of `0` mean "not set".
+- Newer fields (`health`, `gc`, and on nodes `pressured` and `clockSkewMs`, on volumes
+  `replicas`, `mapDamaged` and `attachedHere`) may be missing when silod is older than
+  the page. A missing field takes its zero value and a missing `health` or `gc` object
+  becomes `null`; a field that is present with the wrong type is still an error.
 
 `parseStatus` checks the shape of every response and turns it into the types the
 components use. If silod sends something unexpected, the page shows an error that says
@@ -77,4 +85,5 @@ When a request fails, the page keeps showing the last good data, retries after 2
 and 16 seconds and then every 30 seconds, and puts up a banner once the data is more
 than 30 seconds old.
 
-`DESIGN.md` covers the layout, type, colours, states and motion.
+`DESIGN.md` covers the layout, type, colours, states, motion, and the thresholds behind
+each issue (clock skew warns at 500 ms and is critical at 2000 ms).

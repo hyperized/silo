@@ -1,10 +1,20 @@
-import type { Backup, ClusterNode, NodeState, Status } from '../api/status'
-import { formatAgo, formatDuration, formatPercent } from './format'
+import type { Backup, ClusterHealth, ClusterNode, Gc, NodeState, Status, Volume } from '../api/status'
+import { formatAgo, formatCount, formatDuration, formatPercent } from './format'
 
 export const FULL_WARN = 0.8
 export const FULL_CRIT = 0.9
 /** Grace before a missed scheduled run counts as overdue; a busy node may start a little late. */
 export const OVERDUE_GRACE_MS = 15 * 60 * 1000
+
+/**
+ * Clock skew thresholds in milliseconds. silod's leases and HLC timestamps
+ * tolerate small offsets; half a second is worth a look, two seconds is enough
+ * to make lease expiry and ordering decisions disagree between nodes.
+ */
+export const SKEW_WARN_MS = 500
+export const SKEW_CRIT_MS = 2000
+/** A node that has been up this long with GC enabled should have finished a run. */
+export const GC_NEVER_AFTER_MS = 24 * 3600 * 1000
 
 export type Level = 'healthy' | 'attention' | 'degraded'
 
@@ -14,6 +24,11 @@ export interface Finding {
   /** Raw text from silod shown verbatim under the finding, e.g. a backup error. */
   detail?: string
 }
+
+export type GcKind = 'off' | 'running' | 'never' | 'ok' | 'failed'
+
+/** healthy: alive nodes cover the replication factor; degraded: they do not. */
+export type ReplicationKind = 'healthy' | 'degraded'
 
 export type BackupKind = 'unconfigured' | 'running' | 'never' | 'ok' | 'failed' | 'overdue'
 
@@ -64,6 +79,46 @@ export function nodeLevel(state: NodeState): Level {
   return 'healthy'
 }
 
+export function skewLevel(ms: number): Level {
+  const a = Math.abs(ms)
+  if (a >= SKEW_CRIT_MS) return 'degraded'
+  if (a >= SKEW_WARN_MS) return 'attention'
+  return 'healthy'
+}
+
+/** null when silod did not report a replication factor (older silod), or nothing is loaded yet. */
+export function replicationKind(h: ClusterHealth | null | undefined): ReplicationKind | null {
+  if (!h || h.replicationFactor <= 0) return null
+  return h.aliveNodes >= h.replicationFactor ? 'healthy' : 'degraded'
+}
+
+export function gcKind(gc: Gc): GcKind {
+  if (!gc.enabled) return 'off'
+  if (gc.running) return 'running'
+  if (gc.lastError) return 'failed'
+  return gc.lastRunAt ? 'ok' : 'never'
+}
+
+export function stateById(nodes: readonly ClusterNode[]): ReadonlyMap<string, NodeState> {
+  return new Map(nodes.map((n) => [n.id, n.state]))
+}
+
+/**
+ * A volume is degraded when a replica sits on a node that is not alive (or is
+ * missing from the node table), or when its set is shorter than the
+ * replication factor. An older silod reports neither, so nothing is degraded.
+ */
+export function volumeDegraded(v: Volume, states: ReadonlyMap<string, NodeState>, replicationFactor: number): boolean {
+  return v.replicas.length < replicationFactor || v.replicas.some((id) => states.get(id) !== 'alive')
+}
+
+/** The largest absolute skew known: silod's own summary or any per-node measurement. */
+export function maxSkewMs(s: Status): number {
+  return s.nodes.reduce((m, n) => Math.max(m, Math.abs(n.clockSkewMs)), s.health?.clockSkewMs ?? 0)
+}
+
+const plural = (n: number, one: string, many: string): string => `${formatCount(n)} ${n === 1 ? one : many}`
+
 export function backupKind(b: Backup | null, nowMs: number): BackupKind {
   if (!b?.configured) return 'unconfigured'
   if (b.running) return 'running'
@@ -86,6 +141,15 @@ export function deriveHealth(s: Status, nowMs: number): Health {
   const lasted = (n: ClusterNode): string =>
     n.lastChange ? ` for ${formatDuration((nowMs - n.lastChange.getTime()) / 1000)}` : ''
 
+  const h = s.health
+  if (h && replicationKind(h) === 'degraded') {
+    add('degraded', `Cluster degraded: ${plural(h.aliveNodes, 'node', 'nodes')} alive, replication factor ${String(h.replicationFactor)}`)
+  }
+  if (h?.isolated) {
+    const tries = h.rejoinAttempts > 0 ? `, ${plural(h.rejoinAttempts, 'rejoin attempt', 'rejoin attempts')}` : ''
+    add('degraded', `${s.respondingNodeId} isolated from its peers${tries}`)
+  }
+
   const active = s.nodes.filter((n) => n.state !== 'left')
   if (active.length === 0) add('attention', 'No nodes')
   // Most recent state change first: that is the one the operator is likely chasing.
@@ -95,6 +159,11 @@ export function deriveHealth(s: Status, nowMs: number): Health {
     else if (n.state === 'suspect') add('attention', `${n.id} suspect${lasted(n)}`)
     else if (n.state === 'unknown') add('attention', `${n.id} state unknown`)
   }
+  for (const n of active) if (n.pressured) add('attention', `${n.id} pressured`)
+
+  const skew = maxSkewMs(s)
+  const skewAt = skewLevel(skew)
+  if (skewAt !== 'healthy') add(skewAt, `Clock skew ${formatCount(skew)} ms`)
 
   const reported = active.filter((n) => n.capacityBytes > 0)
   let capacityBytes = reported.reduce((a, n) => a + n.capacityBytes, 0)
@@ -113,6 +182,13 @@ export function deriveHealth(s: Status, nowMs: number): Health {
   const full = fullest.filter((f) => fillLevel(f.ratio) !== 'healthy').sort((a, b) => b.ratio - a.ratio)
   for (const f of full) add(fillLevel(f.ratio) as Finding['level'], `${f.id} disk ${formatPercent(f.ratio)} full`)
 
+  const damaged = s.volumes.filter((v) => v.mapDamaged).length
+  if (damaged) add('degraded', `${plural(damaged, 'volume map', 'volume maps')} damaged`)
+  const states = stateById(s.nodes)
+  const rf = h?.replicationFactor ?? 0
+  const degradedVolumes = s.volumes.filter((v) => volumeDegraded(v, states, rf)).length
+  if (degradedVolumes) add('attention', `${plural(degradedVolumes, 'volume', 'volumes')} degraded`)
+
   // An empty cluster has nothing to back up yet; flagging it would only add noise.
   const kind = active.length > 0 ? backupKind(s.backup, nowMs) : null
   const run = s.backup?.lastRun ?? null
@@ -121,7 +197,17 @@ export function deriveHealth(s: Status, nowMs: number): Health {
   if (kind === 'failed') add('attention', `Backup failed${ago}`, run?.error)
   if (kind === 'overdue') add('attention', when ? `Backup overdue, last run${ago}` : 'Backup overdue')
 
-  // Stable sort: within a level the order above (nodes, disks, backups) holds.
+  if (s.gc) {
+    const gc = gcKind(s.gc)
+    const at = s.gc.lastRunAt
+    if (gc === 'failed') add('attention', at ? `GC failed ${formatAgo(at, nowMs)}` : 'GC failed', s.gc.lastError)
+    const started = h?.startedAt ?? null
+    if (gc === 'never' && started && nowMs - started.getTime() > GC_NEVER_AFTER_MS) {
+      add('attention', `GC has not run since silod started ${formatAgo(started, nowMs)}`)
+    }
+  }
+
+  // Stable sort: within a level the order above (cluster, nodes, skew, disks, volumes, backups, GC) holds.
   findings.sort((a, b) => RANK[b.level] - RANK[a.level])
   const level = findings.reduce<Level>((acc, f) => worst(acc, f.level), 'healthy')
   return {

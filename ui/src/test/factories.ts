@@ -1,4 +1,4 @@
-import type { Backup, BackupRun, ClusterNode, LocalStorage, Status, Volume } from '../api/status'
+import type { Backup, BackupRun, ClusterHealth, ClusterNode, Gc, LocalStorage, Status, Volume } from '../api/status'
 import type { Health } from '../lib/health'
 
 export const GIB = 1024 ** 3
@@ -13,6 +13,8 @@ export function node(over: Partial<ClusterNode> = {}): ClusterNode {
     lastChange: null,
     capacityBytes: 100 * GIB,
     usedBytes: 30 * GIB,
+    pressured: false,
+    clockSkewMs: 0,
     ...over,
   }
 }
@@ -61,6 +63,35 @@ export function volume(over: Partial<Volume> = {}): Volume {
     allocatedBytes: 2 * GIB,
     extentSizeBytes: 4 * 1024 ** 2,
     leaseHolder: 'node-a',
+    replicas: [],
+    mapDamaged: false,
+    attachedHere: false,
+    ...over,
+  }
+}
+
+export function clusterHealth(over: Partial<ClusterHealth> = {}): ClusterHealth {
+  return {
+    replicationFactor: 3,
+    aliveNodes: 3,
+    isolated: false,
+    rejoinAttempts: 0,
+    clockSkewMs: 0,
+    clockSkewAlerts: 0,
+    startedAt: null,
+    ...over,
+  }
+}
+
+export function gc(over: Partial<Gc> = {}): Gc {
+  return {
+    enabled: true,
+    running: false,
+    lastRunAt: null,
+    lastDurationMs: 1840,
+    lastOrphansDeleted: 312,
+    lastBytesFreed: 1.2 * GIB,
+    lastError: '',
     ...over,
   }
 }
@@ -73,6 +104,8 @@ export function status(over: Partial<Status> = {}): Status {
     storage: storage(),
     backup: backup(),
     volumes: [volume()],
+    health: null,
+    gc: null,
     ...over,
   }
 }

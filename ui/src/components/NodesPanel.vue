@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { ClusterNode, LocalStorage } from '../api/status'
-import { formatBytes, formatCount, formatPercent, formatUsedOf } from '../lib/format'
-import { usageRatio } from '../lib/health'
-import { NODE_PRESENTATION } from '../lib/presentation'
+import { formatBytes, formatCount, formatPercent, formatSkew, formatUsedOf } from '../lib/format'
+import { skewLevel, usageRatio } from '../lib/health'
+import { NODE_PRESENTATION, PRESSURED_PRESENTATION, skewPresentation } from '../lib/presentation'
 import Meter from './Meter.vue'
 import Panel from './Panel.vue'
 import RelTime from './RelTime.vue'
@@ -10,7 +11,7 @@ import Skeleton from './Skeleton.vue'
 import StateBadge from './StateBadge.vue'
 import Tip from './Tip.vue'
 
-defineProps<{
+const props = defineProps<{
   /** null while the first answer is pending. */
   nodes: ClusterNode[] | null
   respondingNodeId: string
@@ -18,6 +19,10 @@ defineProps<{
   storage: LocalStorage | null | undefined
   now: number
 }>()
+
+// An older silod sends no skew at all, and a single node has no peers to
+// measure; in both cases every value is 0 and the column would be noise.
+const showSkew = computed(() => props.nodes?.some((n) => n.clockSkewMs !== 0) ?? false)
 
 const TH = 'h-8 px-3 text-xs font-medium whitespace-nowrap text-ink-3'
 const TD = 'h-9 px-3 py-1.5'
@@ -70,6 +75,18 @@ function pct(n: ClusterNode): string {
             :class="[TH, 'w-[38%]']"
           >
             Capacity
+          </th>
+          <th
+            v-if="showSkew"
+            scope="col"
+            :class="[TH, 'text-right']"
+          >
+            <Tip
+              text="Clock offset measured by the responding node"
+              align="end"
+            >
+              Skew
+            </Tip>
           </th>
           <th
             scope="col"
@@ -128,7 +145,14 @@ function pct(n: ClusterNode): string {
             :class="TD"
             data-label="State"
           >
-            <StateBadge :presentation="NODE_PRESENTATION[n.state]" />
+            <span class="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+              <StateBadge :presentation="NODE_PRESENTATION[n.state]" />
+              <StateBadge
+                v-if="n.pressured"
+                :presentation="PRESSURED_PRESENTATION"
+                chip
+              />
+            </span>
           </td>
           <td
             :class="[TD, 'font-mono break-all text-ink-2']"
@@ -157,6 +181,21 @@ function pct(n: ClusterNode): string {
               v-else
               class="text-ink-3"
             >not reported</span>
+          </td>
+          <td
+            v-if="showSkew"
+            :class="[TD, 'text-right whitespace-nowrap text-ink-2']"
+            data-label="Skew"
+          >
+            <template v-if="n.id !== respondingNodeId">
+              <StateBadge
+                v-if="skewLevel(n.clockSkewMs) !== 'healthy'"
+                :presentation="skewPresentation(formatSkew(n.clockSkewMs), skewLevel(n.clockSkewMs))"
+              />
+              <template v-else>
+                {{ formatSkew(n.clockSkewMs) }}
+              </template>
+            </template>
           </td>
           <td
             :class="[TD, 'text-right whitespace-nowrap text-ink-2']"

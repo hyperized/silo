@@ -61,11 +61,20 @@ type Message struct {
 	// sends 0, which the receiver treats as protocol v1. It is the rolling-
 	// upgrade handshake: every message re-advertises the version, so a node
 	// classifies each peer continuously rather than once at connect time.
-	SenderProto    uint32             `json:"sender_proto,omitempty"`
-	Target         string             `json:"target,omitempty"`
-	TargetAddress  string             `json:"target_address,omitempty"`
-	Piggyback      []membership.Event `json:"piggyback,omitempty"`
-	MembershipView []membership.Event `json:"membership_view,omitempty"`
+	SenderProto uint32 `json:"sender_proto,omitempty"`
+	// SenderCapacity, SenderUsed and SenderPressured are the sender's own
+	// capacity advert. They ride every envelope because the envelope also
+	// carries SenderIncarn: a receiver that took the incarnation without the
+	// figures would record the advert's incarnation with zero capacity and
+	// then ignore the full advert arriving later at the same incarnation.
+	// Zero capacity means the sender has not measured its disk yet.
+	SenderCapacity  int64              `json:"sender_capacity,omitempty"`
+	SenderUsed      int64              `json:"sender_used,omitempty"`
+	SenderPressured bool               `json:"sender_pressured,omitempty"`
+	Target          string             `json:"target,omitempty"`
+	TargetAddress   string             `json:"target_address,omitempty"`
+	Piggyback       []membership.Event `json:"piggyback,omitempty"`
+	MembershipView  []membership.Event `json:"membership_view,omitempty"`
 	// Extension carries opaque reconcilable state for a subsystem riding
 	// the anti-entropy exchange (the namespace). gossip ferries the bytes
 	// during a sync without interpreting them.

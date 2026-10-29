@@ -5,6 +5,8 @@ import { mockScenario } from './api/mockMode'
 import AppBar from './components/AppBar.vue'
 import BackupPanel from './components/BackupPanel.vue'
 import ErrorView from './components/ErrorView.vue'
+import GcPanel from './components/GcPanel.vue'
+import HealthPanel from './components/HealthPanel.vue'
 import IssueList from './components/IssueList.vue'
 import NodesPanel from './components/NodesPanel.vue'
 import StaleBanner from './components/StaleBanner.vue'
@@ -14,7 +16,7 @@ import { useNow } from './composables/useNow'
 import { usePageVisible } from './composables/usePageVisible'
 import { STALE_AFTER_MS, useStatusPoll } from './composables/useStatusPoll'
 import { formatAgo } from './lib/format'
-import { deriveHealth } from './lib/health'
+import { deriveHealth, maxSkewMs } from './lib/health'
 
 // Mock data is a development aid only; production builds compile this to null.
 const scenario =
@@ -106,13 +108,31 @@ const retryInSeconds = computed(() =>
             :storage="data ? data.storage : undefined"
             :now="now"
           />
-          <VolumesPanel :volumes="data?.volumes ?? null" />
+          <VolumesPanel
+            :volumes="data?.volumes ?? null"
+            :nodes="data?.nodes ?? []"
+            :replication-factor="data?.health?.replicationFactor ?? 0"
+          />
         </div>
-        <BackupPanel
-          :backup="data ? data.backup : undefined"
-          :node-id="data?.respondingNodeId ?? ''"
-          :now="now"
-        />
+        <div class="min-w-0 space-y-4">
+          <HealthPanel
+            :health="data ? data.health : undefined"
+            :skew-ms="data ? maxSkewMs(data) : 0"
+            :version="data?.version ?? ''"
+            :node-id="data?.respondingNodeId ?? ''"
+            :now="now"
+          />
+          <GcPanel
+            :gc="data ? data.gc : undefined"
+            :node-id="data?.respondingNodeId ?? ''"
+            :now="now"
+          />
+          <BackupPanel
+            :backup="data ? data.backup : undefined"
+            :node-id="data?.respondingNodeId ?? ''"
+            :now="now"
+          />
+        </div>
       </div>
     </template>
   </main>

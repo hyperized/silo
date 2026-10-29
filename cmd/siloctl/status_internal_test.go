@@ -195,10 +195,10 @@ func TestPrintStatus_Volumes(t *testing.T) {
 		{
 			name: "table",
 			vols: []*statusv1.VolumeStatus{
-				{Path: "/db", SizeBytes: 1 << 30, ExtentSizeBytes: 64 << 10, ExtentsWritten: 16, LeaseHolder: "silo-a"},
+				{Path: "/db", SizeBytes: 1 << 30, ExtentSizeBytes: 64 << 10, ExtentsWritten: 16, LeaseHolder: "silo-a", Replicas: []string{"silo-a", "silo-b"}, AttachedHere: true},
 				{Path: "/unsized", ExtentSizeBytes: 4096},
 			},
-			want: []string{"Volumes: 2", "PATH", "ALLOCATED", "WRITER", "/db", "1.0 GiB", "1.0 MiB", "silo-a", "/unsized", "0 B"},
+			want: []string{"Volumes: 2", "PATH", "ALLOCATED", "WRITER", "REPLICAS", "NOTES", "/db", "1.0 GiB", "1.0 MiB", "silo-a", "silo-a,silo-b", "attached here", "/unsized", "0 B"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -302,14 +302,142 @@ func TestPrintStatus_SectionOrder(t *testing.T) {
 		Storage: &statusv1.StorageStatus{DataDir: "/d"},
 		Volumes: []*statusv1.VolumeStatus{{Path: "/db"}},
 		Backup:  &statusv1.BackupStatus{Configured: true, Target: "s3://b/p", IntervalSeconds: 3600},
+		Health:  &statusv1.ClusterHealth{ReplicationFactor: 1, AliveNodes: 1},
+		Gc:      &statusv1.GCStatus{Enabled: true},
 	})
 	got := buf.String()
 	last := -1
-	for _, heading := range []string{"Cluster:", "NODE", "\nStorage on", "\nVolumes:", "\nBackup:"} {
+	for _, heading := range []string{"Cluster:", "Health:", "NODE", "\nStorage on", "\nChunk GC:", "\nVolumes:", "\nBackup:"} {
 		i := strings.Index(got, heading)
 		if i <= last {
 			t.Fatalf("%q at %d, want after the previous section (%d) in:\n%s", heading, i, last, got)
 		}
 		last = i
+	}
+}
+
+func TestPrintHealth(t *testing.T) {
+	prev := statusNow
+	t.Cleanup(func() { statusNow = prev })
+	now := time.Unix(2_000_000_000, 0)
+	statusNow = func() time.Time { return now }
+
+	for _, tc := range []struct {
+		name    string
+		h       *statusv1.ClusterHealth
+		want    []string
+		notWant []string
+	}{
+		{name: "older server sends none", h: nil, notWant: []string{"Health:"}},
+		{
+			name:    "healthy",
+			h:       &statusv1.ClusterHealth{ReplicationFactor: 3, AliveNodes: 3, ClockSkewMs: 12, StartedUnix: now.Add(-3 * time.Hour).Unix()},
+			want:    []string{"Health: replication 3, 3 alive, max clock skew 12ms, up 3h"},
+			notWant: []string{"WARNING"},
+		},
+		{
+			name: "isolated, under-replicated, skewed",
+			h:    &statusv1.ClusterHealth{ReplicationFactor: 3, AliveNodes: 1, Isolated: true, RejoinAttempts: 1, ClockSkewMs: 1500, ClockSkewAlerts: 2},
+			want: []string{
+				"max clock skew 1.5s\n",
+				"node-a sees fewer alive peers than it needs and is retrying its seeds (1 rejoin attempt)",
+				"fewer alive nodes than the replication factor",
+				"2 clock-skew alerts since start",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printHealth(&buf, "node-a", tc.h)
+			for _, want := range tc.want {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("missing %q in:\n%s", want, buf.String())
+				}
+			}
+			for _, nw := range tc.notWant {
+				if strings.Contains(buf.String(), nw) {
+					t.Errorf("unexpected %q in:\n%s", nw, buf.String())
+				}
+			}
+		})
+	}
+}
+
+func TestPrintGC(t *testing.T) {
+	prev := statusNow
+	t.Cleanup(func() { statusNow = prev })
+	now := time.Unix(2_000_000_000, 0)
+	statusNow = func() time.Time { return now }
+	fiveMinAgo := now.Add(-5 * time.Minute).Unix()
+
+	for _, tc := range []struct {
+		name string
+		gc   *statusv1.GCStatus
+		want []string
+	}{
+		{name: "older server sends none", gc: nil, want: nil},
+		{name: "dry run, never swept", gc: &statusv1.GCStatus{}, want: []string{"Chunk GC: dry run (SILO_CHUNK_GC_ENABLE is off)", "last sweep: none since start"}},
+		{name: "running", gc: &statusv1.GCStatus{Enabled: true, Running: true}, want: []string{"Chunk GC: reclaiming", "sweeping now"}},
+		{
+			name: "skipped",
+			gc:   &statusv1.GCStatus{Enabled: true, LastRunUnix: fiveMinAgo, LastError: "skipped: maps disagree"},
+			want: []string{"last sweep: 5m ago, did not complete: skipped: maps disagree"},
+		},
+		{
+			name: "completed",
+			gc:   &statusv1.GCStatus{Enabled: true, LastRunUnix: fiveMinAgo, LastDurationMs: 1200, LastOrphansDeleted: 1, LastBytesFreed: 2048},
+			want: []string{"last sweep: 5m ago in 1.2s, 1 chunk reclaimed (2.0 KiB)"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printGC(&buf, tc.gc)
+			if tc.want == nil && buf.Len() != 0 {
+				t.Errorf("want no output, got:\n%s", buf.String())
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(buf.String(), want) {
+					t.Errorf("missing %q in:\n%s", want, buf.String())
+				}
+			}
+		})
+	}
+}
+
+func TestNodeColumnsAndVolumeNotes(t *testing.T) {
+	if got := nodeCapacity(&statusv1.NodeStatus{CapacityBytes: 100, UsedBytes: 95, Pressured: true}); !strings.HasSuffix(got, "(95%) PRESSURE") {
+		t.Errorf("pressured capacity = %q", got)
+	}
+	if got := nodeSkew(&statusv1.NodeStatus{Id: "node-a", ClockSkewMs: 5}, "node-a"); got != "—" {
+		t.Errorf("self skew = %q, want a dash", got)
+	}
+	if got := nodeSkew(&statusv1.NodeStatus{Id: "node-b", ClockSkewMs: -40}, "node-a"); got != "-40ms" {
+		t.Errorf("peer skew = %q", got)
+	}
+	for _, tc := range []struct {
+		v    *statusv1.VolumeStatus
+		want string
+	}{
+		{&statusv1.VolumeStatus{}, "—"},
+		{&statusv1.VolumeStatus{AttachedHere: true}, "attached here"},
+		{&statusv1.VolumeStatus{AttachedHere: true, MapDamaged: true}, "attached here, MAP DAMAGED"},
+	} {
+		if got := volumeNotes(tc.v); got != tc.want {
+			t.Errorf("volumeNotes(%+v) = %q, want %q", tc.v, got, tc.want)
+		}
+	}
+	if pluralCount(int64(1)) != "" || pluralCount(uint64(0)) != "s" {
+		t.Error("pluralCount")
+	}
+}
+
+func TestHumanizeDuration(t *testing.T) {
+	for _, tc := range []struct {
+		d    time.Duration
+		want string
+	}{{-time.Second, "0s"}, {30 * time.Second, "30s"}, {5 * time.Minute, "5m"}, {2 * time.Hour, "2h"}, {72 * time.Hour, "3d"}} {
+		if got := humanizeDuration(tc.d); got != tc.want {
+			t.Errorf("humanizeDuration(%v) = %q, want %q", tc.d, got, tc.want)
+		}
 	}
 }

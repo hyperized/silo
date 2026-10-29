@@ -172,6 +172,9 @@ func (s *nbdSub) Shutdown(context.Context) error {
 	return nil
 }
 
+// AttachedExports lets the status builder see which volumes are open here.
+func (s *nbdSub) AttachedExports() []string { return s.srv.AttachedExports() }
+
 // boundAddr returns the listener address once Start has bound it ("" before).
 func (s *nbdSub) boundAddr() string {
 	s.mu.Lock()

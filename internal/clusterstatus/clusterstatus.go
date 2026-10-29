@@ -7,6 +7,7 @@ package clusterstatus
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	statusv1 "github.com/hyperized/silo/api/proto/silo/status/v1"
 	"github.com/hyperized/silo/internal/diskusage"
@@ -42,7 +43,7 @@ type ExtentCounter interface {
 // Builder produces GetStatusResponse snapshots. It holds no mutable state of
 // its own, so it is safe for concurrent use as long as its sources are, which
 // the production ones (membership, chunk store, namespace, extent store,
-// backup subsystem) are.
+// backup, clock-skew monitor, gossip, chunk GC, router, NBD server) are.
 type Builder struct {
 	members   Members
 	chunks    ChunkLister
@@ -54,6 +55,15 @@ type Builder struct {
 	diskUsage func(path string) (diskusage.Usage, error)
 	backup    BackupReporter
 	logger    *slog.Logger
+
+	skew        SkewReporter
+	gossip      GossipHealth
+	gc          GCReporter
+	damage      MapDamage
+	replicas    ReplicaResolver
+	attached    AttachedLister
+	replication int
+	started     time.Time
 }
 
 // Option configures a Builder.
@@ -102,20 +112,27 @@ func New(members Members, chunks ChunkLister, dataDir, nodeID, version string, l
 // "which nodes are up" is the operator's first question and must always get an
 // answer.
 func (b *Builder) Build(ctx context.Context) *statusv1.GetStatusResponse {
+	members := b.members.Members()
+	skews := b.peerSkews()
 	return &statusv1.GetStatusResponse{
 		RespondingNodeId: b.nodeID,
 		Version:          b.version,
-		Nodes:            b.nodes(),
+		Nodes:            b.nodes(members, skews),
 		Storage:          b.storage(ctx),
 		Volumes:          b.volumeTable(),
 		Backup:           backupStatus(b.backup),
+		Health:           b.health(members, skews),
+		Gc:               gcStatus(b.gc),
 	}
 }
 
-func (b *Builder) nodes() []*statusv1.NodeStatus {
-	members := b.members.Members()
+func (b *Builder) nodes(members []membership.Node, skews map[string]time.Duration) []*statusv1.NodeStatus {
 	out := make([]*statusv1.NodeStatus, 0, len(members))
 	for _, n := range members {
+		var skew time.Duration
+		if n.ID != b.nodeID {
+			skew = skews[n.ID]
+		}
 		out = append(out, &statusv1.NodeStatus{
 			Id:             n.ID,
 			GossipAddress:  n.Address,
@@ -125,6 +142,8 @@ func (b *Builder) nodes() []*statusv1.NodeStatus {
 			LastChangeUnix: n.LastChange.Unix(),
 			CapacityBytes:  n.CapacityBytes,
 			UsedBytes:      n.UsedBytes,
+			Pressured:      n.Pressured,
+			ClockSkewMs:    skew.Milliseconds(),
 		})
 	}
 	return out
@@ -152,8 +171,10 @@ func (b *Builder) volumeTable() []*statusv1.VolumeStatus {
 		return nil
 	}
 	vols := b.volumes.Volumes()
+	attached := b.attachedSet()
 	out := make([]*statusv1.VolumeStatus, 0, len(vols))
 	for _, v := range vols {
+		_, here := attached[v.Path]
 		out = append(out, &statusv1.VolumeStatus{
 			Path:            v.Path,
 			Inode:           v.Inode,
@@ -161,6 +182,9 @@ func (b *Builder) volumeTable() []*statusv1.VolumeStatus {
 			ExtentSizeBytes: v.ExtentSize,
 			LeaseHolder:     v.LeaseHolder,
 			ExtentsWritten:  b.extentsWritten(v),
+			Replicas:        b.replicaSet(v.Inode),
+			MapDamaged:      b.mapDamaged(v.Inode),
+			AttachedHere:    here,
 		})
 	}
 	return out

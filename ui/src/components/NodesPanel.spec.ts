@@ -117,4 +117,55 @@ describe('NodesPanel', () => {
       expect(d.text()).toContain('5 / 100 GiB')
     })
   })
+
+  describe('pressure', () => {
+    it('shows a Pressured chip only on pressured nodes', () => {
+      const rows = bodyRows(panel([node({ id: 'node-a', pressured: true }), node({ id: 'node-b' })]))
+      expect(rows[0]?.get('[data-label="State"]').text()).toContain('Pressured')
+      expect(rows[1]?.get('[data-label="State"]').text()).not.toContain('Pressured')
+    })
+  })
+
+  describe('skew', () => {
+    const skewCell = (w: ReturnType<typeof panel>, i: number) => bodyRows(w)[i]?.get('[data-label="Skew"]')
+
+    it('hides the column when every node reports 0', () => {
+      const w = panel([node(), node({ id: 'node-b' })])
+      expect(w.find('[data-label="Skew"]').exists()).toBe(false)
+      expect(w.get('thead').text()).not.toContain('Skew')
+    })
+
+    it('shows the column with an explanatory tip when some node has skew', () => {
+      const w = panel([node(), node({ id: 'node-b', clockSkewMs: 40 })])
+      expect(w.get('thead').text()).toContain('Skew')
+      expect(w.findAll('thead [role="tooltip"]').map((t) => t.text())).toContain('Clock offset measured by the responding node')
+    })
+
+    it('leaves the responding node cell empty even with skew', () => {
+      const w = panel([node({ id: 'node-a', clockSkewMs: 900 }), node({ id: 'node-b', clockSkewMs: 40 })])
+      expect(skewCell(w, 0)?.text()).toBe('')
+    })
+
+    it.each([
+      ['plain text when healthy', 40, '+40 ms', false],
+      ['plain negative text when healthy', -40, '-40 ms', false],
+      ['a warn badge', 600, '+600 ms', true],
+      ['a crit badge', -2500, '-2,500 ms', true],
+    ])('shows %s', (_name, ms, text, badge) => {
+      const w = panel([node({ id: 'node-a' }), node({ id: 'node-b', clockSkewMs: ms })])
+      const cell = skewCell(w, 1)
+      expect(cell?.text()).toBe(text)
+      expect(cell?.find('svg').exists()).toBe(badge)
+    })
+
+    it('tones the badge by severity', () => {
+      const w = panel([node(), node({ id: 'node-b', clockSkewMs: 600 }), node({ id: 'node-c', clockSkewMs: 2500 })])
+      expect(skewCell(w, 1)?.find('.text-warn').exists()).toBe(true)
+      expect(skewCell(w, 2)?.find('.text-crit').exists()).toBe(true)
+    })
+
+    it('adds a skeleton cell per column unchanged while loading', () => {
+      expect(bodyRows(panel(null, undefined))).toHaveLength(3)
+    })
+  })
 })

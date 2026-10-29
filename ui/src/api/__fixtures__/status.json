@@ -2,9 +2,9 @@
   "respondingNodeId": "node-a",
   "version": "0.16.0",
   "nodes": [
-    {"id":"node-a","gossipAddress":"10.0.0.1:7100","dataAddress":"10.0.0.1:7000","state":"NODE_STATE_ALIVE","incarnation":"3","lastChangeUnix":"1761640000","capacityBytes":"107374182400","usedBytes":"32212254720"},
-    {"id":"node-b","gossipAddress":"10.0.0.2:7100","dataAddress":"10.0.0.2:7000","state":"NODE_STATE_ALIVE","incarnation":"1","lastChangeUnix":"1761552000","capacityBytes":"107374182400","usedBytes":"30064771072"},
-    {"id":"node-c","gossipAddress":"10.0.0.3:7100","dataAddress":"10.0.0.3:7000","state":"NODE_STATE_ALIVE","incarnation":"2","lastChangeUnix":"1761600000","capacityBytes":"107374182400","usedBytes":"34359738368"}
+    {"id":"node-a","gossipAddress":"10.0.0.1:7100","dataAddress":"10.0.0.1:7000","state":"NODE_STATE_ALIVE","incarnation":"3","lastChangeUnix":"1761640000","capacityBytes":"107374182400","usedBytes":"32212254720","pressured":false,"clockSkewMs":"0"},
+    {"id":"node-b","gossipAddress":"10.0.0.2:7100","dataAddress":"10.0.0.2:7000","state":"NODE_STATE_ALIVE","incarnation":"1","lastChangeUnix":"1761552000","capacityBytes":"107374182400","usedBytes":"30064771072","pressured":false,"clockSkewMs":"42"},
+    {"id":"node-c","gossipAddress":"10.0.0.3:7100","dataAddress":"10.0.0.3:7000","state":"NODE_STATE_ALIVE","incarnation":"2","lastChangeUnix":"1761600000","capacityBytes":"107374182400","usedBytes":"34359738368","pressured":false,"clockSkewMs":"-17"}
   ],
   "storage": {"dataDir":"","capacityBytes":"107374182400","usedBytes":"32212254720","availableBytes":"75161927680","chunkCount":"12345"},
   "backup": {
@@ -12,7 +12,9 @@
     "lastRun": {"startedUnix":"1761638000","finishedUnix":"1761638120","ok":true,"error":"","chunksUploaded":"42","chunksSkipped":"12303","bytesUploaded":"176160768","manifest":"manifests/node-a/2026-10-28T08:00:00Z.json"}
   },
   "volumes": [
-    {"path":"/db","inode":"","sizeBytes":"53687091200","extentSizeBytes":"4194304","leaseHolder":"csi-node-3","extentsWritten":"1800"},
-    {"path":"/cache","inode":"","sizeBytes":"10737418240","extentSizeBytes":"4194304","leaseHolder":"","extentsWritten":"0"}
-  ]
+    {"path":"/db","inode":"","sizeBytes":"53687091200","extentSizeBytes":"4194304","leaseHolder":"csi-node-3","extentsWritten":"1800","replicas":["node-a","node-b","node-c"],"mapDamaged":false,"attachedHere":true},
+    {"path":"/cache","inode":"","sizeBytes":"10737418240","extentSizeBytes":"4194304","leaseHolder":"","extentsWritten":"0","replicas":["node-b","node-c","node-a"],"mapDamaged":false,"attachedHere":false}
+  ],
+  "health": {"replicationFactor":3,"aliveNodes":3,"isolated":false,"rejoinAttempts":"0","clockSkewMs":"42","clockSkewAlerts":"0","startedUnix":"1761400000"},
+  "gc": {"enabled":true,"running":false,"lastRunUnix":"1761637000","lastDurationMs":"1840","lastOrphansDeleted":"312","lastBytesFreed":"1308622848","lastError":""}
 }

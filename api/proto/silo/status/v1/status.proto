@@ -38,6 +38,53 @@ message NodeStatus {
   // and usage (zero until the node has advertised them over gossip).
   int64 capacity_bytes = 7;
   int64 used_bytes = 8;
+  // pressured is set when the node advertised its DiskPressure condition (the
+  // soft high-watermark). Only meaningful once capacity_bytes is non-zero.
+  bool pressured = 9;
+  // clock_skew_ms is the responding node's last measured wall-clock skew to
+  // this peer, in milliseconds; positive means the peer's clock is ahead. It
+  // includes one-way gossip latency. 0 for the responding node itself and for
+  // a peer with no recent reading.
+  int64 clock_skew_ms = 10;
+}
+
+// ClusterHealth is the responding node's own health signals: what it was
+// configured for, how much of the cluster it can see, and its clock.
+message ClusterHealth {
+  // replication_factor is SILO_REPLICATION as configured on the responding node.
+  int32 replication_factor = 1;
+  // alive_nodes counts members in NODE_STATE_ALIVE, the responding node included.
+  int32 alive_nodes = 2;
+  // isolated is set while the node sees fewer alive peers than it needs and is
+  // retrying its seeds (the silo_gossip_isolated gauge).
+  bool isolated = 3;
+  // rejoin_attempts counts seed dials made to get back into the cluster after
+  // losing peers (silo_gossip_rejoin_attempts_total).
+  uint64 rejoin_attempts = 4;
+  // clock_skew_ms is the largest absolute skew to any peer with a recent
+  // reading, in milliseconds (the same readings as silo_hlc_peer_clock_skew_seconds).
+  int64 clock_skew_ms = 5;
+  // clock_skew_alerts counts readings that exceeded SILO_MAX_CLOCK_SKEW
+  // (silo_hlc_clock_skew_alerts_total).
+  uint64 clock_skew_alerts = 6;
+  // started_unix is when the responding silod process started.
+  int64 started_unix = 7;
+}
+
+// GCStatus is the responding node's chunk garbage collector.
+message GCStatus {
+  // enabled is false when SILO_CHUNK_GC_ENABLE is off: sweeps still run and
+  // count orphans but delete nothing.
+  bool enabled = 1;
+  bool running = 2;
+  // last_run_unix is 0 when no sweep has finished since the process started.
+  int64 last_run_unix = 3;
+  int64 last_duration_ms = 4;
+  int64 last_orphans_deleted = 5;
+  int64 last_bytes_freed = 6;
+  // last_error is empty when the last sweep completed; otherwise it says why
+  // the sweep stopped or abstained.
+  string last_error = 7;
 }
 
 // StorageStatus is the responding node's local backing storage.
@@ -60,6 +107,15 @@ message VolumeStatus {
   // extents_written counts extents that hold data; extents_written × extent_size_bytes
   // approximates the bytes actually allocated.
   int64 extents_written = 6;
+  // replicas are the node ids that hold this volume's extent-map replica set,
+  // as the responding node's placement ring resolves it now.
+  repeated string replicas = 7;
+  // map_damaged is set when the responding node found its copy of the volume's
+  // extent map damaged at startup and has not rebuilt it from the replicas yet.
+  bool map_damaged = 8;
+  // attached_here is set while an NBD client has the volume open on the
+  // responding node.
+  bool attached_here = 9;
 }
 
 message GetStatusResponse {
@@ -69,6 +125,8 @@ message GetStatusResponse {
   StorageStatus storage = 4;
   BackupStatus backup = 5;
   repeated VolumeStatus volumes = 6;
+  ClusterHealth health = 7;
+  GCStatus gc = 8;
 }
 
 // BackupStatus is the responding node's backup configuration and the outcome

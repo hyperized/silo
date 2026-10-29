@@ -70,8 +70,8 @@ Wire these first; they catch the failures that matter.
 |---|---|---|
 | **Under-replication** | `sum(silo_replication_shortfall_chunks) > 0` for >N min | Data is below its replication factor. Spikes on node loss, should heal to 0. |
 | **Disk pressure** | `silo_rebalancer_disk_pressure == 1` (or `used/capacity > 0.85`) | Node crossed the soft high-watermark; add capacity or drain before it hits the hard fence. |
-| **Node isolation** | `silo_gossip_isolated == 1` for >5 min, or `silo_gossip_last_sync_age_seconds` climbing | A node has lost gossip contact with the cluster and its seeds are not answering. Check `SILO_SEEDS` and the seeds' gossip ports. |
-| **Clock skew** | `increase(silo_hlc_clock_skew_alerts_total[10m]) > 0` | A node's clock is drifting; fix NTP before write ordering suffers. |
+| **Node isolation** | `silo_gossip_isolated == 1` for >5 min, or `silo_gossip_last_sync_age_seconds` climbing | A node has lost gossip contact with the cluster and its seeds are not answering. Check `SILO_SEEDS` and the seeds' gossip ports. On the node itself, `health.isolated` and `health.rejoinAttempts` in `/api/v1/status` (or the `Health:` warning in `siloctl status`) show the same thing. |
+| **Clock skew** | `increase(silo_hlc_clock_skew_alerts_total[10m]) > 0` | A node's clock is drifting; fix NTP before write ordering suffers. `nodes[].clockSkewMs` in `/api/v1/status` (the `SKEW` column in `siloctl status`) shows which peer is off, as seen from the node you ask. |
 | **Backup failure** | `increase(silo_backup_failures_total[1h]) > 0` | The cold copy is not being written. |
 | **Incompatible peer** | `increase(silo_gossip_incompatible_messages_total[10m]) > 0` | A node is on an unsupported protocol; finish or roll back the upgrade. |
 | **Write latency** | `histogram_quantile(0.99, silo_chunk_write_latency_seconds)` high | Coordinator/replication is struggling. |
@@ -163,15 +163,21 @@ file exists and no rebuilt map sits beside it, silod treats the volume as damage
 on every boot. An attach in the meantime fails with `will not serve volume ...
 yet`, naming how many replicas could not be reached.
 
+You can see this without reading logs: `siloctl status` against the affected
+node shows `MAP DAMAGED` in the volume's `NOTES` column, and `/api/v1/status`
+sets `mapDamaged: true` on it. The `REPLICAS` column (`replicas` in the JSON)
+lists the nodes whose copies the rebuild needs.
+
 This is deliberate. The damaged copy may have held writes that only some of the
 replicas received, so serving from whichever replica answered could roll the
 volume back to an earlier state. For a database that looks like a clean
 shutdown at an old checkpoint.
 
 1. Bring the unreachable nodes back, or fix gossip connectivity between the
-   nodes, until `siloctl status` lists every node.
+   nodes, until `siloctl status` lists every node in the volume's `REPLICAS`
+   as alive.
 2. Retry the attach. Once every replica answers, silod logs that it rebuilt the
-   map and the volume serves again.
+   map, the volume serves again and `MAP DAMAGED` clears.
 3. Delete the `.corrupt` files once the volume serves. Keep it if you want to
    report the failure; it holds the damaged bytes as found. Once the map is
    rebuilt, a leftover `.corrupt` file no longer blocks anything.

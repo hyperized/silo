@@ -1,5 +1,7 @@
 // Wire types mirror GetStatusResponse as protojson renders it: lowerCamelCase
 // keys, int64 as decimal strings, enums by name, unset messages as null.
+// Fields marked optional arrived after the first release; an older silod omits
+// them, and the parser then uses the protobuf zero value.
 
 export interface WireNode {
   id: string
@@ -10,6 +12,28 @@ export interface WireNode {
   lastChangeUnix: string
   capacityBytes: string
   usedBytes: string
+  pressured?: boolean
+  clockSkewMs?: string
+}
+
+export interface WireHealth {
+  replicationFactor?: number
+  aliveNodes?: number
+  isolated?: boolean
+  rejoinAttempts?: string
+  clockSkewMs?: string
+  clockSkewAlerts?: string
+  startedUnix?: string
+}
+
+export interface WireGc {
+  enabled?: boolean
+  running?: boolean
+  lastRunUnix?: string
+  lastDurationMs?: string
+  lastOrphansDeleted?: string
+  lastBytesFreed?: string
+  lastError?: string
 }
 
 export interface WireStorage {
@@ -47,6 +71,9 @@ export interface WireVolume {
   extentSizeBytes: string
   leaseHolder: string
   extentsWritten: string
+  replicas?: string[]
+  mapDamaged?: boolean
+  attachedHere?: boolean
 }
 
 export interface WireStatus {
@@ -56,6 +83,8 @@ export interface WireStatus {
   storage: WireStorage | null
   backup: WireBackup | null
   volumes: WireVolume[]
+  health?: WireHealth | null
+  gc?: WireGc | null
 }
 
 export type NodeState = 'alive' | 'suspect' | 'dead' | 'left' | 'unknown'
@@ -69,6 +98,37 @@ export interface ClusterNode {
   lastChange: Date | null
   capacityBytes: number
   usedBytes: number
+  /** The node reports resource pressure. */
+  pressured: boolean
+  /** Signed offset of this node's clock as last measured by the responding node; 0 for itself or unknown. */
+  clockSkewMs: number
+}
+
+/** Cluster health as seen by the responding node. */
+export interface ClusterHealth {
+  /** Replicas per chunk; 0 means not reported. */
+  replicationFactor: number
+  aliveNodes: number
+  /** The responding node cannot reach any peer. */
+  isolated: boolean
+  rejoinAttempts: number
+  /** Largest absolute skew to any peer, in milliseconds. */
+  clockSkewMs: number
+  clockSkewAlerts: number
+  /** Process start of the responding silod. */
+  startedAt: Date | null
+}
+
+/** Chunk garbage collection on the responding node. */
+export interface Gc {
+  enabled: boolean
+  running: boolean
+  /** null when no run finished since silod started. */
+  lastRunAt: Date | null
+  lastDurationMs: number
+  lastOrphansDeleted: number
+  lastBytesFreed: number
+  lastError: string
 }
 
 export interface LocalStorage {
@@ -105,6 +165,11 @@ export interface Volume {
   allocatedBytes: number
   extentSizeBytes: number
   leaseHolder: string
+  /** Node ids of the replica set, in the order silod sent them. */
+  replicas: string[]
+  mapDamaged: boolean
+  /** Attached on the responding node. */
+  attachedHere: boolean
 }
 
 export interface Status {
@@ -114,6 +179,9 @@ export interface Status {
   storage: LocalStorage | null
   backup: Backup | null
   volumes: Volume[]
+  /** null when silod is older than the health report. */
+  health: ClusterHealth | null
+  gc: Gc | null
 }
 
 export const STATUS_PATH = '/api/v1/status'
@@ -170,6 +238,22 @@ function bool(o: Obj, key: string, where: string): boolean {
   return v
 }
 
+// The opt* readers serve fields added after the first release: absent (or null)
+// means an older silod and yields the zero value, but a present value of the
+// wrong type is still rejected.
+
+function optStr(o: Obj, key: string, where: string): string {
+  return o[key] === undefined || o[key] === null ? '' : str(o, key, where)
+}
+
+function optBool(o: Obj, key: string, where: string): boolean {
+  return o[key] === undefined || o[key] === null ? false : bool(o, key, where)
+}
+
+function optInt(o: Obj, key: string, where: string): number {
+  return o[key] === undefined || o[key] === null ? 0 : int(o, key, where)
+}
+
 /**
  * Parses a protojson int64. protojson emits strings, but accepts numbers on
  * input, so both are tolerated. Values above 2^53 lose precision, which is
@@ -193,10 +277,10 @@ function unixDate(o: Obj, key: string, where: string): Date | null {
   return n > 0 ? new Date(n * 1000) : null
 }
 
-function list(o: Obj, key: string): unknown[] {
+function list(o: Obj, key: string, where = ''): unknown[] {
   const v = o[key]
   if (v === undefined || v === null) return []
-  if (!Array.isArray(v)) throw new StatusFormatError(`${key} is not a list`)
+  if (!Array.isArray(v)) throw new StatusFormatError(`${where ? `${where}.` : ''}${key} is not a list`)
   return v
 }
 
@@ -232,6 +316,37 @@ function parseNode(v: unknown, i: number): ClusterNode {
     lastChange: unixDate(v, 'lastChangeUnix', where),
     capacityBytes: int(v, 'capacityBytes', where),
     usedBytes: int(v, 'usedBytes', where),
+    pressured: optBool(v, 'pressured', where),
+    clockSkewMs: optInt(v, 'clockSkewMs', where),
+  }
+}
+
+function parseHealth(v: Obj): ClusterHealth {
+  const where = 'health'
+  const started = optInt(v, 'startedUnix', where)
+  return {
+    replicationFactor: optInt(v, 'replicationFactor', where),
+    aliveNodes: optInt(v, 'aliveNodes', where),
+    isolated: optBool(v, 'isolated', where),
+    rejoinAttempts: optInt(v, 'rejoinAttempts', where),
+    // silod reports the largest absolute value, but nothing is lost by making sure.
+    clockSkewMs: Math.abs(optInt(v, 'clockSkewMs', where)),
+    clockSkewAlerts: optInt(v, 'clockSkewAlerts', where),
+    startedAt: started > 0 ? new Date(started * 1000) : null,
+  }
+}
+
+function parseGc(v: Obj): Gc {
+  const where = 'gc'
+  const last = optInt(v, 'lastRunUnix', where)
+  return {
+    enabled: optBool(v, 'enabled', where),
+    running: optBool(v, 'running', where),
+    lastRunAt: last > 0 ? new Date(last * 1000) : null,
+    lastDurationMs: optInt(v, 'lastDurationMs', where),
+    lastOrphansDeleted: optInt(v, 'lastOrphansDeleted', where),
+    lastBytesFreed: optInt(v, 'lastBytesFreed', where),
+    lastError: optStr(v, 'lastError', where),
   }
 }
 
@@ -285,6 +400,12 @@ function parseVolume(v: unknown, i: number): Volume {
     allocatedBytes: allocated,
     extentSizeBytes: extent,
     leaseHolder: str(v, 'leaseHolder', where),
+    replicas: list(v, 'replicas', where).map((r, j) => {
+      if (typeof r !== 'string') throw new StatusFormatError(`${where}.replicas[${String(j)}] is not text`)
+      return r
+    }),
+    mapDamaged: optBool(v, 'mapDamaged', where),
+    attachedHere: optBool(v, 'attachedHere', where),
   }
 }
 
@@ -293,6 +414,8 @@ export function parseStatus(raw: unknown): Status {
   if (!isObj(raw)) throw new StatusFormatError('the response is not an object')
   const storage = optional(raw, 'storage')
   const backup = optional(raw, 'backup')
+  const health = optional(raw, 'health')
+  const gc = optional(raw, 'gc')
   return {
     respondingNodeId: str(raw, 'respondingNodeId', 'status'),
     version: str(raw, 'version', 'status'),
@@ -302,6 +425,8 @@ export function parseStatus(raw: unknown): Status {
     volumes: list(raw, 'volumes')
       .map(parseVolume)
       .sort((a, b) => a.path.localeCompare(b.path)),
+    health: health ? parseHealth(health) : null,
+    gc: gc ? parseGc(gc) : null,
   }
 }
 

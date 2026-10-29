@@ -374,6 +374,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 	if announce == nil {
 		announce = io.Discard
 	}
+	started := time.Now()
 
 	key, err := keyProvider(cfg).ClusterKey()
 	if err != nil {
@@ -561,9 +562,25 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		exp.Register(backupSub)
 	}
 
+	// The NBD subsystem is built here, ahead of the status builder, so status
+	// can report which volumes are attached on this node.
+	var nbdSubsys subsystem
+	if cfg.NBDAddr != "" {
+		nbdSubsys = newNBDSubsystem(cfg, ns, coord, extCoord, clock, logger)
+	}
+
 	// One status builder feeds both `siloctl status` (gRPC) and the web UI's
 	// JSON endpoint, so the two can never report different things.
-	statusOpts := []clusterstatus.Option{clusterstatus.WithVolumes(ns), clusterstatus.WithExtentCounts(extStore)}
+	statusOpts := []clusterstatus.Option{
+		clusterstatus.WithVolumes(ns),
+		clusterstatus.WithExtentCounts(extStore),
+		clusterstatus.WithMapDamage(extStore),
+		clusterstatus.WithReplicaSet(router),
+		clusterstatus.WithReplicationFactor(cfg.Replication),
+		clusterstatus.WithClockSkew(skew),
+		clusterstatus.WithStartTime(started),
+	}
+	statusOpts = append(statusOpts, subsystemStatusOptions(gossipSubsys, chunkGCSubsys, nbdSubsys)...)
 	if backupSub != nil {
 		// Guarded rather than passed through: a nil *backup.Subsystem in the
 		// interface would not compare equal to nil inside the builder.
@@ -582,8 +599,8 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, announce 
 		extScrubberSubsys,
 		chunkGCSubsys,
 	}
-	if cfg.NBDAddr != "" {
-		subs = append(subs, newNBDSubsystem(cfg, ns, coord, extCoord, clock, logger))
+	if nbdSubsys != nil {
+		subs = append(subs, nbdSubsys)
 	}
 	if backupSub != nil {
 		subs = append(subs, backupSub)
@@ -683,6 +700,31 @@ func (g *gossipSub) Drain() bool { return g.srv.Drain() }
 // metrics.Source (member counts and anti-entropy lag) through the wrapper.
 func (g *gossipSub) MetricPrefix() string             { return g.srv.MetricPrefix() }
 func (g *gossipSub) CollectMetrics() []metrics.Metric { return g.srv.CollectMetrics() }
+
+// Isolated and RejoinAttempts let the gossip subsystem feed the status
+// builder's health block through the wrapper.
+func (g *gossipSub) Isolated() bool         { return g.srv.Isolated() }
+func (g *gossipSub) RejoinAttempts() uint64 { return g.srv.RejoinAttempts() }
+
+// subsystemStatusOptions collects the status sources the given subsystems
+// expose. A nil entry (NBD when SILO_NBD_ADDR is unset) or a test fake that
+// implements none of them contributes nothing, and the matching status fields
+// stay zero.
+func subsystemStatusOptions(subs ...subsystem) []clusterstatus.Option {
+	var opts []clusterstatus.Option
+	for _, s := range subs {
+		if g, ok := s.(clusterstatus.GossipHealth); ok {
+			opts = append(opts, clusterstatus.WithGossipHealth(g))
+		}
+		if r, ok := s.(clusterstatus.GCReporter); ok {
+			opts = append(opts, clusterstatus.WithGC(r))
+		}
+		if a, ok := s.(clusterstatus.AttachedLister); ok {
+			opts = append(opts, clusterstatus.WithAttached(a))
+		}
+	}
+	return opts
+}
 
 // gossipDrainer returns the drainer behind the gossip subsystem, or nil when
 // the subsystem does not expose draining (a test fake may not), in which case

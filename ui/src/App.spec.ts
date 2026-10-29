@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import App from './App.vue'
 import { fetchStatus, StatusUnreachableError } from './api/status'
-import { node, status } from './test/factories'
+import { clusterHealth, gc, node, status } from './test/factories'
 
 vi.mock('./api/status', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./api/status')>()),
@@ -70,6 +70,31 @@ describe('App', () => {
     expect(headings(w)).not.toContain('Issues')
     expect(w.find('[role=alert]').exists()).toBe(false)
     expect(w.find('[role=status]').exists()).toBe(false)
+  })
+
+  it('shows the health and garbage collection panels once data arrives', async () => {
+    fetchMock.mockResolvedValue(
+      status({ nodes: [node({ id: 'node-a' })], health: clusterHealth(), gc: gc({ lastRunAt: new Date(NOW - 3600_000) }) }),
+    )
+    const w = await mountApp()
+    expect(headings(w)).toEqual(expect.arrayContaining(['Health', 'Garbage collection']))
+    expect(w.get('[aria-labelledby=health-title]').text()).toContain('3 / 3 nodes alive')
+    expect(w.get('[aria-labelledby=gc-title]').text()).toContain('1 h ago')
+  })
+
+  it('says not reported in the new panels for an older silod', async () => {
+    fetchMock.mockResolvedValue(status())
+    const w = await mountApp()
+    expect(w.get('[aria-labelledby=health-title]').text()).toContain('not reported')
+    expect(w.get('[aria-labelledby=gc-title]').text()).toContain('not reported')
+  })
+
+  it('shows skeletons in the new panels while loading', async () => {
+    fetchMock.mockReturnValue(new Promise(() => undefined))
+    const w = await mountApp()
+    expect(headings(w)).toEqual(expect.arrayContaining(['Health', 'Garbage collection']))
+    expect(w.find('[aria-labelledby=health-title] [aria-hidden="true"]').exists()).toBe(true)
+    expect(w.find('[aria-labelledby=gc-title] [aria-hidden="true"]').exists()).toBe(true)
   })
 
   it('lists the issues when the cluster has findings', async () => {
@@ -236,7 +261,7 @@ describe('App', () => {
       const w = await mountApp()
       await advance(400)
       expect(fetchMock).not.toHaveBeenCalled()
-      expect(w.get('header').text()).toContain('Healthy')
+      expect(w.get('header').text()).toContain('Warning')
     })
   })
 })

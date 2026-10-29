@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -149,9 +150,55 @@ type ChunkGC struct {
 	deferred    atomic.Int64
 	diverged    atomic.Int64
 
+	// statusMu guards status, the run summary the operator status reads.
+	statusMu sync.Mutex
+	status   ChunkGCStatus
+
 	stop chan struct{}
 	done chan struct{}
 }
+
+// ChunkGCStatus summarises the GC for operator tooling: whether it reclaims,
+// whether a sweep is in progress, and how the last one went. The zero LastRun
+// means no sweep has finished since the process started.
+type ChunkGCStatus struct {
+	Enabled bool
+	Running bool
+	// LastRun is when the last sweep finished, LastDuration how long it took.
+	LastRun      time.Time
+	LastDuration time.Duration
+	// LastDeleted and LastBytesFreed are what the last sweep reclaimed;
+	// LastBytesFreed counts stored (on-disk, encrypted) bytes.
+	LastDeleted    int64
+	LastBytesFreed int64
+	// LastError is empty when the last sweep completed, otherwise why it
+	// stopped or abstained.
+	LastError string
+}
+
+// Status returns the GC's current summary. Safe for concurrent use.
+func (g *ChunkGC) Status() ChunkGCStatus {
+	g.statusMu.Lock()
+	defer g.statusMu.Unlock()
+	st := g.status
+	st.Enabled = g.enabled
+	return st
+}
+
+// sweepOutcome is what one sweep reports back to runOnce for the status.
+type sweepOutcome struct {
+	deleted, freed int64
+	err            string
+}
+
+// Messages for a sweep that did not complete. They stay free of volume ids:
+// the status endpoint is unauthenticated and the logs carry the detail.
+const (
+	gcErrIncomplete = "skipped: this node does not hold the extent maps of every live volume; see the chunk-gc warning in the silod log"
+	gcErrDiverged   = "skipped: this node's extent maps disagree with their replicas; wait for the extent scrubber to reconcile them"
+	gcErrList       = "could not list the local chunk store: "
+	gcErrShutdown   = "interrupted by shutdown"
+)
 
 // ChunkGCOption configures optional GC behaviour at construction.
 type ChunkGCOption func(*ChunkGC)
@@ -243,9 +290,30 @@ func (g *ChunkGC) Shutdown(ctx context.Context) error {
 	}
 }
 
-// runOnce builds the live set, verifies the view is complete, then sweeps the
-// local store of unreferenced chunks older than the grace window.
+// runOnce runs one sweep and records its outcome for Status.
 func (g *ChunkGC) runOnce(ctx context.Context) {
+	start := g.now()
+	g.statusMu.Lock()
+	g.status.Running = true
+	g.statusMu.Unlock()
+
+	out := g.sweep(ctx)
+
+	end := g.now()
+	g.statusMu.Lock()
+	g.status = ChunkGCStatus{
+		LastRun:        end,
+		LastDuration:   end.Sub(start),
+		LastDeleted:    out.deleted,
+		LastBytesFreed: out.freed,
+		LastError:      out.err,
+	}
+	g.statusMu.Unlock()
+}
+
+// sweep builds the live set, verifies the view is complete, then sweeps the
+// local store of unreferenced chunks older than the grace window.
+func (g *ChunkGC) sweep(ctx context.Context) sweepOutcome {
 	// Completeness: a live volume whose extent map this node does not hold is a
 	// blind spot — its chunks would look unreferenced here. Abstain rather than
 	// risk reclaiming a chunk an unseen map still binds.
@@ -256,7 +324,7 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 		g.orphans.Store(0)
 		g.lastReclaim.Store(0)
 		g.logger.Warn("chunk-gc is skipping this sweep: it does not hold the extent maps of every live volume, so some chunk references are not visible here", "unaccounted_volumes", missing)
-		return
+		return sweepOutcome{err: gcErrIncomplete}
 	}
 	g.incomplete.Store(0)
 
@@ -272,7 +340,7 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 			g.orphans.Store(0)
 			g.lastReclaim.Store(0)
 			g.logger.Warn("chunk-gc is skipping this sweep: this node's extent maps disagree with its replicas, so its view of what is still referenced may be short", "volume", disagreeing)
-			return
+			return sweepOutcome{err: gcErrDiverged}
 		}
 	}
 	g.diverged.Store(0)
@@ -280,7 +348,7 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 	ids, err := g.lister.List(ctx)
 	if err != nil {
 		g.logger.Warn("chunk-gc could not list the local chunk store; will retry next cycle", "error", err)
-		return
+		return sweepOutcome{err: gcErrList + err.Error()}
 	}
 	// Prefer the bulk path when the store offers one: unlink without syncing and
 	// commit the whole sweep with a single directory fsync at the end. A store
@@ -292,7 +360,7 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 	}
 
 	cutoff := g.now().Add(-g.grace)
-	var orphans, reclaimed, deferred int64
+	var orphans, reclaimed, deferred, freed int64
 	flush := func() {
 		if !batched || reclaimed == 0 {
 			return
@@ -306,7 +374,8 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 	for _, id := range ids {
 		if ctx.Err() != nil {
 			flush()
-			return // shutting down mid-sweep; leave the last full counts in place
+			// Shutting down mid-sweep: leave the last full counts in place.
+			return sweepOutcome{deleted: reclaimed, freed: freed, err: gcErrShutdown}
 		}
 		if _, live := keep[id]; live {
 			continue
@@ -331,6 +400,7 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 			continue
 		}
 		reclaimed++
+		freed += info.StoredBytes
 	}
 	flush()
 	g.orphans.Store(orphans)
@@ -347,6 +417,7 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 	case orphans > 0 && !g.enabled:
 		g.logger.Info("chunk-gc (dry run) found reclaimable orphaned chunks; set SILO_CHUNK_GC_ENABLE to reclaim them", "orphans", orphans)
 	}
+	return sweepOutcome{deleted: reclaimed, freed: freed}
 }
 
 // MetricPrefix namespaces the chunk GC's readings.

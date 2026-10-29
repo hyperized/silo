@@ -1,5 +1,5 @@
 import type { NodeState } from '../api/status'
-import type { BackupKind, Level } from './health'
+import type { BackupKind, GcKind, Level, ReplicationKind } from './health'
 
 export type Tone = 'good' | 'warn' | 'crit' | 'neutral'
 export type IconName = 'check' | 'alert' | 'octagon' | 'minus' | 'question' | 'sync' | 'clock'
@@ -33,6 +33,53 @@ export const BACKUP_PRESENTATION: Readonly<Record<BackupKind, Presentation>> = {
   ok: { label: 'OK', tone: 'good', icon: 'check' },
   failed: { label: 'Failed', tone: 'warn', icon: 'alert' },
   overdue: { label: 'Overdue', tone: 'warn', icon: 'clock', tip: 'Overdue: missed its scheduled run' },
+}
+
+export const REPLICATION_PRESENTATION: Readonly<Record<ReplicationKind, Presentation>> = {
+  healthy: { label: 'Healthy', tone: 'good', icon: 'check', tip: 'Enough alive nodes for every replica' },
+  degraded: { label: 'Degraded', tone: 'crit', icon: 'octagon', tip: 'Fewer alive nodes than the replication factor' },
+}
+
+export const GC_PRESENTATION: Readonly<Record<GcKind, Presentation>> = {
+  off: { label: 'Off', tone: 'neutral', icon: 'minus', tip: 'Off: sweeps count orphans, delete nothing' },
+  running: { label: 'Running', tone: 'good', icon: 'sync' },
+  never: { label: 'Never', tone: 'neutral', icon: 'clock', tip: 'Never: no run since silod started' },
+  ok: { label: 'OK', tone: 'good', icon: 'check' },
+  failed: { label: 'Failed', tone: 'warn', icon: 'alert' },
+}
+
+export const MEMBERSHIP_PRESENTATION: Readonly<Record<'connected' | 'isolated', Presentation>> = {
+  connected: { label: 'Connected', tone: 'good', icon: 'check' },
+  isolated: { label: 'Isolated', tone: 'crit', icon: 'octagon', tip: 'Isolated: cannot reach any peer' },
+}
+
+export const PRESSURED_PRESENTATION: Presentation = {
+  label: 'Pressured',
+  tone: 'warn',
+  icon: 'alert',
+  tip: 'Pressured: node reports resource pressure',
+}
+
+export const VOLUME_DEGRADED_PRESENTATION: Presentation = {
+  label: 'Degraded',
+  tone: 'warn',
+  icon: 'alert',
+  tip: 'Degraded: a replica is down or missing',
+}
+
+export const MAP_DAMAGED_PRESENTATION: Presentation = {
+  label: 'Map damaged',
+  tone: 'crit',
+  icon: 'octagon',
+  tip: 'Extent map failed its checks on load',
+}
+
+const SKEW_TONE = { healthy: 'neutral', attention: 'warn', degraded: 'crit' } as const satisfies Record<Level, Tone>
+const SKEW_ICON = { healthy: 'check', attention: 'alert', degraded: 'octagon' } as const satisfies Record<Level, IconName>
+
+/** A clock skew value as a badge; the level comes from skewLevel. */
+export function skewPresentation(text: string, level: Level): Presentation {
+  return { label: text, tone: SKEW_TONE[level], icon: SKEW_ICON[level] }
 }
 
 export const HIDDEN_TARGET = '(hidden)'
