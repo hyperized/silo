@@ -309,6 +309,16 @@ func (s *Subsystem) Drain() bool {
 	return true
 }
 
+// Isolated reports whether the node currently sees fewer alive peers than it
+// needs and is retrying its seeds; the same flag as silo_gossip_isolated.
+func (s *Subsystem) Isolated() bool { return s.isolated.Load() }
+
+// RejoinAttempts returns how many seed dials the node has made to get back
+// into the cluster after losing its peers (silo_gossip_rejoin_attempts_total).
+func (s *Subsystem) RejoinAttempts() uint64 {
+	return uint64(max(s.rejoinAttempts.Load(), 0)) //nolint:gosec // a counter that only ever increments
+}
+
 // MetricPrefix namespaces the gossip metrics.
 func (s *Subsystem) MetricPrefix() string { return "silo_gossip" }
 
@@ -587,6 +597,9 @@ func (s *Subsystem) selfEnvelope(kind MessageKind, target string) *Message {
 		SenderDataAddress: self.DataAddress,
 		SenderIncarn:      self.Incarnation,
 		SenderProto:       clusterproto.Protocol,
+		SenderCapacity:    self.CapacityBytes,
+		SenderUsed:        self.UsedBytes,
+		SenderPressured:   self.Pressured,
 		Target:            target,
 		Piggyback:         s.piggybackSnapshot(),
 	}
@@ -655,28 +668,26 @@ func (s *Subsystem) applyIncoming(msg *Message) []membership.Node {
 	changed := s.members.ApplyMany(msg.Piggyback)
 	if msg.SenderID != "" {
 		if n, ok := s.members.Apply(membership.Event{
-			ID:          msg.SenderID,
-			Address:     msg.SenderAddress,
-			DataAddress: msg.SenderDataAddress,
-			State:       membership.StateAlive,
-			Incarnation: msg.SenderIncarn,
+			ID:            msg.SenderID,
+			Address:       msg.SenderAddress,
+			DataAddress:   msg.SenderDataAddress,
+			State:         membership.StateAlive,
+			Incarnation:   msg.SenderIncarn,
+			CapacityBytes: msg.SenderCapacity,
+			UsedBytes:     msg.SenderUsed,
+			Pressured:     msg.SenderPressured,
 		}); ok {
 			changed = append(changed, n)
 		}
 	}
 	// Re-broadcast changes by feeding them back into the piggyback
-	// ring as Events.
+	// ring as Events. The capacity advert goes with them: a relay that
+	// dropped it would hand third nodes the new incarnation without the
+	// figures, the same trap the sender envelope fields close.
 	if len(changed) > 0 {
 		evs := make([]membership.Event, 0, len(changed))
 		for _, n := range changed {
-			evs = append(evs, membership.Event{
-				ID:          n.ID,
-				Address:     n.Address,
-				DataAddress: n.DataAddress,
-				State:       n.State,
-				Incarnation: n.Incarnation,
-				At:          n.LastChange,
-			})
+			evs = append(evs, nodeEvent(n))
 		}
 		s.remember(evs...)
 		for _, n := range changed {

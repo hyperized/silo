@@ -240,10 +240,12 @@ func (m *Membership) Snapshot() []Node {
 // Node plus a bool indicating whether the entry changed. The merge
 // rules:
 //
-//  1. An event for the local node id with a state worse than Alive
-//     triggers a refutation: we bump our own incarnation, re-set
-//     ourselves to Alive, and ignore the incoming event. The returned
-//     Node is our fresh self-entry; changed is true.
+//  1. An event for the local node id with a state worse than Alive, or
+//     an Alive one at a higher incarnation than ours (our previous
+//     process's entry after a restart), triggers a refutation: we bump
+//     our own incarnation past it, re-set ourselves to Alive, and ignore
+//     the incoming event. The returned Node is our fresh self-entry;
+//     changed is true.
 //  2. If the table has no entry for ev.ID, an Alive or Suspect event
 //     is inserted verbatim and changed is true. A Dead or Left event
 //     for an unknown node is dropped (changed is false): a node we
@@ -254,7 +256,9 @@ func (m *Membership) Snapshot() []Node {
 //  4. If ev.Incarnation == existing.Incarnation and ev.State has a
 //     higher numeric value than existing.State, the event wins. This
 //     is how Suspect→Dead progresses without an incarnation bump.
-//  5. Otherwise the event is ignored.
+//  5. If incarnation and state are equal but the event carries a capacity
+//     advert the entry lacks, the advert is filled in.
+//  6. Otherwise the event is ignored.
 //
 // Apply ignores events with an empty ID — callers should treat that as
 // a programmer bug, not a soft error worth logging on every probe.
@@ -293,21 +297,7 @@ func (m *Membership) ApplyMany(events []Event) []Node {
 func (m *Membership) applyLocked(ev Event) (Node, bool) {
 	now := Now()
 	if ev.ID == m.self {
-		// Self-refutation: any non-Alive claim about us is wrong by
-		// definition (we are evidently alive — we just received it).
-		// Bump our incarnation past the claim's so subsequent merges
-		// at peers will see our new entry as strictly newer.
-		if ev.State == StateAlive {
-			return m.members[m.self], false
-		}
-		cur := m.members[m.self]
-		if ev.Incarnation >= cur.Incarnation {
-			cur.Incarnation = ev.Incarnation + 1
-		}
-		cur.State = StateAlive
-		cur.LastChange = now
-		m.members[m.self] = cur
-		return cur, true
+		return m.refuteLocked(ev, now)
 	}
 
 	cur, exists := m.members[ev.ID]
@@ -353,7 +343,50 @@ func (m *Membership) applyLocked(ev Event) (Node, bool) {
 		m.members[ev.ID] = cur
 		return cur, true
 	}
+	// Equal incarnation and state, but the event carries figures we lack.
+	// An owner bumps its incarnation on every capacity change, so one
+	// incarnation names exactly one advert and filling it in cannot roll
+	// anything back. This heals an entry first learned from a message that
+	// carried only the incarnation (a probe envelope from an older build):
+	// without it the full advert arriving later at the same incarnation was
+	// dropped, and the peer showed zero capacity until the owner's usage
+	// next moved.
+	if ev.Incarnation == cur.Incarnation && ev.State == cur.State && carriesNewCapacity(cur, ev) {
+		applyCapacity(&cur, ev)
+		m.members[ev.ID] = cur
+		return cur, true
+	}
 	return cur, false
+}
+
+// refuteLocked handles a claim about the local node. Any non-Alive claim is
+// wrong by definition (we are evidently alive, we just received it), and so is
+// an Alive claim at a higher incarnation than ours: that is our previous
+// process's entry, still held by peers after a restart reset our counter.
+// Either way we bump past the claim so peers see our current entry, with its
+// fresh addresses and capacity, as strictly newer. Must be called with m.mu
+// held for writes.
+func (m *Membership) refuteLocked(ev Event, now time.Time) (Node, bool) {
+	cur := m.members[m.self]
+	if ev.State == StateAlive && ev.Incarnation <= cur.Incarnation {
+		return cur, false
+	}
+	if ev.Incarnation >= cur.Incarnation {
+		cur.Incarnation = ev.Incarnation + 1
+	}
+	cur.State = StateAlive
+	cur.LastChange = now
+	m.members[m.self] = cur
+	return cur, true
+}
+
+// carriesNewCapacity reports whether ev holds a capacity advert that differs
+// from what n already records.
+func carriesNewCapacity(n Node, ev Event) bool {
+	if ev.CapacityBytes <= 0 {
+		return false
+	}
+	return ev.CapacityBytes != n.CapacityBytes || ev.UsedBytes != n.UsedBytes || ev.Pressured != n.Pressured
 }
 
 // applyCapacity copies the event's advertised capacity onto a node when the

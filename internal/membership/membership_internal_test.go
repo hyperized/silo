@@ -193,10 +193,82 @@ func TestApply_SelfRefutation(t *testing.T) {
 	if n.Incarnation != 4 {
 		t.Errorf("after refutation: got incarnation %d, want 4", n.Incarnation)
 	}
-	// Repeated Alive claims about us at any incarnation should be no-ops.
-	_, ok = m.Apply(Event{ID: "self", State: StateAlive, Incarnation: 99})
-	if ok {
-		t.Error("Alive self-claim should not be reported as a change")
+	// Alive claims about us at or below our incarnation are no-ops.
+	for _, inc := range []uint64{0, 4} {
+		if _, ok = m.Apply(Event{ID: "self", State: StateAlive, Incarnation: inc}); ok {
+			t.Errorf("Alive self-claim at incarnation %d should not be reported as a change", inc)
+		}
+	}
+}
+
+// TestApply_SelfAliveAboveOursIsRefuted covers a restart: peers still hold our
+// previous process's entry at a higher incarnation than the fresh counter, and
+// would ignore every advert we send until we pass it.
+func TestApply_SelfAliveAboveOursIsRefuted(t *testing.T) {
+	m, err := New("self", "self:1", "self:2")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.SetSelfCapacity(100, 10, false)
+	n, ok := m.Apply(Event{ID: "self", State: StateAlive, Incarnation: 40, CapacityBytes: 999})
+	if !ok {
+		t.Fatal("an Alive self-claim above our incarnation should be refuted")
+	}
+	if n.Incarnation != 41 || n.State != StateAlive {
+		t.Errorf("after refutation: %+v, want alive at 41", n)
+	}
+	if n.CapacityBytes != 100 {
+		t.Errorf("refutation adopted the stale claim's capacity: %d", n.CapacityBytes)
+	}
+}
+
+func TestApply_EqualIncarnationFillsMissingCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		start, ev   Event
+		wantChanged bool
+		wantCap     int64
+		wantPress   bool
+	}{
+		{
+			name:        "advert fills a capacity-less entry",
+			start:       Event{ID: "p", State: StateAlive, Incarnation: 5},
+			ev:          Event{ID: "p", State: StateAlive, Incarnation: 5, CapacityBytes: 100, UsedBytes: 10, Pressured: true},
+			wantChanged: true, wantCap: 100, wantPress: true,
+		},
+		{
+			name:    "identical advert is a no-op",
+			start:   Event{ID: "p", State: StateAlive, Incarnation: 5, CapacityBytes: 100, UsedBytes: 10},
+			ev:      Event{ID: "p", State: StateAlive, Incarnation: 5, CapacityBytes: 100, UsedBytes: 10},
+			wantCap: 100,
+		},
+		{
+			name:    "capacity-less event keeps last known",
+			start:   Event{ID: "p", State: StateAlive, Incarnation: 5, CapacityBytes: 100, UsedBytes: 10},
+			ev:      Event{ID: "p", State: StateAlive, Incarnation: 5},
+			wantCap: 100,
+		},
+		{
+			name:    "lower-ranked state at equal incarnation is ignored",
+			start:   Event{ID: "p", State: StateSuspect, Incarnation: 5},
+			ev:      Event{ID: "p", State: StateAlive, Incarnation: 5, CapacityBytes: 100},
+			wantCap: 0,
+		},
+		{
+			name:        "pressure flip alone counts",
+			start:       Event{ID: "p", State: StateAlive, Incarnation: 5, CapacityBytes: 100, UsedBytes: 10},
+			ev:          Event{ID: "p", State: StateAlive, Incarnation: 5, CapacityBytes: 100, UsedBytes: 10, Pressured: true},
+			wantChanged: true, wantCap: 100, wantPress: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := New("self", "", "")
+			m.Apply(tc.start)
+			n, changed := m.Apply(tc.ev)
+			if changed != tc.wantChanged || n.CapacityBytes != tc.wantCap || n.Pressured != tc.wantPress {
+				t.Errorf("got changed=%v cap=%d pressured=%v, want %v/%d/%v", changed, n.CapacityBytes, n.Pressured, tc.wantChanged, tc.wantCap, tc.wantPress)
+			}
+		})
 	}
 }
 
