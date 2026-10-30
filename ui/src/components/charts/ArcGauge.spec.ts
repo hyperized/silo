@@ -36,6 +36,35 @@ describe('ArcGauge', () => {
     expect(w.findAll('[data-part="tick"]')).toHaveLength(ticks)
   })
 
+  it('keeps the tight box and centred value when there is no caption', () => {
+    const w = gauge()
+    expect(w.get('svg').attributes('viewBox')).toBe('0 0 120 108')
+    expect(w.get('text').attributes('y')).toBe('62')
+    expect(w.findAll('text')).toHaveLength(1)
+  })
+
+  it('puts the caption below the arc ends and grows the box to fit it', () => {
+    const w = gauge({ caption: '455 GiB of 2.4 TiB' })
+    const [value, caption] = w.findAll('text')
+    expect(w.get('svg').attributes('viewBox')).toBe('0 0 120 114')
+    expect(value?.attributes('y')).toBe('66')
+    // The arc's outer edge ends near y=101; a 10.5 caption with its baseline
+    // at 109 starts below that.
+    expect(Number(caption?.attributes('y'))).toBeGreaterThan(101 + 7)
+    expect(caption?.text()).toBe('455 GiB of 2.4 TiB')
+  })
+
+  it('shows a 20 character caption in full', () => {
+    expect(gauge({ caption: '1023 GiB of 1023 TiB' }).findAll('text')[1]?.text()).toBe('1023 GiB of 1023 TiB')
+  })
+
+  it('cuts a longer caption with an ellipsis but keeps it whole in the accessible name', () => {
+    const long = 'a caption far too long to fit'
+    const w = gauge({ caption: long })
+    expect(w.findAll('text')[1]?.text()).toBe('a caption far too l\u2026')
+    expect(w.get('svg').attributes('aria-label')).toBe(`Capacity 47%, ${long}`)
+  })
+
   it('draws warn and crit ticks at 80 and 90 percent by default', () => {
     const ticks = gauge().findAll('[data-part="tick"]')
     expect(ticks.map((t) => t.attributes('stroke'))).toEqual(['var(--c-warn)', 'var(--c-crit)'])

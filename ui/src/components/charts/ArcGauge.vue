@@ -40,6 +40,17 @@ const CAPTION: Readonly<Record<Level, string>> = {
 const WORD: Readonly<Record<Level, string>> = { healthy: '', attention: 'warning', degraded: 'critical' }
 const TICK = ['var(--c-warn)', 'var(--c-crit)']
 
+// The arc ends reach down to about y=101 (outer edge, round caps included), so
+// a caption between them would be drawn over the arc. It sits below them
+// instead, where the full width is free, and the viewBox grows only when there
+// is one so captionless gauges keep their tight box.
+const CAPTION_Y = 109
+const HEIGHT = 108
+const HEIGHT_WITH_CAPTION = 114
+// At font-size 10.5 a character is about 6 units wide, so 20 fill the 120-unit
+// box. formatOf tops out at "1023 GiB of 1023 TiB" (20), which always fits.
+const CAPTION_MAX = 20
+
 const track = arcDash(1, R, SWEEP)
 const level = computed<Level>(() => props.level ?? fillLevel(props.ratio))
 const fill = computed(() => (props.ratio !== null && props.ratio > 0 ? arcDash(props.ratio, R, SWEEP) : null))
@@ -52,6 +63,11 @@ const tickMarks = computed(() =>
     .filter(({ t }) => props.ratio === null || t > props.ratio),
 )
 
+const viewBox = computed(() => `0 0 120 ${String(props.caption ? HEIGHT_WITH_CAPTION : HEIGHT)}`)
+const shownCaption = computed(() =>
+  props.caption.length > CAPTION_MAX ? `${props.caption.slice(0, CAPTION_MAX - 1).trimEnd()}\u2026` : props.caption,
+)
+
 const ariaLabel = computed(() => {
   if (props.ratio === null) return `${props.label} not available`
   return [`${props.label} ${props.value}`, props.caption, WORD[level.value]].filter((s) => s !== '').join(', ')
@@ -61,7 +77,7 @@ const ariaLabel = computed(() => {
 <template>
   <svg
     width="100%"
-    viewBox="0 0 120 108"
+    :viewBox="viewBox"
     role="img"
     :aria-label="ariaLabel"
     class="block"
@@ -108,7 +124,7 @@ const ariaLabel = computed(() => {
     />
     <text
       x="60"
-      y="62"
+      :y="caption ? 66 : 62"
       text-anchor="middle"
       font-size="26"
       font-weight="600"
@@ -117,10 +133,10 @@ const ariaLabel = computed(() => {
     <text
       v-if="caption"
       x="60"
-      y="80"
+      :y="CAPTION_Y"
       text-anchor="middle"
       font-size="10.5"
       :fill="CAPTION[level]"
-    >{{ caption }}</text>
+    >{{ shownCaption }}</text>
   </svg>
 </template>

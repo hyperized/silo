@@ -25,6 +25,12 @@ describe('NodeCard header', () => {
     expect(w.get('article').attributes('aria-labelledby')).toBe(w.get('h3').attributes('id'))
   })
 
+  it('draws the disk gauge without a caption, so it keeps the tight box', () => {
+    const svg = card({ usedBytes: 30 * GIB, capacityBytes: 100 * GIB }).get('svg[role="img"]')
+    expect(svg.attributes('viewBox')).toBe('0 0 120 108')
+    expect(svg.findAll('text')).toHaveLength(1)
+  })
+
   it('tags the responding node only', () => {
     expect(card({}, { self: true }).text()).toContain('this node')
     expect(card({}, { self: false }).text()).not.toContain('this node')
