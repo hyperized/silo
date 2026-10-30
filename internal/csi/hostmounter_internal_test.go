@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -28,7 +29,7 @@ func TestHostMounter_FilesystemFormatsAndMounts(t *testing.T) {
 	if got := rec.lastFor("mkfs.ext4"); !equalStrings(got, []string{"mkfs.ext4", "/dev/nbd0"}) {
 		t.Errorf("mkfs command = %v", got)
 	}
-	if got := rec.lastFor("mount"); !equalStrings(got, []string{"mount", "-t", "ext4", "-o", "noatime", "/dev/nbd0", target}) {
+	if got := rec.lastFor("mount"); !equalStrings(got, []string{"mount", "-t", "ext4", "-o", "noatime,discard", "/dev/nbd0", target}) {
 		t.Errorf("mount command = %v", got)
 	}
 	if _, err := os.Stat(target); err != nil {
@@ -206,5 +207,49 @@ func TestHostMounter_Unmount(t *testing.T) {
 	probeErr := func(string) (bool, error) { return false, errors.New("boom") }
 	if err := NewHostMounter(withMountRunner(uf.run), withMountCheck(probeErr)).Unmount(ctx, "/t"); err == nil {
 		t.Error("isMounted error should surface on unmount")
+	}
+}
+
+func TestMountOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fsType   string
+		flags    []string
+		readOnly bool
+		want     []string
+	}{
+		{name: "ext4 gets discard", fsType: "ext4", want: []string{"discard"}},
+		{name: "xfs gets discard after the caller's flags", fsType: "xfs", flags: []string{"noatime"}, want: []string{"noatime", "discard"}},
+		{name: "nodiscard turns it off", fsType: "ext4", flags: []string{"nodiscard"}, want: []string{"nodiscard"}},
+		{name: "nodiscard inside a joined option", fsType: "xfs", flags: []string{"noatime, nodiscard"}, want: []string{"noatime, nodiscard"}},
+		{name: "explicit discard is not doubled", fsType: "ext4", flags: []string{"discard"}, want: []string{"discard"}},
+		{name: "discard with a value is the caller's choice", fsType: "ext4", flags: []string{"discard=async"}, want: []string{"discard=async"}},
+		{name: "read-only mounts get none", fsType: "ext4", readOnly: true, want: []string{"ro"}},
+		{name: "other filesystems are left alone", fsType: "btrfs", flags: []string{"noatime"}, want: []string{"noatime"}},
+		{name: "nothing to add", fsType: "vfat", want: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mountOptions(tc.fsType, tc.flags, tc.readOnly); !equalStrings(got, tc.want) {
+				t.Errorf("mountOptions = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A raw block volume is bind-mounted; discard is a filesystem option and must
+// not reach it.
+func TestHostMounter_BlockGetsNoDiscard(t *testing.T) {
+	rec := newRecorder()
+	m := NewHostMounter(withMountRunner(rec.run), withMountCheck(notMounted))
+	target := filepath.Join(t.TempDir(), "dev")
+	if err := m.Mount(context.Background(), "/dev/nbd0", target, "ext4", nil, true, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	for _, call := range rec.calls {
+		for _, arg := range call {
+			if strings.Contains(arg, "discard") {
+				t.Errorf("block mount passed %v", call)
+			}
+		}
 	}
 }

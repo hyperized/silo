@@ -13,6 +13,10 @@ provisioner: {{ include "silo-csi.driverName" . }}
 reclaimPolicy: {{ .Values.storageClass.reclaimPolicy }}
 volumeBindingMode: {{ .Values.storageClass.volumeBindingMode }}
 allowVolumeExpansion: {{ .Values.storageClass.allowVolumeExpansion }}
+{{- with .Values.storageClass.mountOptions }}
+mountOptions:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
 parameters:
   # chunk-size is the volume's copy-on-write extent; silo-csi honours it today,
   # passing it through to the namespace as the volume's extent size.

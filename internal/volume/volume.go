@@ -10,6 +10,7 @@ package volume
 import (
 	"context"
 	"fmt"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,11 @@ var newWriterID = writer.NewWriterID
 // namespace side. Implementations whose persist step is cheap may forward
 // WriteExtents to WriteExtent in a loop; the production namespace coalesces.
 // indexes and chunkIDs are positionally paired.
+//
+// An empty chunk id unmaps its extent. Trim records unmaps through WriteExtents
+// rather than a separate call so they take the write path's lease fence, HLC
+// stamp and replication unchanged; Extent must then report such an extent as
+// unmapped.
 type Metadata interface {
 	ExtentSize(path string) (int64, error)
 	Extent(path string, index uint64) (chunkID string, mapped bool, err error)
@@ -259,6 +265,80 @@ func (v *Volume) WriteAt(p []byte, off int64) (int, error) {
 	return written, firstErr
 }
 
+// maxTrimBatch bounds how many extents one metadata call unmaps. A trim
+// carries no payload, so one request can span gigabytes: 4 GiB at the default
+// 64 KiB extent is 65536 extents, and a delta that size is past gRPC's default
+// 4 MiB message cap on its way to the replicas. A var so tests can lower it.
+var maxTrimBatch = 4096
+
+// Trim unmaps every extent that [off, off+length) fully covers, so the extents
+// read as zeros and their chunks become unreferenced and reclaimable by the
+// chunk GC. An extent the range only partly covers is left as it is; the NBD
+// spec lets a server discard less than it was asked to, and zeroing part of an
+// extent would cost a read-modify-write for space that is not freed anyway.
+// Extents already unmapped are skipped, so trimming free space twice writes
+// nothing. Like WriteAt it is fenced: when holder has lost the lease it fails
+// with ErrLeaseHeld (from the Metadata implementation) and unmaps nothing more.
+//
+// A large range is unmapped in batches of maxTrimBatch. A failure part way
+// leaves the earlier batches unmapped, which is allowed: a trim promises
+// nothing about the contents of the range until it succeeds.
+//
+// Trim holds writeMu for its whole run, so it cannot interleave with a WriteAt
+// to the same extents: one of the two lands entirely after the other, and the
+// later one's HLC stamp wins on every replica. Reads are not held off. A read
+// racing a trim of the same range may see the old bytes or zeros, which the
+// block layer allows for overlapping in-flight requests. The chunk a trim
+// unbinds may be collected while such a read is in flight, the same exposure an
+// overwrite already has, and it only affects a read the kernel must not depend
+// on.
+func (v *Volume) Trim(off, length int64) error {
+	if off < 0 || length < 0 || off > math.MaxInt64-length {
+		return fmt.Errorf("volume: trim range [%d, +%d) is not valid", off, length)
+	}
+	// Round the start up and the end down to extent boundaries.
+	first := uint64((off + v.extentSize - 1) / v.extentSize) // #nosec G115 -- off is non-negative
+	end := uint64((off + length) / v.extentSize)             // #nosec G115 -- checked against overflow above
+	if end <= first {
+		return nil
+	}
+
+	v.writeMu.Lock()
+	defer v.writeMu.Unlock()
+	batch := make([]uint64, 0, min(uint64(maxTrimBatch), end-first)) // #nosec G115 -- maxTrimBatch is positive
+	for idx := first; idx < end; idx++ {
+		_, mapped, err := v.meta.Extent(v.path, idx)
+		if err != nil {
+			return err
+		}
+		if !mapped {
+			continue
+		}
+		batch = append(batch, idx)
+		if len(batch) == maxTrimBatch {
+			if err := v.unmap(batch); err != nil {
+				return err
+			}
+			batch = batch[:0]
+		}
+	}
+	return v.unmap(batch)
+}
+
+// unmap records the extents in indexes as unmapped. The metadata layer copies
+// the slices before returning, so the caller may reuse indexes.
+func (v *Volume) unmap(indexes []uint64) error {
+	if len(indexes) == 0 {
+		return nil
+	}
+	// The session context ends when the client disconnects; stop between
+	// batches rather than run a multi-gigabyte trim for nobody.
+	if err := v.ctx.Err(); err != nil {
+		return err
+	}
+	return v.meta.WriteExtents(v.path, indexes, make([]string, len(indexes)), v.holder)
+}
+
 // locate maps an absolute byte offset to its extent index and the offset
 // within that extent. pos is non-negative — ReadAt and WriteAt reject negative
 // offsets before calling.
@@ -273,7 +353,10 @@ func (v *Volume) extentBytes(idx uint64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !mapped {
+	// An empty id is a trimmed extent. Implementations already report it as
+	// unmapped; checking here too keeps a read from asking the chunk store for
+	// chunk "" if one ever does not.
+	if !mapped || id == "" {
 		return make([]byte, v.extentSize), nil
 	}
 	data, err := v.chunks.GetChunk(v.ctx, id)

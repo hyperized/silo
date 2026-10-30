@@ -461,9 +461,28 @@ func volumeInfo(path string, in *Inode) VolumeInfo {
 		LeaseHolder: in.lease.Value,
 	}
 	if in.extents != nil {
-		vi.InlineExtents = in.extents.Len()
+		vi.InlineExtents = mappedExtents(in.extents)
 	}
 	return vi
+}
+
+// unmappedChunk is the chunk id a trim records for an extent it unmaps. It has
+// to be a real entry with a fresh HLC rather than a deleted key, or a peer still
+// holding the old binding would merge it back. extentmap.Unmapped is the same
+// value for the out-of-band maps.
+const unmappedChunk = ""
+
+// mappedExtents counts the extents of m backed by a chunk, leaving out those a
+// trim recorded as unmapped. It walks the map, which is fine for the inline
+// maps of the legacy mode; the out-of-band store keeps a running count.
+func mappedExtents(m *crdt.LWWMap[uint64, string]) int {
+	n := 0
+	for _, e := range m.Entries() {
+		if e.Value != unmappedChunk {
+			n++
+		}
+	}
+	return n
 }
 
 // AppendChunk records that chunkID belongs to the file at path, tagged with
@@ -635,7 +654,8 @@ func (n *Namespace) SnapshotVolume(srcPath, dstPath string) (string, error) {
 // ErrLeaseHeld: a stale writer that has been stolen from cannot change what
 // backs any extent, so it cannot corrupt the volume (its already-stored chunk
 // bytes are simply left unreferenced). The caller stores chunkID first; this
-// records where it lives in the volume's address space.
+// records where it lives in the volume's address space. An empty chunkID unmaps
+// the extent: it reads as zeros afterwards and its old chunk is left for GC.
 func (n *Namespace) WriteExtent(path string, index uint64, chunkID, holder string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -659,8 +679,9 @@ func (n *Namespace) WriteExtent(path string, index uint64, chunkID, holder strin
 // CRDT merge logic compares timestamps per extent index so concurrent peers
 // converge identically whether they see the updates as one batch or many.
 //
-// indexes and chunkIDs are positionally paired; their lengths must match.
-// An empty batch is a successful no-op (no persist).
+// indexes and chunkIDs are positionally paired; their lengths must match, and
+// an empty chunk id unmaps its extent as in WriteExtent. An empty batch is a
+// successful no-op (no persist).
 func (n *Namespace) WriteExtents(path string, indexes []uint64, chunkIDs []string, holder string) error {
 	if len(indexes) != len(chunkIDs) {
 		return fmt.Errorf("namespace: WriteExtents needs paired slices, got %d indexes and %d chunk ids", len(indexes), len(chunkIDs))
@@ -697,11 +718,15 @@ func (n *Namespace) Extent(path string, index uint64) (string, bool, error) {
 		return "", false, err
 	}
 	id, ok := vol.extents.Get(index)
+	if id == unmappedChunk {
+		return "", false, nil
+	}
 	return id, ok, nil
 }
 
 // Extents returns the volume's current extent-to-chunk bindings as a map from
-// extent index to chunk id. Unmapped extents are absent (they read as zeros).
+// extent index to chunk id. Unmapped extents are absent (they read as zeros),
+// whether never written or unmapped by a trim.
 func (n *Namespace) Extents(path string) (map[uint64]string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -711,7 +736,9 @@ func (n *Namespace) Extents(path string) (map[uint64]string, error) {
 	}
 	out := make(map[uint64]string, vol.extents.Len())
 	for _, e := range vol.extents.Entries() {
-		out[e.Key] = e.Value
+		if e.Value != unmappedChunk {
+			out[e.Key] = e.Value
+		}
 	}
 	return out, nil
 }
@@ -802,7 +829,9 @@ func (n *Namespace) LiveChunkRefs() (chunks map[string]struct{}, volumes map[str
 			volumes[in.ID] = struct{}{}
 			if in.extents != nil {
 				for _, e := range in.extents.Entries() {
-					chunks[e.Value] = struct{}{}
+					if e.Value != unmappedChunk {
+						chunks[e.Value] = struct{}{}
+					}
 				}
 			}
 		}

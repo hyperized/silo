@@ -130,6 +130,7 @@ var (
 	// when SILO_NBD_ADDR is set, since NBD is unauthenticated block I/O.
 	newNBDSubsystem = func(cfg *config.Config, ns nsVolumes, coord transport.Coordinator, extCoord extentCoord, clock *hlc.Clock, logger *slog.Logger) subsystem {
 		backend := newVolumeBackend(ns, coord, cfg.NodeID, logger, extCoord, clock, cfg.ExtentReplication)
+		backend.noTrim = !cfg.NBDTrim
 		return newNBDSub(cfg.NBDAddr, nbd.NewServer(backend, logger), logger)
 	}
 	newBootstrapSubsystem = func(cfg *config.Config, tlsCfg *tls.Config, tokens transport.TokenRedeemer, minter transport.ClientCertMinter, logger *slog.Logger) subsystem {

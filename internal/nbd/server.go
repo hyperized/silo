@@ -79,6 +79,16 @@ type Device interface {
 	Size() int64
 }
 
+// Trimmer is the optional capability a Device implements to act on NBD_CMD_TRIM.
+// Trim releases the storage behind [off, off+length), after which the range
+// reads as zeros; it may release less than asked, which the NBD spec allows.
+// The server only calls it with a range inside the device. A Device without it
+// still advertises trim, and the server acknowledges each one without doing
+// anything, since discarding is advisory.
+type Trimmer interface {
+	Trim(off, length int64) error
+}
+
 // Backend resolves an export name to a Device. release is called once the
 // client disconnects (e.g. to drop the volume's lease); it may be nil.
 type Backend interface {
@@ -501,8 +511,9 @@ func (cs *connState) readLoop() error {
 			cs.inflight.Wait()
 			cs.reply(0, handle, nil)
 		case cmdTrim:
-			// silo volumes are sparse already; treat discard as a successful no-op.
-			cs.schedule(func() { cs.reply(0, handle, nil) })
+			// Trims go through the worker pool like writes, so the flush above
+			// waits for them too and its ack covers every earlier discard.
+			cs.schedule(func() { cs.serveTrim(handle, offset, length) })
 		case cmdRead:
 			cs.schedule(func() { cs.serveRead(handle, offset, length) })
 		case cmdWrite:
@@ -565,6 +576,29 @@ func (cs *connState) serveWrite(handle, offset uint64, length uint32, payload []
 	}
 	if _, err := cs.dev.WriteAt(payload, int64(offset)); err != nil { // #nosec G115 -- offset bounds-checked
 		cs.logger.Warn("nbd write failed", "offset", offset, "length", length, "error", err)
+		cs.reply(errIO, handle, nil)
+		return
+	}
+	cs.reply(0, handle, nil)
+}
+
+// serveTrim handles NBD_CMD_TRIM. The request carries no payload, so its length
+// is not held to maxRequestBytes; the device size is the only bound, and the
+// u32 length field already caps one request at 4 GiB. Unlike a write, a trim
+// allocates no buffer per byte, so it does not take a slot in the volume's
+// write budget either.
+func (cs *connState) serveTrim(handle, offset uint64, length uint32) {
+	if outOfBounds(cs.dev, offset, length) {
+		cs.reply(errInval, handle, nil)
+		return
+	}
+	t, ok := cs.dev.(Trimmer)
+	if !ok {
+		cs.reply(0, handle, nil)
+		return
+	}
+	if err := t.Trim(int64(offset), int64(length)); err != nil { // #nosec G115 -- offset bounds-checked against the device size
+		cs.logger.Warn("nbd trim failed", "offset", offset, "length", length, "error", err)
 		cs.reply(errIO, handle, nil)
 		return
 	}

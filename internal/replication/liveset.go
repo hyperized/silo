@@ -1,5 +1,7 @@
 package replication
 
+import "github.com/hyperized/silo/internal/extentmap"
+
 // liveSet builds the cluster's live (keep) chunk set from the two reference
 // kinds and reports how many live volumes' extent maps this node could not see.
 //
@@ -29,7 +31,11 @@ func liveSet(ns NamespaceRefSource, ext ExtentRefSource) (keep map[string]struct
 	for _, v := range ext.Volumes() {
 		held[v] = struct{}{}
 		for _, e := range ext.Snapshot(v) {
-			keep[e.Value] = struct{}{}
+			// An unmapped extent references no chunk. Its old chunk drops out of
+			// the keep set here, which is how a trim hands it to the GC.
+			if e.Value != extentmap.Unmapped {
+				keep[e.Value] = struct{}{}
+			}
 		}
 	}
 	for v := range liveVols {

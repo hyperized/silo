@@ -214,3 +214,31 @@ func TestNBDSub_ShutdownBeforeStartIsNoop(t *testing.T) {
 		t.Errorf("Start after Shutdown = %v, want nil no-op", err)
 	}
 }
+
+// SILO_NBD_TRIM=false must hide Trim from the NBD server; the default keeps it.
+func TestVolumeBackend_TrimSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		noTrim bool
+		want   bool
+	}{
+		{name: "trim on by default", want: true},
+		{name: "trim turned off", noTrim: true, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newVolumeBackend(&fakeNS{size: 2048}, &fakeCoord{}, "node-a", discardLogger(), nil, nil, false)
+			b.noTrim = tc.noTrim
+			dev, release, err := b.Open(context.Background(), "/vol")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer release()
+			if _, ok := dev.(nbd.Trimmer); ok != tc.want {
+				t.Errorf("device is a Trimmer = %v, want %v", ok, tc.want)
+			}
+			if dev.Size() != 2048 {
+				t.Errorf("Size = %d, want 2048", dev.Size())
+			}
+		})
+	}
+}

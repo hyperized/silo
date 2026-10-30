@@ -41,17 +41,19 @@ replicas.
 
 ```mermaid
 flowchart LR
-    e0["extent 0"] --> k0["0 → rk1-2-0b8c…-0-17"] --> c0["chunk rk1-2-0b8c…-0-17"]
-    e1["extent 1"] --> k1["1 → rk1-2-0b8c…-0-04"] --> c1["chunk rk1-2-0b8c…-0-04"]
+    e0["extent 0"] --> k0["0 → node-a-0b8c…-0-17"] --> c0["chunk node-a-0b8c…-0-17"]
+    e1["extent 1"] --> k1["1 → node-a-0b8c…-0-04"] --> c1["chunk node-a-0b8c…-0-04"]
     e2["extent 2"] --> k2["no entry"] --> z["reads as zeroes"]
-    e3["extent 3"] --> k3["3 → rk1-3-9c14…-0-88"] --> c3["chunk rk1-3-9c14…-0-88"]
+    e3["extent 3"] --> k3["3 → node-b-9c14…-0-88"] --> c3["chunk node-b-9c14…-0-88"]
+    e4["extent 4"] --> k4["4 → unmapped"] --> z
 ```
 
 Four consequences follow from that shape, and most of silo's behaviour is one of
 them:
 
 **Volumes are sparse.** Extent 2 has no entry, so it was never written and reads
-as zeroes. A 10 GiB volume with 40 MiB written costs 40 MiB.
+as zeroes. Extent 4 was written once and later trimmed, and reads as zeroes too.
+A 10 GiB volume with 40 MiB written costs 40 MiB.
 
 **Snapshots are free.** A snapshot copies the map, not the data. Both maps point
 at the same immutable chunks, and neither can disturb the other.
@@ -61,6 +63,21 @@ it, and rebinds the map entry. The chunk it replaced is still on disk, now
 referenced by nothing. Reclaiming those is the chunk garbage collector's job, and
 it is the reason silo has one at all. See
 [operations.md](operations.md#configuration) for `SILO_CHUNK_GC_ENABLE`.
+
+**Freed space comes back through trim.** When a filesystem frees blocks it sends
+a discard to the device, and the NBD server hands it to the volume. Each extent
+the discard covers completely gets an entry with an empty chunk id, like
+extent 4 above. That entry goes through the same path as a write: the lease
+fences it, it carries an HLC timestamp, and it is replicated to the volume's
+replica set. So it beats every older binding of that extent on every replica,
+including one that arrives late. From then on the extent reads as zeroes and the
+chunk it used to name is referenced by nothing, which the chunk GC reclaims
+once the chunk is older than its grace period. The entry is kept rather than
+deleted because a missing key carries no timestamp, and a replica still holding
+the old binding would merge it straight back. An extent the discard only partly
+covers keeps its chunk: zeroing part of it would mean writing a new chunk, and
+that frees nothing. A later write to a trimmed extent binds it again in the
+usual way.
 
 **Replicas of a map must agree before anything is reclaimed.** The extent write
 path acknowledges once a majority of a volume's replicas have the delta, so the
@@ -139,6 +156,7 @@ synchronous writes, much less on bulk sequential I/O. See
 | Kubernetes CSI driver: provision, attach, mount, snapshot, clone; Helm chart | ✅ |
 | Restart-resilient attachments: volumes pause and reconnect across silod rollouts | ✅ |
 | Chunk garbage collection: mark-and-sweep reclamation of copy-on-write orphans | ✅ |
+| Discard (TRIM): extents a filesystem frees are unmapped and their chunks reclaimed | ✅ |
 | FUSE (RWX) filesystem surface: from-scratch protocol library, close-to-open | ✅ |
 | Observability: Prometheus metrics, Grafana dashboard, `siloctl` status/drain/rebalance | ✅ |
 | Security: cloud KMS keys (AWS/GCP/Azure), cert auto-rotation, CRL revocation, scoped tokens | ✅ |

@@ -323,6 +323,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		"SILO_TLS_CRL":               "/etc/silo/revoked.crl",
 		"SILO_REQUIRE_TOKENS":        "1",
 		"SILO_EXTENT_REPLICATION":    "false",
+		"SILO_NBD_TRIM":              "false",
 		"SILO_EXTENT_REAP_AFTER":     "30m",
 		"SILO_EXTENT_REAP_INTERVAL":  "2m",
 		"SILO_EXTENT_SCRUB_INTERVAL": "90s",
@@ -371,6 +372,7 @@ func TestLoad_OverridesFromEnv(t *testing.T) {
 		RequireTokens:       true,
 		DiskSteering:        true,
 		ExtentReplication:   false, // overridden from its default of true
+		NBDTrim:             false, // overridden from its default of true
 		ExtentReapAfter:     30 * time.Minute,
 		ExtentReapInterval:  2 * time.Minute,
 		ExtentScrubInterval: 90 * time.Second,
@@ -630,7 +632,7 @@ func TestEnvBool(t *testing.T) {
 
 func TestLoad_RejectsUnrecognisedBooleans(t *testing.T) {
 	for _, key := range []string{
-		"SILO_UI_ENABLED", "SILO_EXTENT_REPLICATION", "SILO_CHUNK_GC_ENABLE", "SILO_DISK_PRESSURE_STEERING",
+		"SILO_UI_ENABLED", "SILO_EXTENT_REPLICATION", "SILO_NBD_TRIM", "SILO_CHUNK_GC_ENABLE", "SILO_DISK_PRESSURE_STEERING",
 		"SILO_REQUIRE_TOKENS", "SILO_TLS_CA_SEED", "SILO_PRINT_BOOTSTRAP_TOKEN", "SILO_PPROF",
 	} {
 		t.Run(key, func(t *testing.T) {
@@ -960,6 +962,31 @@ func TestLoad_BackupRetainFor(t *testing.T) {
 			}
 			if cfg.BackupRetainFor != tc.want {
 				t.Errorf("BackupRetainFor = %v, want %v", cfg.BackupRetainFor, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoad_NBDTrim(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		val  string
+		want bool
+	}{
+		{name: "on by default", want: true},
+		{name: "can be turned off", val: "false", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := map[string]string{"SILO_NODE_ID": "n1", "SILO_ENCRYPTION_KEY": validBase64Key(t)}
+			if tc.val != "" {
+				env["SILO_NBD_TRIM"] = tc.val
+			}
+			cfg, err := Load(envMap(env))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.NBDTrim != tc.want {
+				t.Errorf("NBDTrim = %v, want %v", cfg.NBDTrim, tc.want)
 			}
 		})
 	}

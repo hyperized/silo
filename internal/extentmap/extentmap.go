@@ -63,7 +63,7 @@ type Store struct {
 	compactRecords int
 
 	mu   sync.Mutex
-	maps map[string]*crdt.LWWMap[uint64, string]
+	maps map[string]*volMap
 	// logs tracks the on-disk state of each volume whose snapshot exists.
 	logs map[string]*logState
 	// recBuf is reused to encode log records; s.mu guards it.
@@ -83,7 +83,7 @@ func New(logger *slog.Logger) *Store {
 		logger:         logger,
 		compactBytes:   defaultCompactBytes,
 		compactRecords: defaultCompactRecords,
-		maps:           map[string]*crdt.LWWMap[uint64, string]{},
+		maps:           map[string]*volMap{},
 		logs:           map[string]*logState{},
 		lost:           map[string]struct{}{},
 	}
@@ -130,19 +130,20 @@ type wireMap struct {
 
 // Set binds the extent at index of volume to chunkID as of ts, creating the
 // volume's map if absent. The LWW timestamp means a replayed or out-of-order
-// delta never moves an extent backward. A non-nil error means the binding is in
-// memory but not on disk; see SetBatch.
+// delta never moves an extent backward. A chunkID of Unmapped records the
+// extent as unmapped. A non-nil error means the binding is in memory but not on
+// disk; see SetBatch.
 func (s *Store) Set(volumeID string, index uint64, chunkID string, ts hlc.Timestamp) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.getOrCreateLocked(volumeID).Set(index, chunkID, ts)
+	s.getOrCreateLocked(volumeID).set(index, chunkID, ts)
 	return s.persistLocked(volumeID, []crdt.MapEntry[uint64, string]{{Key: index, Value: chunkID, TS: ts}})
 }
 
 // SetBatch binds many extents of volume in one acquisition + one fsynced log
-// append. All
-// updates share ts. indexes and chunkIDs are positionally paired; their lengths
-// must match. An empty batch is a successful no-op (no persist).
+// append. All updates share ts. indexes and chunkIDs are positionally paired;
+// their lengths must match, and an Unmapped id unmaps its extent. An empty
+// batch is a successful no-op (no persist).
 //
 // When the map cannot be saved to disk the bindings still apply in memory and
 // the persist error is returned, so the caller does not count this node's copy
@@ -159,14 +160,15 @@ func (s *Store) SetBatch(volumeID string, indexes []uint64, chunkIDs []string, t
 	m := s.getOrCreateLocked(volumeID)
 	delta := make([]crdt.MapEntry[uint64, string], len(indexes))
 	for i, idx := range indexes {
-		m.Set(idx, chunkIDs[i], ts)
+		m.set(idx, chunkIDs[i], ts)
 		delta[i] = crdt.MapEntry[uint64, string]{Key: idx, Value: chunkIDs[i], TS: ts}
 	}
 	return s.persistLocked(volumeID, delta)
 }
 
 // Get returns the chunk id backing the extent at index of volume and whether it
-// is mapped. An unknown volume or unmapped extent returns ("", false).
+// is mapped. An unknown volume, an extent never written and an extent recorded
+// as Unmapped all return ("", false).
 func (s *Store) Get(volumeID string, index uint64) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -174,7 +176,7 @@ func (s *Store) Get(volumeID string, index uint64) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return m.Get(index)
+	return m.get(index)
 }
 
 // Has reports whether this node holds a map for volume (even an empty one). A
@@ -186,12 +188,14 @@ func (s *Store) Has(volumeID string) bool {
 	return ok
 }
 
-// Len returns the number of mapped extents for volume, or 0 if unknown.
+// Len returns the number of mapped extents for volume, or 0 if unknown. An
+// extent recorded as Unmapped is not counted, so a trimmed volume's count goes
+// down even though its map keeps an entry for the extent.
 func (s *Store) Len(volumeID string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if m, ok := s.maps[volumeID]; ok {
-		return m.Len()
+		return m.mapped
 	}
 	return 0
 }
@@ -222,7 +226,7 @@ func (s *Store) Digest(volumeID string) []byte {
 	}
 	var acc uint64
 	var buf [8]byte
-	for _, e := range m.Entries() {
+	for _, e := range m.lww.Entries() {
 		h := fnv.New64a()
 		binary.BigEndian.PutUint64(buf[:], e.Key)
 		_, _ = h.Write(buf[:])
@@ -243,7 +247,9 @@ func (s *Store) Digest(volumeID string) []byte {
 
 // Snapshot returns volume's extent bindings, sorted by index for a stable wire
 // form, or nil if the volume is unknown. It is the payload the serve/repair
-// path ships to a peer that needs the whole map.
+// path ships to a peer that needs the whole map, so it includes entries whose
+// chunk id is Unmapped: a peer must receive those to stop serving the binding
+// they replaced. Callers after live chunk references must skip them.
 func (s *Store) Snapshot(volumeID string) []crdt.MapEntry[uint64, string] {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -251,7 +257,7 @@ func (s *Store) Snapshot(volumeID string) []crdt.MapEntry[uint64, string] {
 	if !ok {
 		return nil
 	}
-	entries := m.Entries()
+	entries := m.lww.Entries()
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Key < entries[j].Key })
 	return entries
 }
@@ -264,7 +270,7 @@ func (s *Store) Merge(volumeID string, entries []crdt.MapEntry[uint64, string]) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.getOrCreateLocked(volumeID)
-	m.Import(entries)
+	m.importEntries(entries)
 	// The log takes entries as given, including any that lost to a newer local
 	// binding. Replay applies them with the same LWW rule, so they lose there
 	// too, and filtering them here would need the timestamps LWWMap keeps to
@@ -471,10 +477,10 @@ func (s *Store) Volumes() []string {
 }
 
 // getOrCreateLocked returns volume's map, creating an empty one if absent.
-func (s *Store) getOrCreateLocked(volumeID string) *crdt.LWWMap[uint64, string] {
+func (s *Store) getOrCreateLocked(volumeID string) *volMap {
 	m, ok := s.maps[volumeID]
 	if !ok {
-		m = crdt.NewLWWMap[uint64, string]()
+		m = newVolMap()
 		s.maps[volumeID] = m
 	}
 	return m
@@ -588,8 +594,8 @@ func (s *Store) loadFileLocked(name string) {
 		s.quarantineLocked(name, err)
 		return
 	}
-	m := crdt.NewLWWMap[uint64, string]()
-	m.Import(wm.Entries)
+	m := newVolMap()
+	m.importEntries(wm.Entries)
 	s.maps[wm.VolumeID] = m
 	// A snapshot under some other name (copied in by hand) is not where the log
 	// expects it. Leaving the volume untracked makes the first save write one
