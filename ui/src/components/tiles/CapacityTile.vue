@@ -35,7 +35,7 @@ const full = computed(() => {
     <div class="mx-auto w-full max-w-[150px]">
       <Skeleton
         v-if="capacity === undefined"
-        class="aspect-[120/108] w-full rounded-full"
+        class="aspect-[120/114] w-full rounded-full"
       />
       <ArcGauge
         v-else

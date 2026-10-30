@@ -22,7 +22,7 @@ const footer = (w: ReturnType<typeof tile>) => w.findAll('.mt-auto span').map((s
 describe('CapacityTile', () => {
   it('shows a skeleton and no gauge while loading', () => {
     const w = tile({ capacity: undefined })
-    expect(w.findComponent(Skeleton).exists()).toBe(true)
+    expect(w.findComponent(Skeleton).classes()).toContain('aspect-[120/114]')
     expect(w.find('svg').exists()).toBe(false)
     expect(footer(w)).toEqual(['', ''])
   })
@@ -38,6 +38,11 @@ describe('CapacityTile', () => {
     const label = tile().get('svg').attributes('aria-label')
     expect(label).toContain('30%')
     expect(label).toContain('30 of 100 GiB')
+  })
+
+  it('reserves the same box for the skeleton as the captioned gauge draws', () => {
+    const [, , w, h] = (tile().get('svg').attributes('viewBox') ?? '').split(' ')
+    expect(tile({ capacity: undefined }).findComponent(Skeleton).classes()).toContain(`aspect-[${String(w)}/${String(h)}]`)
   })
 
   it('shows growth only when the rate is known', () => {
