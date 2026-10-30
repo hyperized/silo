@@ -220,6 +220,14 @@ type Config struct {
 	// the legacy namespace-served path (single-node correct, multi-node broken).
 	ExtentReplication bool
 
+	// NBDTrim acts on discards from NBD clients by unmapping the extents they
+	// cover, so a filesystem's freed blocks become reclaimable. SILO_NBD_TRIM,
+	// default true. Turning it off makes every discard a no-op again, which is
+	// what a rolling upgrade from a release without trim wants until every node
+	// runs this one: an older node serving a volume trimmed elsewhere would try
+	// to read the unmapped extents as chunks and fail.
+	NBDTrim bool
+
 	// ExtentReapAfter is how long a volume's extent map must sit untouched after
 	// the volume leaves the namespace before the reaper reclaims its orphaned
 	// replicas — the age guard that keeps a freshly-created volume whose
@@ -677,6 +685,7 @@ func loadBools(env EnvFunc, cfg *Config) error {
 	}{
 		{"SILO_UI_ENABLED", &cfg.UIEnabled, true},
 		{"SILO_EXTENT_REPLICATION", &cfg.ExtentReplication, true},
+		{"SILO_NBD_TRIM", &cfg.NBDTrim, true},
 		{"SILO_CHUNK_GC_ENABLE", &cfg.ChunkGCEnable, true},
 		{"SILO_DISK_PRESSURE_STEERING", &cfg.DiskSteering, true},
 		{"SILO_REQUIRE_TOKENS", &cfg.RequireTokens, false},

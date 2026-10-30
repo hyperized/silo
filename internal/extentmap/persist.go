@@ -168,7 +168,7 @@ func writeLogRecord(path string, rec []byte, syncParent bool) error {
 // everything, so the change is durable, and the next save tries again.
 func (s *Store) compactLocked(volumeID string) error {
 	m := s.maps[volumeID]
-	b, err := marshal(wireMap{VolumeID: volumeID, Entries: m.Entries()})
+	b, err := marshal(wireMap{VolumeID: volumeID, Entries: m.lww.Entries()})
 	if err == nil {
 		err = atomicfile.Write(s.filename(volumeID), b, 0o600)
 	}
@@ -265,7 +265,7 @@ func (s *Store) replayLogLocked(name string) {
 		s.logs[volumeID].created = true
 		return
 	}
-	records, torn, err := replayLog(raw, m.Import)
+	records, torn, err := replayLog(raw, m.importEntries)
 	if err != nil {
 		s.quarantineLogLocked(volumeID, path, err)
 		return

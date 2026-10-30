@@ -53,6 +53,7 @@ naming the variable, so a typo cannot quietly leave a feature on.
 | `SILO_TOMBSTONE_RETENTION` | `24h` | How long namespace tombstones are kept before GC |
 | `SILO_MAX_CLOCK_SKEW` | `500ms` | Warn + count an alert when a peer's HLC exceeds this skew |
 | `SILO_EXTENT_REPLICATION` | `true` | Serve each volume's extent map from its replica set (out of band, like chunks) instead of the gossiped namespace. Required for a volume to attach on any node, not just where it was created. Leave on. |
+| `SILO_NBD_TRIM` | `true` | Act on discards from NBD clients: every extent a discard fully covers is unmapped, reads as zeroes, and its chunk becomes garbage for the chunk GC. Set it `false` to acknowledge discards without doing anything, which is what silo did before trim support. See [Rolling upgrades](#rolling-upgrades) for when that matters. |
 | `SILO_EXTENT_REAP_AFTER` | `1h` | How long a deleted volume's extent map must sit untouched before the reaper reclaims orphaned replicas. This is the age guard that stops a freshly-created volume whose directory entry has not yet gossiped to a node from being mistaken for a deleted one. Keep it well above gossip convergence time. |
 | `SILO_EXTENT_REAP_INTERVAL` | `15m` | Extent-map reaper sweep cadence (the GC backstop for the synchronous delete path). |
 | `SILO_EXTENT_SCRUB_INTERVAL` | `1m` | Extent-map scrubber cadence: re-replicates an idle volume's extent map to its full replica set after a node loss (the metadata analog of `SILO_SCRUB_INTERVAL`, which heals chunks). The synchronous write-path fan-out only keeps replicas in step while writes flow; a volume written once and then left idle would otherwise stay under-replicated after a later node loss. |
@@ -829,6 +830,14 @@ zero:
 curl -s http://<node>:7080/metrics | grep -E 'silo_gossip_(protocol_version|incompatible_messages_total|newer_protocol_messages_total)'
 ```
 
+**Upgrading from a release without trim support.** An older silod reads an
+extent that a newer node unmapped as a chunk with an empty id and fails the
+read. That only bites when a volume is trimmed on an upgraded node and then
+attached through a node that is not upgraded yet, which a drain during the
+rollout can do. If that can happen, roll the new build out with
+`SILO_NBD_TRIM=false`, then set it back to `true` once every node runs it.
+Discards are dropped in the meantime, as they were before.
+
 Upgrade order: drain is **not** required for an in-place binary swap (a restart
 re-reads the data dir and rejoins), but for a node you are also moving or
 reprovisioning, drain it first as above.
@@ -928,6 +937,39 @@ make nbd-demo-vm   # boots a throwaway aarch64 Linux guest under QEMU with the
                    # Hypervisor framework; no host NBD kernel module needed.
                    # Requires `qemu` (brew install qemu) and Docker.
 ```
+
+### Reclaiming space from volumes
+
+silod acts on discards (`SILO_NBD_TRIM`, on by default). When a filesystem
+frees blocks, the extents they fill are unmapped and the chunk GC reclaims
+their chunks once they are older than `SILO_CHUNK_GC_GRACE`. The CSI node
+plugin mounts ext4 and xfs volumes with `discard`, so space goes back as files
+are deleted. To run a periodic `fstrim` instead, put `nodiscard` in the
+StorageClass `mountOptions` (`storageClass.mountOptions` in the Helm chart).
+An explicit `discard` or `nodiscard` there always wins. Raw block volumes get
+no mount options; whatever uses the device has to issue its own discards.
+
+Only whole extents are unmapped. A discard that covers part of an extent
+leaves it mapped, so a filesystem that frees scattered 4 KiB blocks inside
+256 KiB extents gets little back until whole extents are free.
+
+**Volumes mounted before trim support need a one-off trim.** They were
+mounted without `discard`, so the blocks their filesystems freed back then were
+never reported. Remounting (restarting the pod) adds `discard` for future
+frees but does not report the old ones. Run `fstrim` once against the mount:
+
+```sh
+kubectl exec <pod> -- fstrim -v <mount path>
+```
+
+`fstrim` needs `CAP_SYS_ADMIN`. If the workload pod lacks it, run it from a
+privileged pod on the same node against the volume's mount point under
+`/var/lib/kubelet/pods/<pod uid>/volumes/kubernetes.io~csi/<pv name>/mount`.
+
+The "extents written" figure in `siloctl status` and the web UI counts mapped
+extents, so it drops as soon as a trim lands. The chunk store's disk usage
+follows after the next chunk GC sweep that finds the chunks past their grace
+period.
 
 ---
 

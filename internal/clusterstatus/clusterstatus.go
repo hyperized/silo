@@ -33,8 +33,9 @@ type VolumeLister interface {
 	Volumes() []namespace.VolumeInfo
 }
 
-// ExtentCounter reports how many extents this node's out-of-band extent map
-// replica holds for a volume. *extentmap.Store satisfies it.
+// ExtentCounter reports how many mapped extents this node's out-of-band extent
+// map replica holds for a volume; extents a trim unmapped are not counted.
+// *extentmap.Store satisfies it.
 type ExtentCounter interface {
 	Has(volumeID string) bool
 	Len(volumeID string) int

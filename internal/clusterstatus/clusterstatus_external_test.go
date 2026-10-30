@@ -17,6 +17,8 @@ import (
 	"github.com/hyperized/silo/internal/backup"
 	"github.com/hyperized/silo/internal/clusterstatus"
 	"github.com/hyperized/silo/internal/diskusage"
+	"github.com/hyperized/silo/internal/extentmap"
+	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/membership"
 	"github.com/hyperized/silo/internal/namespace"
 	"github.com/hyperized/silo/internal/replication"
@@ -389,5 +391,45 @@ func TestHandler_Methods(t *testing.T) {
 				t.Errorf("error body = %q (%v), want an instruction to use GET", rec.Body.String(), err)
 			}
 		})
+	}
+}
+
+// extents_written counts mapped extents only, so trimming a volume brings the
+// number down, from either the out-of-band store or the inline map.
+func TestBuilder_ExtentsWrittenDropsAfterTrim(t *testing.T) {
+	store := extentmap.New(discard())
+	if err := store.SetBatch("inode-ext", []uint64{0, 1, 2}, []string{"c0", "c1", "c2"}, hlc.Timestamp{Wall: 10}); err != nil {
+		t.Fatalf("SetBatch: %v", err)
+	}
+	if err := store.SetBatch("inode-ext", []uint64{1, 2}, []string{extentmap.Unmapped, extentmap.Unmapped}, hlc.Timestamp{Wall: 20}); err != nil {
+		t.Fatalf("unmap: %v", err)
+	}
+
+	clk := int64(100)
+	ns := namespace.New(hlc.New("n", hlc.WithNow(func() time.Time { clk++; return time.Unix(0, clk) })))
+	if _, err := ns.CreateVolume("/inline", 4096); err != nil {
+		t.Fatalf("CreateVolume: %v", err)
+	}
+	if _, err := ns.AcquireLease("/inline", "w"); err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	if err := ns.WriteExtents("/inline", []uint64{0, 1}, []string{"c0", "c1"}, "w"); err != nil {
+		t.Fatalf("WriteExtents: %v", err)
+	}
+	if err := ns.WriteExtent("/inline", 0, "", "w"); err != nil {
+		t.Fatalf("unmap: %v", err)
+	}
+	vols := append(fakeVolumes{{Path: "/ext", Inode: "inode-ext"}}, ns.Volumes()...)
+
+	b := clusterstatus.New(fakeMembers{}, fakeChunks{}, "/d", "n", "v", discard(),
+		clusterstatus.WithDiskUsage(func(string) (diskusage.Usage, error) { return diskusage.Usage{}, nil }),
+		clusterstatus.WithVolumes(vols),
+		clusterstatus.WithExtentCounts(store))
+	got := map[string]int64{}
+	for _, v := range b.Build(context.Background()).GetVolumes() {
+		got[v.GetPath()] = v.GetExtentsWritten()
+	}
+	if got["/ext"] != 1 || got["/inline"] != 1 {
+		t.Errorf("extents written = %v, want 1 mapped extent on each volume", got)
 	}
 }

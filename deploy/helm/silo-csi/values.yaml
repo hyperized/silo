@@ -83,6 +83,12 @@ storageClass:
   # (ReadWriteOnce) semantics.
   volumeBindingMode: WaitForFirstConsumer
   allowVolumeExpansion: false
+  # mountOptions are passed to mount for filesystem volumes. The node plugin
+  # adds "discard" to ext4 and xfs mounts on its own, so space the filesystem
+  # frees goes back to silo as it is freed. List "nodiscard" here to turn that
+  # off (for example to run a periodic fstrim instead); "discard" or
+  # "nodiscard" here always wins over the default.
+  mountOptions: []
   # parameters silo understands. Only chunk-size is honoured today; the others
   # are placement hints reserved for a later milestone (see the StorageClass
   # template for details).

@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	extentv1 "github.com/hyperized/silo/api/proto/silo/extent/v1"
 	"github.com/hyperized/silo/internal/crdt"
@@ -224,5 +225,43 @@ func TestExtentService_Stat(t *testing.T) {
 	}
 	if !resp.GetHas() || resp.GetCount() != 7 {
 		t.Errorf("Stat = (has=%v,count=%d), want (true,7)", resp.GetHas(), resp.GetCount())
+	}
+}
+
+// An unmapped extent travels as an entry with an empty chunk id. proto3 leaves
+// an empty string off the wire, so check the entry itself still arrives, with
+// its index and timestamp, on the way in and on the way out.
+func TestExtentService_UnmapRoundTrips(t *testing.T) {
+	store := newFakeES()
+	svc := transport.NewExtentService(store, quiet())
+
+	wire, err := proto.Marshal(&extentv1.ApplyRequest{VolumeId: "vol", Entries: []*extentv1.ExtentEntry{
+		{Index: 7, ChunkId: "", Ts: &extentv1.Hlc{Wall: 20, Node: "n"}},
+	}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var req extentv1.ApplyRequest
+	if err := proto.Unmarshal(wire, &req); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if _, err := svc.Apply(context.Background(), &req); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	want := crdt.MapEntry[uint64, string]{Key: 7, Value: "", TS: hlc.Timestamp{Wall: 20, Node: "n"}}
+	if got := store.merged["vol"]; len(got) != 1 || got[0] != want {
+		t.Fatalf("merged %+v, want the unmap entry %+v", got, want)
+	}
+
+	store.snap["vol"] = []crdt.MapEntry[uint64, string]{want}
+	cs := &collectStream{}
+	if err := svc.Get(&extentv1.GetRequest{VolumeId: "vol"}, cs); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(cs.frames) != 1 || len(cs.frames[0]) != 1 {
+		t.Fatalf("streamed %v, want one frame with one entry", cs.frames)
+	}
+	if e := cs.frames[0][0]; e.GetIndex() != 7 || e.GetChunkId() != "" || e.GetTs().GetWall() != 20 {
+		t.Errorf("streamed %v, want the unmap of extent 7 at wall 20", e)
 	}
 }

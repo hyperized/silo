@@ -46,13 +46,17 @@ func (c coordChunks) PutChunk(ctx context.Context, id string, data []byte) error
 	return err
 }
 
-// volumeDevice presents a volume's block-I/O SDK as a sized NBD device.
+// volumeDevice presents a volume's block-I/O SDK as a sized NBD device. The
+// embedded Volume's Trim makes it an nbd.Trimmer, so discards from the kernel
+// unmap extents instead of being acknowledged and dropped.
 type volumeDevice struct {
 	*volume.Volume
 	size int64
 }
 
 func (d volumeDevice) Size() int64 { return d.size }
+
+var _ nbd.Trimmer = volumeDevice{}
 
 // volumeBackend opens a volume for an NBD export: it acquires the volume's
 // lease for this node (fencing any previous holder), opens the block-I/O SDK,
@@ -65,6 +69,10 @@ type volumeBackend struct {
 	extCoord extentCoord // extent-map replica-set coordinator; nil disables the path
 	clock    *hlc.Clock  // stamps replicated extent writes
 	extentRf bool        // serve extents from the replica set instead of the namespace
+	// noTrim hides the volume's Trim from the NBD server, so discards are
+	// acknowledged and dropped (SILO_NBD_TRIM=false). The zero value keeps trim
+	// on, which is the default.
+	noTrim bool
 }
 
 func newVolumeBackend(ns nsVolumes, coord transport.Coordinator, holder string, logger *slog.Logger, extCoord extentCoord, clock *hlc.Clock, extentRf bool) *volumeBackend {
@@ -98,8 +106,16 @@ func (b *volumeBackend) Open(ctx context.Context, export string) (nbd.Device, fu
 			b.logger.Warn("nbd: releasing the volume lease failed", "export", export, "error", err)
 		}
 	}
-	return volumeDevice{Volume: vol, size: size}, release, nil
+	dev := volumeDevice{Volume: vol, size: size}
+	if b.noTrim {
+		return untrimmedDevice{dev}, release, nil
+	}
+	return dev, release, nil
 }
+
+// untrimmedDevice narrows a volumeDevice to the plain nbd.Device methods, so
+// the server no longer sees an nbd.Trimmer and treats discards as no-ops.
+type untrimmedDevice struct{ nbd.Device }
 
 // metadata chooses the volume's block-I/O metadata source. With extent
 // replication on, it resolves the volume's inode id, warms its extent map from

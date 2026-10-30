@@ -1197,3 +1197,117 @@ func TestServer_AttachedTracksTransmittingExports(t *testing.T) {
 		t.Errorf("nothing should be attached after the client disconnected, got %v", got)
 	}
 }
+
+// trimDevice is a memDevice that also implements nbd.Trimmer. It records every
+// trim it is asked for and, when gate is set, blocks each trim until the test
+// closes it, so a test can hold a trim in flight.
+type trimDevice struct {
+	*memDevice
+	mu      sync.Mutex
+	trims   [][2]int64
+	trimErr error
+	gate    chan struct{}
+}
+
+func (d *trimDevice) Trim(off, length int64) error {
+	if d.gate != nil {
+		<-d.gate
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.trims = append(d.trims, [2]int64{off, length})
+	return d.trimErr
+}
+
+func (d *trimDevice) recorded() [][2]int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.trims)
+}
+
+func TestServer_TrimDispatch(t *testing.T) {
+	const size = 1 << 20
+	for _, tc := range []struct {
+		name      string
+		trimErr   error
+		offset    uint64
+		length    uint32
+		wantErr   uint32
+		wantTrims [][2]int64
+	}{
+		{name: "dispatched to the device", offset: 4096, length: 8192, wantTrims: [][2]int64{{4096, 8192}}},
+		{name: "whole device", offset: 0, length: size, wantTrims: [][2]int64{{0, size}}},
+		{name: "device failure is EIO", trimErr: errors.New("boom"), offset: 0, length: 4096, wantErr: 5, wantTrims: [][2]int64{{0, 4096}}},
+		{name: "past the end is EINVAL", offset: size - 4096, length: 8192, wantErr: 22},
+		{name: "offset overflow is EINVAL", offset: ^uint64(0) - 10, length: 4096, wantErr: 22},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dev := &trimDevice{memDevice: &memDevice{data: make([]byte, size)}, trimErr: tc.trimErr}
+			conn, done := serveConn(t, &slowBackend{dev: dev})
+			c := &testClient{t: t, conn: conn}
+			c.greet(cFlagNoZeroes)
+			c.exportName("vol", true)
+			if errc, _ := c.request(4, tc.offset, tc.length, nil); errc != tc.wantErr {
+				t.Fatalf("trim err = %d, want %d", errc, tc.wantErr)
+			}
+			c.disconnect()
+			if err := <-done; err != nil {
+				t.Errorf("ServeConn: %v", err)
+			}
+			if got := dev.recorded(); !slices.Equal(got, tc.wantTrims) {
+				t.Errorf("device saw trims %v, want %v", got, tc.wantTrims)
+			}
+		})
+	}
+}
+
+// A device without Trim keeps the old behaviour: discards are acknowledged and
+// nothing happens, but a range past the end is still refused.
+func TestServer_TrimPlainDevice(t *testing.T) {
+	dev := &memDevice{data: []byte("keepme")}
+	conn, done := serveConn(t, &backend{dev: dev})
+	c := &testClient{t: t, conn: conn}
+	c.greet(cFlagNoZeroes)
+	c.exportName("vol", true)
+	if errc, _ := c.request(4, 0, 6, nil); errc != 0 {
+		t.Errorf("trim err = %d, want 0", errc)
+	}
+	if errc, _ := c.request(4, 0, 7, nil); errc != 22 {
+		t.Errorf("out-of-range trim err = %d, want 22", errc)
+	}
+	if errc, data := c.request(0, 0, 6, nil); errc != 0 || string(data) != "keepme" {
+		t.Errorf("read after trim = (%d, %q), want the bytes untouched", errc, data)
+	}
+	c.disconnect()
+	if err := <-done; err != nil {
+		t.Errorf("ServeConn: %v", err)
+	}
+}
+
+// A flush must not be acknowledged while a trim sent before it is still
+// running, or "everything before the flush is done" would not hold.
+func TestServer_FlushWaitsForTrim(t *testing.T) {
+	dev := &trimDevice{memDevice: &memDevice{data: make([]byte, 1<<16)}, gate: make(chan struct{})}
+	conn, done := serveConn(t, &slowBackend{dev: dev})
+	c := &testClient{t: t, conn: conn}
+	c.greet(cFlagNoZeroes)
+	c.exportName("vol", true)
+
+	c.write(buildRequest(4, 0, 4096, 10))
+	c.write(buildRequest(3, 0, 0, 11))
+	// Give the server time to reach the flush; it must be stuck in the drain.
+	time.Sleep(20 * time.Millisecond)
+	close(dev.gate)
+
+	first, second := c.readOneReply(0), c.readOneReply(0)
+	if first.handle != 10 || second.handle != 11 {
+		t.Fatalf("replies came back as handles %d then %d, want the trim (10) before the flush (11)", first.handle, second.handle)
+	}
+	if first.errCode != 0 || second.errCode != 0 {
+		t.Errorf("trim/flush errors = %d/%d, want 0/0", first.errCode, second.errCode)
+	}
+	c.disconnect()
+	if err := <-done; err != nil {
+		t.Errorf("ServeConn: %v", err)
+	}
+}

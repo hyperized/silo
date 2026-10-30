@@ -571,3 +571,46 @@ func TestVerify(t *testing.T) {
 		}
 	})
 }
+
+// A trimmed extent is backed up as an unmap entry and restored as one: it must
+// not come back mapped, and its released chunk need not be in the backup.
+func TestRestoreRoundTripsUnmappedExtent(t *testing.T) {
+	tgt, err := blobstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns, store := realSources(t)
+	// Extent 1 of vol-1 was bound to c2 and then trimmed.
+	if err := store.Set("vol-1", 1, extentmap.Unmapped, hlc.Timestamp{Wall: 20, Node: "node-a"}); err != nil {
+		t.Fatal(err)
+	}
+	chunks := newChunks(map[string]string{"c1": "first-chunk-bytes", "c2": "second"})
+	e := backup.NewExporter(chunks, ns, testNode, backup.WithClock(newClock(t0, 0).Now), backup.WithExtentSource(store))
+	export(t, e, tgt)
+
+	ctx := context.Background()
+	m, err := backup.LoadManifest(ctx, tgt, testNode, "latest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if problems, err := backup.Verify(ctx, tgt, m, backup.VerifyOptions{Deep: true}); err != nil || len(problems) != 0 {
+		t.Fatalf("Verify = %v, %v", problems, err)
+	}
+	dir := filepath.Join(t.TempDir(), "data")
+	if _, err := backup.Restore(ctx, tgt, m, dir, backup.RestoreOptions{}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	restored, err := extentmap.Open(filepath.Join(dir, "extents"), quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(restored.Snapshot("vol-1"), store.Snapshot("vol-1")) {
+		t.Fatalf("vol-1 restored as %v, want %v", restored.Snapshot("vol-1"), store.Snapshot("vol-1"))
+	}
+	if id, ok := restored.Get("vol-1", 1); ok {
+		t.Errorf("the trimmed extent came back mapped to %q", id)
+	}
+	if got := restored.Len("vol-1"); got != 1 {
+		t.Errorf("restored Len = %d, want 1 mapped extent", got)
+	}
+}

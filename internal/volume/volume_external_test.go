@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -64,6 +66,9 @@ type fakeMeta struct {
 	extents   map[uint64]string
 	extentErr error
 	writeErr  error
+	// batches records each WriteExtents call's indexes, so trim tests can see
+	// what was unmapped and that nothing was written when nothing needed to be.
+	batches [][]uint64
 }
 
 func (m *fakeMeta) ExtentSize(string) (int64, error) {
@@ -80,7 +85,8 @@ func (m *fakeMeta) Extent(_ string, idx uint64) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	id, ok := m.extents[idx]
-	return id, ok, nil
+	// Mirror the real implementations: an empty id is a trimmed extent.
+	return id, ok && id != "", nil
 }
 
 func (m *fakeMeta) WriteExtent(_ string, idx uint64, id, _ string) error {
@@ -108,6 +114,7 @@ func (m *fakeMeta) WriteExtents(_ string, indexes []uint64, ids []string, _ stri
 	for i, idx := range indexes {
 		m.extents[idx] = ids[i]
 	}
+	m.batches = append(m.batches, slices.Clone(indexes))
 	return nil
 }
 
@@ -351,4 +358,131 @@ func TestVolume_ConcurrentWritesDistinctExtents(t *testing.T) {
 			t.Errorf("extent %d = (%q,%v), want %q", i, got[0], err, byte('A'+i))
 		}
 	}
+}
+
+// seedExtents writes a distinct full extent at each index so a trim test can
+// tell which extents kept their data.
+func seedExtents(t *testing.T, v *volume.Volume, extentSize int64, indexes ...uint64) {
+	t.Helper()
+	for _, idx := range indexes {
+		buf := bytes.Repeat([]byte{byte('a' + idx)}, int(extentSize))
+		if _, err := v.WriteAt(buf, int64(idx)*extentSize); err != nil {
+			t.Fatalf("seed extent %d: %v", idx, err)
+		}
+	}
+}
+
+func TestVolume_Trim(t *testing.T) {
+	const es = 8
+	for _, tc := range []struct {
+		name        string
+		off, length int64
+		wantGone    []uint64 // extents that must read as zeros afterwards
+	}{
+		{name: "fully covered extents", off: 8, length: 16, wantGone: []uint64{1, 2}},
+		{name: "partial edges stay mapped", off: 4, length: 24, wantGone: []uint64{1, 2}},
+		{name: "inside one extent", off: 1, length: 5},
+		{name: "zero length", off: 8, length: 0},
+		{name: "whole volume", off: 0, length: 4 * es, wantGone: []uint64{0, 1, 2, 3}},
+		{name: "past the mapped extents", off: 4 * es, length: 4 * es},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, meta, _ := openVol(t, es)
+			seedExtents(t, v, es, 0, 1, 2, 3)
+			meta.batches = nil
+			if err := v.Trim(tc.off, tc.length); err != nil {
+				t.Fatalf("Trim: %v", err)
+			}
+			for idx := uint64(0); idx < 4; idx++ {
+				got := make([]byte, es)
+				if _, err := v.ReadAt(got, int64(idx)*es); err != nil {
+					t.Fatalf("ReadAt extent %d: %v", idx, err)
+				}
+				want := bytes.Repeat([]byte{byte('a' + idx)}, es)
+				if slices.Contains(tc.wantGone, idx) {
+					want = make([]byte, es)
+				}
+				if !bytes.Equal(got, want) {
+					t.Errorf("extent %d reads %q, want %q", idx, got, want)
+				}
+			}
+			if len(tc.wantGone) == 0 && len(meta.batches) != 0 {
+				t.Errorf("a trim that unmaps nothing wrote %v", meta.batches)
+			}
+		})
+	}
+}
+
+// Trimming space that is already free must not write map entries: every write
+// is replicated and stamped, and fstrim re-sends the whole free space each run.
+func TestVolume_TrimUnmappedIsNoop(t *testing.T) {
+	v, meta, _ := openVol(t, 8)
+	seedExtents(t, v, 8, 1)
+	if err := v.Trim(0, 64); err != nil {
+		t.Fatalf("first Trim: %v", err)
+	}
+	// The seed is a single-extent write, which goes through WriteExtent and is
+	// not recorded, so the only batch is the trim's.
+	if len(meta.batches) != 1 || !slices.Equal(meta.batches[0], []uint64{1}) {
+		t.Fatalf("first trim wrote %v, want only extent 1", meta.batches)
+	}
+	meta.batches = nil
+	if err := v.Trim(0, 64); err != nil {
+		t.Fatalf("second Trim: %v", err)
+	}
+	if len(meta.batches) != 0 {
+		t.Errorf("trimming already-unmapped extents wrote %v", meta.batches)
+	}
+}
+
+func TestVolume_TrimInvalidRange(t *testing.T) {
+	v, _, _ := openVol(t, 8)
+	for _, tc := range []struct {
+		name        string
+		off, length int64
+	}{
+		{name: "negative offset", off: -1, length: 8},
+		{name: "negative length", off: 0, length: -8},
+		{name: "end overflows", off: math.MaxInt64 - 4, length: 8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := v.Trim(tc.off, tc.length); err == nil {
+				t.Error("Trim accepted an invalid range")
+			}
+		})
+	}
+}
+
+func TestVolume_TrimErrors(t *testing.T) {
+	t.Run("extent lookup fails", func(t *testing.T) {
+		v, meta, _ := openVol(t, 8)
+		meta.extentErr = errBoom
+		if err := v.Trim(0, 16); !errors.Is(err, errBoom) {
+			t.Errorf("Trim err = %v, want errBoom", err)
+		}
+	})
+	t.Run("unmap fenced", func(t *testing.T) {
+		v, meta, _ := openVol(t, 8)
+		seedExtents(t, v, 8, 0)
+		meta.writeErr = errBoom
+		if err := v.Trim(0, 16); !errors.Is(err, errBoom) {
+			t.Errorf("Trim err = %v, want errBoom", err)
+		}
+	})
+	t.Run("session ended", func(t *testing.T) {
+		meta := &fakeMeta{size: 8}
+		meta.set(0, "c0")
+		ctx, cancel := context.WithCancel(context.Background())
+		v, err := volume.Open(ctx, meta, &fakeChunks{}, "/vol", "holder")
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		cancel()
+		if err := v.Trim(0, 8); !errors.Is(err, context.Canceled) {
+			t.Errorf("Trim err = %v, want context.Canceled", err)
+		}
+		if len(meta.batches) != 0 {
+			t.Errorf("a trim on an ended session wrote %v", meta.batches)
+		}
+	})
 }

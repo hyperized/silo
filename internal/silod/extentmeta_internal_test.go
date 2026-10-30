@@ -7,6 +7,7 @@ import (
 
 	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/namespace"
+	"github.com/hyperized/silo/internal/volume"
 )
 
 // fakeEVM is a fake extentVolumeMeta (the gossiped-namespace surface).
@@ -154,5 +155,46 @@ func TestVolumeBackend_MetadataErrors(t *testing.T) {
 	bWarm := newVolumeBackend(&fakeNS{}, &fakeCoord{}, "n", discardLogger(), &fakeEC{warmErr: errBoom}, hlc.New("n"), true)
 	if _, err := bWarm.metadata(context.Background(), "/vol"); err == nil {
 		t.Error("metadata should fail when warming the map fails")
+	}
+}
+
+// A trim through the replicated metadata path records the empty chunk id via
+// ApplyDelta, and is fenced by the lease exactly like a write.
+func TestExtentMetadata_TrimUnmapsThroughApplyDelta(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		holder    string
+		wantErr   error
+		wantApply bool
+	}{
+		{name: "lease held", holder: "node", wantApply: true},
+		{name: "lease lost", holder: "other", wantErr: namespace.ErrLeaseHeld},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			coord := &fakeEC{lookupID: "c", lookupOK: true}
+			m := newExtentMeta(&fakeEVM{extentSize: 8, leaseHolder: tc.holder}, coord)
+			vol, err := volume.Open(context.Background(), m, coordChunks{}, "/vol", "node")
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			err = volumeDevice{Volume: vol, size: 32}.Trim(0, 16)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Trim err = %v, want %v", err, tc.wantErr)
+			}
+			if !tc.wantApply {
+				if len(coord.applied) != 0 {
+					t.Errorf("a fenced trim replicated %+v", coord.applied)
+				}
+				return
+			}
+			if len(coord.applied) != 1 || len(coord.applied[0].ids) != 2 {
+				t.Fatalf("applied = %+v, want one batch of two extents", coord.applied)
+			}
+			for _, id := range coord.applied[0].ids {
+				if id != "" {
+					t.Errorf("trim replicated chunk id %q, want the empty id", id)
+				}
+			}
+		})
 	}
 }

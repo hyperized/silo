@@ -77,7 +77,7 @@ func (m *HostMounter) Mount(ctx context.Context, device, target, fsType string, 
 		return err
 	}
 	args := []string{"-t", fsType}
-	if o := mountOptions(flags, readOnly); len(o) > 0 {
+	if o := mountOptions(fsType, flags, readOnly); len(o) > 0 {
 		args = append(args, "-o", strings.Join(o, ","))
 	}
 	args = append(args, device, target)
@@ -117,13 +117,40 @@ func (m *HostMounter) ensureFormatted(ctx context.Context, device, fsType string
 	return nil
 }
 
-// mountOptions builds the -o option list, appending ro when read-only.
-func mountOptions(flags []string, readOnly bool) []string {
+// discardFilesystems are the filesystems mounted with online discard unless
+// the volume's mount options say otherwise. silo only reclaims the storage
+// behind blocks the filesystem tells it are free, and without discard a
+// long-lived volume keeps every block it ever wrote. Both accept "nodiscard",
+// which is how a StorageClass turns this off through its mountOptions.
+var discardFilesystems = map[string]bool{"ext4": true, "xfs": true}
+
+// mountOptions builds the -o option list: the caller's flags, discard for a
+// writable ext4 or xfs mount whose flags do not already choose discard or
+// nodiscard, and ro when read-only. A read-only mount frees nothing, so it gets
+// no discard.
+func mountOptions(fsType string, flags []string, readOnly bool) []string {
 	opts := append([]string(nil), flags...)
+	if discardFilesystems[fsType] && !readOnly && !choosesDiscard(flags) {
+		opts = append(opts, "discard")
+	}
 	if readOnly {
 		opts = append(opts, "ro")
 	}
 	return opts
+}
+
+// choosesDiscard reports whether flags already set discard either way. A
+// StorageClass may list options one per entry or several joined by commas, so
+// both forms count.
+func choosesDiscard(flags []string) bool {
+	for _, f := range flags {
+		for _, o := range strings.Split(f, ",") {
+			if o = strings.TrimSpace(o); o == "discard" || o == "nodiscard" || strings.HasPrefix(o, "discard=") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ensureFile creates an empty file (and its parent) to serve as a block-volume

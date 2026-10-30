@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/hyperized/silo/internal/crdt"
+	"github.com/hyperized/silo/internal/extentmap"
 	"github.com/hyperized/silo/internal/metrics"
 )
 
@@ -327,7 +328,20 @@ func (s *ExtentScrubber) agrees(ctx context.Context, node, volumeID string) (sam
 	if local := s.catalog.Digest(volumeID); len(local) > 0 && len(digest) > 0 {
 		return bytes.Equal(local, digest), true
 	}
-	return count == int64(len(s.catalog.Snapshot(volumeID))), true
+	return count == mappedCount(s.catalog.Snapshot(volumeID)), true
+}
+
+// mappedCount counts the entries backed by a chunk. A peer's Stat count leaves
+// out extents recorded as unmapped, so the local side of the comparison must
+// too, or every trimmed volume would read as diverged.
+func mappedCount(entries []crdt.MapEntry[uint64, string]) int64 {
+	var n int64
+	for _, e := range entries {
+		if e.Value != extentmap.Unmapped {
+			n++
+		}
+	}
+	return n
 }
 
 // MetricPrefix namespaces the extent scrubber's readings alongside the extent

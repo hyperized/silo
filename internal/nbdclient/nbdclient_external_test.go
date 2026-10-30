@@ -306,6 +306,12 @@ func TestAttachSuperviseReconnectDetach(t *testing.T) {
 	if snap.connectCfg.SocketFD != 42 || snap.connectCfg.SizeBytes != 1<<20 || snap.connectCfg.DeadConnTimeout != 2*time.Minute {
 		t.Fatalf("connect config mismatch: %+v", snap.connectCfg)
 	}
+	// The kernel only issues discards when the server's SEND_TRIM flag reaches
+	// it in the netlink connect; without it trim support in silod is dead code.
+	const sendTrim = 1 << 5
+	if snap.connectCfg.ServerFlags&sendTrim == 0 {
+		t.Fatalf("server flags %#x handed to the kernel lack SEND_TRIM", snap.connectCfg.ServerFlags)
+	}
 
 	// The link dies: the watcher kicks the session, which must redo the full
 	// handshake and hand the kernel a fresh socket.
