@@ -11,8 +11,15 @@ const props = withDefaults(
     label: string
     /** Bar thickness: xs 4 px, sm 6 px, md 8 px. */
     size?: 'xs' | 'sm' | 'md'
+    /**
+     * level colours the fill by how close it is to full; neutral keeps the accent
+     * at every ratio, for a count where a full bar is not a problem.
+     */
+    tone?: 'level' | 'neutral'
+    /** Word for the remainder in the spoken value, as in "70%, 3 GiB free". */
+    rest?: string
   }>(),
-  { size: 'xs' },
+  { size: 'xs', tone: 'level', rest: 'free' },
 )
 
 const HEIGHT = { xs: 'h-1', sm: 'h-1.5', md: 'h-2' } as const
@@ -24,8 +31,8 @@ const meter = computed(() => {
   if (ratio === null) return null
   return {
     now: Math.round(ratio * 100),
-    text: `${formatPercent(ratio)}, ${formatBytes(Math.max(props.capacityBytes - props.usedBytes, 0))} free`,
-    fill: FILL[fillLevel(ratio)],
+    text: `${formatPercent(ratio)}, ${formatBytes(Math.max(props.capacityBytes - props.usedBytes, 0))} ${props.rest}`,
+    fill: FILL[props.tone === 'neutral' ? 'healthy' : fillLevel(ratio)],
     style: { transform: `scaleX(${String(ratio)})` },
   }
 })

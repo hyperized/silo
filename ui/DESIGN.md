@@ -6,7 +6,7 @@ An operator dashboard. The page is for someone who runs storage and wants to see
 state of the cluster at a glance, and whether it is getting better or worse. Where a
 number has a trend (used capacity, write rate, skew, GC and backup runs) it is drawn as
 a gauge or a curve; tables are kept for what is a list by nature, the volumes. Words
-are the domain words (chunks, allocated, suspect, lease, extent), with no prose beyond
+are the domain words (chunks, written, suspect, lease, extent), with no prose beyond
 one sentence where a card needs to explain a failure.
 
 The top of the page is an instrument row of six tiles, each answering one question:
@@ -41,7 +41,8 @@ value, so the charts follow the scheme too.
 
 Accent is the colour of data: capacity fills below 80 %, curves, bars of successful
 runs, the stacked areas (one hue, falling opacity per node). Fills turn warn at 80 %
-and crit at 90 %. Good, warn and crit are reserved for states.
+and crit at 90 %. Good, warn and crit are reserved for states. The one exception is the
+volume table's Written meter, which stays accent at every level (see below).
 
 Every colour carries a word or an icon, never colour alone. A failed run strip square
 has a cross, a suspect ring segment is dashed, a full disk gets a "Disk 84 %" tag as
@@ -81,8 +82,9 @@ reports the latest of each, so the strips also fill while the page is open.
 
 Rates and projections ("+2.1 GiB/h", "full in 9 mo") are a least-squares line through
 the samples in the chosen range and stay hidden until there are two samples. Write rates
-are allocation growth between samples divided by the time between them, so a pause does
-not show up as a spike. When silod serves its own history this buffer becomes the cache
+are the growth in written extents between samples divided by the time between them, so
+a pause does not show up as a spike. When a discard frees extents the count drops; that
+interval counts as zero writes rather than a negative rate. When silod serves its own history this buffer becomes the cache
 for it rather than the source.
 
 ## Layout
@@ -104,7 +106,7 @@ for it rather than the source.
 | skew, up; spark; addr  | |                       | |                          |
 +------------------------+ +-----------------------+ +--------------------------+
 +-- Volumes ------------------------------------------------------- Filter [ ] -+
-| path (+ markers, truncated to fit), allocated, writes, replicas, lease,       |
+| path (+ markers, truncated to fit), written, writes, replicas, lease,         |
 | state; problems first; 8 then Show all                             full width |
 +-------------------------------------------------------------------------------+
 +-- Garbage collection --+ +-- Backups ------------+ +-- Issues ----------------+
@@ -135,6 +137,14 @@ the most important line in view there too.
 The volume table sorts map-damaged volumes first, then degraded ones, then by current
 write rate, and shows eight rows until "Show all". The filter matches path and lease
 holder.
+
+The Written column shows extents written times extent size against the volume size. It
+is a high-water mark, not filesystem usage: silo frees an extent only when the
+filesystem discards it, so a volume whose filesystem is nearly empty can still read
+90 % or more. A fully written volume is in no danger either, because a write to an
+extent that already exists always succeeds. So the meter is a plain accent fill at every
+level, and the written ratio plays no part in a row's state, its sort position, the
+issue list or the Volumes tile.
 
 ## Thresholds and issues
 

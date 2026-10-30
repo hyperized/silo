@@ -159,8 +159,12 @@ function replica(id: string) {
               scope="col"
               :class="TH"
             >
-              <Tip text="Extents written of the volume size">
-                Allocated
+              <!--
+                A high-water mark, not usage: silo frees an extent only when the filesystem
+                discards it, so a nearly empty filesystem can show a full bar.
+              -->
+              <Tip text="Extents ever written; freed only on filesystem discard">
+                Written
               </Tip>
             </th>
             <th
@@ -260,17 +264,19 @@ function replica(id: string) {
             </th>
             <td
               :class="[TD, 'sm:w-[150px]']"
-              data-label="Allocated"
+              data-label="Written"
             >
               <span class="flex items-center gap-2">
                 <Meter
                   class="min-w-10 flex-1"
-                  :used-bytes="r.v.allocatedBytes"
+                  :used-bytes="r.v.writtenBytes"
                   :capacity-bytes="r.v.sizeBytes"
-                  :label="`Allocated of ${r.v.path}`"
+                  :label="`Written extents of ${r.v.path}`"
                   size="sm"
+                  tone="neutral"
+                  rest="unwritten"
                 />
-                <span class="text-[11.5px] whitespace-nowrap text-ink-2">{{ formatUsedOf(r.v.allocatedBytes, r.v.sizeBytes) }}</span>
+                <span class="text-[11.5px] whitespace-nowrap text-ink-2">{{ formatUsedOf(r.v.writtenBytes, r.v.sizeBytes) }}</span>
               </span>
             </td>
             <td

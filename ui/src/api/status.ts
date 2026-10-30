@@ -162,7 +162,11 @@ export interface Backup {
 export interface Volume {
   path: string
   sizeBytes: number
-  allocatedBytes: number
+  /**
+   * Extents written times extent size, clamped to sizeBytes. A high-water mark,
+   * not usage: silo keeps an extent until the filesystem discards it.
+   */
+  writtenBytes: number
   extentSizeBytes: number
   leaseHolder: string
   /** Node ids of the replica set, in the order silod sent them. */
@@ -393,11 +397,11 @@ function parseVolume(v: unknown, i: number): Volume {
   // The written-extent count can overshoot the logical size on the last,
   // partially used extent; clamp so the percentage never passes 100.
   const extent = int(v, 'extentSizeBytes', where)
-  const allocated = Math.min(int(v, 'extentsWritten', where) * extent, size)
+  const written = Math.min(int(v, 'extentsWritten', where) * extent, size)
   return {
     path: str(v, 'path', where),
     sizeBytes: size,
-    allocatedBytes: allocated,
+    writtenBytes: written,
     extentSizeBytes: extent,
     leaseHolder: str(v, 'leaseHolder', where),
     replicas: list(v, 'replicas', where).map((r, j) => {
