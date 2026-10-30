@@ -14,9 +14,20 @@ describe('SegmentRing', () => {
   it('splits the ring into one segment per member, starting at the top', () => {
     const segs = ring(['alive', 'alive', 'alive']).findAll('[data-part="segment"]')
     expect(segs).toHaveLength(3)
-    expect(segs.map((s) => s.attributes('stroke-dashoffset'))).toEqual(['0', '-96.34', '-192.68'])
-    expect(segs[0]?.attributes('stroke-dasharray')).toBe('90.34 198.68')
-    expect(segs[0]?.attributes('transform')).toBe('rotate(-90 60 60)')
+    expect(segs.map((s) => s.attributes('stroke-dashoffset'))).toEqual(['0', '-87.96', '-175.93'])
+    expect(segs[0]?.attributes('stroke-dasharray')).toBe('81.96 181.93')
+    expect(segs[0]?.attributes('transform')).toBe('rotate(-90 60 57)')
+  })
+
+  it('fits the whole ring inside the same 120 x 114 box as the capacity gauge', () => {
+    const w = ring(['alive'])
+    expect(w.get('svg').attributes('viewBox')).toBe('0 0 120 114')
+    const c = w.get('[data-part="segment"]')
+    const [cy, r] = [Number(c.attributes('cy')), Number(c.attributes('r'))]
+    const half = Number(c.attributes('stroke-width')) / 2
+    expect(cy - r - half).toBeGreaterThan(0)
+    expect(cy + r + half).toBeLessThan(114)
+    expect(Number(c.attributes('cx')) + r + half).toBeLessThan(120)
   })
 
   it('styles each state by colour and line', () => {
@@ -51,7 +62,7 @@ describe('SegmentRing', () => {
   })
 
   it('draws one member as the whole ring', () => {
-    expect(ring(['alive']).get('[data-part="segment"]').attributes('stroke-dasharray')).toBe('289.03 0')
+    expect(ring(['alive']).get('[data-part="segment"]').attributes('stroke-dasharray')).toBe('263.89 0')
   })
 
   it('draws only the track with no members', () => {

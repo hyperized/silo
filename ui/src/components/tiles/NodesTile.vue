@@ -30,7 +30,7 @@ const down = computed(() => active.value.filter((n) => n.state === 'dead').lengt
     <div class="mx-auto w-full max-w-[150px]">
       <Skeleton
         v-if="nodes === null"
-        class="aspect-[120/108] w-full rounded-full"
+        class="aspect-[120/114] w-full rounded-full"
       />
       <SegmentRing
         v-else
