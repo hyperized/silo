@@ -83,6 +83,18 @@ describe('App', () => {
     expect(w.get('[aria-labelledby=gc-title]').text()).toContain('1 h ago')
   })
 
+  it('gives the volumes table the full width and sets GC, Backups and Issues in a row of three under it', async () => {
+    fetchMock.mockResolvedValue(status({ gc: gc() }))
+    const w = await mountApp()
+    const volumes = w.getComponent({ name: 'VolumesPanel' })
+    expect(volumes.element.parentElement).toBe(w.get('main').element)
+    const row = w.getComponent({ name: 'GcPanel' }).element.parentElement as HTMLElement
+    expect(row.className.split(' ')).toEqual(expect.arrayContaining(['grid', 'items-start', 'wide:grid-cols-3']))
+    expect(row.previousElementSibling).toBe(volumes.element)
+    expect(w.getComponent({ name: 'BackupPanel' }).element.parentElement).toBe(row)
+    expect(w.getComponent({ name: 'IssueList' }).element.parentElement).toBe(row)
+  })
+
   it('says not reported for an older silod', async () => {
     fetchMock.mockResolvedValue(status())
     const w = await mountApp()

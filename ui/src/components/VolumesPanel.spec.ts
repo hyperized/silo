@@ -47,7 +47,7 @@ describe('VolumesPanel', () => {
 
     it('names the state of each chip in its title and for screen readers', () => {
       const v = volume({ replicas: ['node-a', 'node-b', 'node-c', 'node-z'] })
-      const chips = panel({ volumes: [v], nodes }).findAll('[title]').filter((e) => e.text().startsWith('node-'))
+      const chips = panel({ volumes: [v], nodes }).findAll('[data-label="Replicas"] [title]').filter((e) => e.text().startsWith('node-'))
       expect(chips.map((c) => c.attributes('title'))).toEqual([
         'node-a: Alive',
         'node-b: Suspect',
@@ -134,6 +134,31 @@ describe('VolumesPanel', () => {
     it('shows the lease holder', () => {
       const w = panel({ volumes: [volume({ leaseHolder: 'node-b' })] })
       expect(w.get('[data-label="Lease"]').text()).toBe('node-b')
+    })
+
+    it('truncates a long lease holder from 640 px on, keeping the full name in its title', () => {
+      const span = panel({ volumes: [volume({ leaseHolder: 'node-b' })] }).get('[data-label="Lease"] span')
+      expect(span.classes()).toEqual(expect.arrayContaining(['sm:truncate', 'sm:max-w-48']))
+      expect(span.attributes('title')).toBe('node-b')
+    })
+  })
+
+  describe('path column', () => {
+    const long = '/csi/volumes/pvc-0123456789abcdef0123456789abcdef'
+
+    it('takes the width the other columns leave and truncates into it, so the table does not scroll', () => {
+      const w = panel({ volumes: [volume({ path: long })] })
+      const cell = w.get('tbody th[scope="row"]')
+      expect(cell.classes()).toEqual(expect.arrayContaining(['sm:w-full', 'sm:max-w-0', 'sm:min-w-48']))
+      const span = cell.get('span')
+      expect(span.classes()).toContain('sm:truncate')
+      expect(span.attributes('title')).toBe(long)
+      expect(span.text()).toBe(long)
+    })
+
+    it('sets no minimum width on the table itself', () => {
+      const w = panel({ volumes: [volume()] })
+      expect(w.get('table').classes().some((c) => c.includes('min-w'))).toBe(false)
     })
   })
 

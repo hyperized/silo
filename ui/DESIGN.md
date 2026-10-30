@@ -103,30 +103,33 @@ for it rather than the source.
 | gauge, used, free,     | | ...                   | | amber border             |
 | skew, up; spark; addr  | |                       | |                          |
 +------------------------+ +-----------------------+ +--------------------------+
-+-- Volumes ------------------------- Filter [ ] -+ +-- Garbage collection -----+
-| path (+ markers), allocated, writes, replicas,   | | run bars, last / orphans /|
-| lease, state; problems first; 8 then Show all    | | freed, failure sentence   |
-+------------------------------------------- 8/12-+ +-- Backups ----------------+
-                                                     | run dots, last / uploaded |
-                                                     | / next, schedule, manifest|
-                                                     +-- Issues -----------------+
-                                                     | full list           4/12  |
-                                                     +---------------------------+
++-- Volumes ------------------------------------------------------- Filter [ ] -+
+| path (+ markers, truncated to fit), allocated, writes, replicas, lease,       |
+| state; problems first; 8 then Show all                             full width |
++-------------------------------------------------------------------------------+
++-- Garbage collection --+ +-- Backups ------------+ +-- Issues ----------------+
+| run bars, last /       | | run dots, last /      | | full list                |
+| orphans / freed,       | | uploaded / next,      | |                          |
+| failure sentence       | | schedule, manifest    | |                          |
++------------------------+ +-----------------------+ +--------------------------+
 ```
 
 Max width 1440 px, 24 px side gutter (16 px on a phone). From 1100 px: six tiles in a
-row, the 8 / 4 column split, three node cards per row. From 640 px: tiles three per
+row, the 8 / 4 column split, three node cards per row, and GC, Backups and Issues side
+by side under the full-width volume table. From 640 px: tiles three per
 row. Below 640 px: tiles two per row, every card full width, and each volume row turns
-into a key / value block so nothing scrolls sideways. Between 640 and 1100 px the
-volume table scrolls inside its card rather than squeezing paths onto several lines.
+into a key / value block so nothing scrolls sideways. From 640 px the path column takes
+the width the other columns leave and long paths end in an ellipsis, with the full path
+in a tooltip; the table only scrolls inside its card when even a 192 px path column does
+not fit, which happens below 1100 px.
 
 Cards are flat: 1 px border, 10 px radius, no shadow. A card in trouble (a node with a
 full disk or that is down) changes its border to warn or crit; the tag or badge inside
 says why.
 
 The issue strip under the top bar shows the worst issue only, so the reason for an
-amber or red pill is readable without scrolling. The full list sits in the side column
-under GC and Backups, which on narrow screens falls below the tables; the strip keeps
+amber or red pill is readable without scrolling. The full list sits in the Issues card
+beside GC and Backups, which on narrow screens stacks below them; the strip keeps
 the most important line in view there too.
 
 The volume table sorts map-damaged volumes first, then degraded ones, then by current

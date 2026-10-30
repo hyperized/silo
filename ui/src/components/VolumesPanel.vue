@@ -146,7 +146,7 @@ function replica(id: string) {
       v-else
       class="overflow-x-auto"
     >
-      <table class="stack w-full text-left text-[12.5px] sm:min-w-[720px]">
+      <table class="stack w-full text-left text-[12.5px]">
         <thead>
           <tr>
             <th
@@ -222,11 +222,18 @@ function replica(id: string) {
             :key="r.v.path"
             class="border-t border-rule hover:bg-raise sm:h-11"
           >
+            <!--
+              width 100% with max-width 0 makes an auto-layout table give this column whatever the
+              others leave, so a long path truncates instead of pushing the table into a scrollbar.
+            -->
             <th
               scope="row"
-              :class="[TD, 'pl-4 font-normal']"
+              :class="[TD, 'pl-4 font-normal sm:w-full sm:max-w-0 sm:min-w-48']"
             >
-              <span class="font-mono text-xs break-all sm:break-normal sm:whitespace-nowrap">{{ r.v.path }}</span>
+              <span
+                class="block font-mono text-xs break-all sm:truncate"
+                :title="r.v.path"
+              >{{ r.v.path }}</span>
               <span
                 v-if="r.v.mapDamaged || r.degraded || r.v.attachedHere"
                 class="flex flex-wrap gap-x-2 text-[11px]"
@@ -310,7 +317,8 @@ function replica(id: string) {
             >
               <span
                 v-if="r.v.leaseHolder"
-                class="font-mono text-xs break-all text-ink-2 sm:break-normal sm:whitespace-nowrap"
+                class="block font-mono text-xs break-all text-ink-2 sm:max-w-48 sm:truncate"
+                :title="r.v.leaseHolder"
               >{{ r.v.leaseHolder }}</span>
               <span
                 v-else

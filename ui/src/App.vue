@@ -181,27 +181,24 @@ const volumeSparks = computed(() =>
         :sparks="nodeSparks"
       />
 
-      <div class="grid items-start gap-4 max-sm:gap-3.5 wide:grid-cols-12">
-        <VolumesPanel
-          class="wide:col-span-8"
-          :volumes="data?.volumes ?? null"
-          :nodes="data?.nodes ?? []"
-          :replication-factor="data?.health?.replicationFactor ?? 0"
-          :sparks="volumeSparks"
+      <VolumesPanel
+        :volumes="data?.volumes ?? null"
+        :nodes="data?.nodes ?? []"
+        :replication-factor="data?.health?.replicationFactor ?? 0"
+        :sparks="volumeSparks"
+      />
+      <div class="grid items-start gap-4 max-sm:gap-3.5 wide:grid-cols-3">
+        <GcPanel
+          :gc="data ? data.gc : undefined"
+          :runs="history.gcRuns.value"
+          :now="now"
         />
-        <div class="flex min-w-0 flex-col gap-4 max-sm:gap-3.5 wide:col-span-4">
-          <GcPanel
-            :gc="data ? data.gc : undefined"
-            :runs="history.gcRuns.value"
-            :now="now"
-          />
-          <BackupPanel
-            :backup="data ? data.backup : undefined"
-            :runs="history.backupRuns.value"
-            :now="now"
-          />
-          <IssueList :findings="health?.findings ?? null" />
-        </div>
+        <BackupPanel
+          :backup="data ? data.backup : undefined"
+          :runs="history.backupRuns.value"
+          :now="now"
+        />
+        <IssueList :findings="health?.findings ?? null" />
       </div>
     </template>
   </main>

@@ -14,7 +14,7 @@ const n = (id: string, state: ClusterNode['state']) => node({ id, state })
 describe('NodesTile', () => {
   it('shows a skeleton and no footer while loading', () => {
     const w = tile(null)
-    expect(w.findComponent(Skeleton).exists()).toBe(true)
+    expect(w.findComponent(Skeleton).classes()).toContain('aspect-[120/114]')
     expect(w.text()).not.toContain('suspect')
     expect(w.text()).not.toContain('down')
   })

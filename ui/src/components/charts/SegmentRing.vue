@@ -21,7 +21,14 @@ const props = withDefaults(
   { caption: '' },
 )
 
-const R = 46
+// Same 120x114 box as the capacity ArcGauge beside it, so the two tiles line up.
+// The full circle reaches R + 5 (half the stroke) on every side; at R = 42 that is
+// 10 units of air top and bottom, roughly where the gauge's arc starts and ends.
+const R = 42
+const CX = 60
+const CY = 57
+// Segments start at twelve o'clock.
+const ROTATE = `rotate(-90 ${String(CX)} ${String(CY)})`
 const GAP = 6
 const ORDER: readonly NodeState[] = ['alive', 'suspect', 'dead', 'left', 'unknown']
 const CAPTION: Readonly<Record<Level, string>> = {
@@ -70,7 +77,7 @@ const ariaLabel = computed(() => {
 <template>
   <svg
     width="100%"
-    viewBox="0 0 120 108"
+    viewBox="0 0 120 114"
     role="img"
     :aria-label="ariaLabel"
     class="block"
@@ -78,8 +85,8 @@ const ariaLabel = computed(() => {
     <circle
       v-if="drawn.length === 0"
       data-part="track"
-      cx="60"
-      cy="60"
+      :cx="CX"
+      :cy="CY"
       :r="R"
       fill="none"
       stroke="var(--c-track)"
@@ -93,33 +100,33 @@ const ariaLabel = computed(() => {
       <title>{{ seg.label }}: {{ seg.state }}</title>
       <circle
         data-part="segment"
-        cx="60"
-        cy="60"
+        :cx="CX"
+        :cy="CY"
         :r="R"
         fill="none"
         :stroke="seg.stroke"
         stroke-width="10"
         :stroke-dasharray="seg.main.dasharray"
         :stroke-dashoffset="seg.main.dashoffset"
-        transform="rotate(-90 60 60)"
+        :transform="ROTATE"
       />
       <circle
         v-if="seg.outline"
         data-part="outline"
-        cx="60"
-        cy="60"
+        :cx="CX"
+        :cy="CY"
         :r="R"
         fill="none"
         stroke="var(--c-ink-3)"
         stroke-width="1.5"
         :stroke-dasharray="seg.outline.dasharray"
         :stroke-dashoffset="seg.outline.dashoffset"
-        transform="rotate(-90 60 60)"
+        :transform="ROTATE"
       />
     </g>
     <text
       x="60"
-      y="62"
+      y="59"
       text-anchor="middle"
       font-size="26"
       font-weight="600"
@@ -128,7 +135,7 @@ const ariaLabel = computed(() => {
     <text
       v-if="caption"
       x="60"
-      y="80"
+      y="77"
       text-anchor="middle"
       font-size="10.5"
       :fill="CAPTION[level]"
