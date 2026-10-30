@@ -59,7 +59,7 @@ export function volume(over: Partial<Volume> = {}): Volume {
   return {
     path: '/db',
     sizeBytes: 10 * GIB,
-    allocatedBytes: 2 * GIB,
+    writtenBytes: 2 * GIB,
     extentSizeBytes: 4 * 1024 ** 2,
     leaseHolder: 'node-a',
     replicas: [],

@@ -98,7 +98,7 @@ function vol(path: string, over: Partial<Volume> = {}): Volume {
   return {
     path,
     sizeBytes: 100,
-    allocatedBytes: 0,
+    writtenBytes: 0,
     extentSizeBytes: 1,
     leaseHolder: '',
     replicas: ['a', 'b', 'c'],

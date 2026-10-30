@@ -88,7 +88,7 @@ describe('useHistory: sampling', () => {
     await feed(
       status({
         nodes: [node({ id: 'a', usedBytes: 1, capacityBytes: 10, clockSkewMs: -4, state: 'suspect' })],
-        volumes: [volume({ path: '/v', allocatedBytes: 5, sizeBytes: 50, leaseHolder: 'a' })],
+        volumes: [volume({ path: '/v', writtenBytes: 5, sizeBytes: 50, leaseHolder: 'a' })],
         gc: gc({ lastRunAt: new Date(T0 - 1000) }),
         backup: backup({ lastRun: backupRun({ startedAt: new Date(T0 - 2000) }) }),
       }),
@@ -96,7 +96,7 @@ describe('useHistory: sampling', () => {
     )
     const s = h.samples.value[0]
     expect(s?.nodes.get('a')).toEqual({ usedBytes: 1, capacityBytes: 10, clockSkewMs: -4, state: 'suspect' })
-    expect(s?.volumes.get('/v')).toEqual({ allocatedBytes: 5, sizeBytes: 50, leaseHolder: 'a' })
+    expect(s?.volumes.get('/v')).toEqual({ writtenBytes: 5, sizeBytes: 50, leaseHolder: 'a' })
     expect(s?.usedBytes).toBe(1)
     expect(s?.capacityBytes).toBe(10)
     expect(s?.gcLastRunAt).toBe(T0 - 1000)
@@ -244,13 +244,13 @@ describe('useHistory: write rates and sparklines', () => {
     status({
       nodes: [node({ id: 'n1', clockSkewMs: a }), node({ id: 'n2' })],
       volumes: [
-        volume({ path: '/a', allocatedBytes: a, leaseHolder: 'n1' }),
-        volume({ path: '/b', allocatedBytes: b, leaseHolder: 'n2' }),
-        ...(extra ? [volume({ path: '/new', allocatedBytes: 999, leaseHolder: 'n1' })] : []),
+        volume({ path: '/a', writtenBytes: a, leaseHolder: 'n1' }),
+        volume({ path: '/b', writtenBytes: b, leaseHolder: 'n2' }),
+        ...(extra ? [volume({ path: '/new', writtenBytes: 999, leaseHolder: 'n1' })] : []),
       ],
     })
 
-  it('sums allocation growth per second, ignoring shrinkage and new volumes', async () => {
+  it('sums written growth per second, ignoring shrinkage and new volumes', async () => {
     const { h, feed } = setup()
     await feed(vols(100, 1000), T0)
     await feed(vols(400, 400, true), T0 + 3000)
@@ -280,6 +280,17 @@ describe('useHistory: write rates and sparklines', () => {
     expect(h.clusterWriteSparkline.value).toEqual([5, 0, 7])
     expect(h.nodeSkewSparkline('n1')).toEqual([0, 10, 10, 30])
     expect(h.nodeSkewSparkline('missing')).toEqual([])
+  })
+
+  it('reads a trim as zero writes and measures later growth from the lower count', async () => {
+    const { h, feed } = setup()
+    await feed(vols(900, 0), T0)
+    await feed(vols(300, 0), T0 + 3000)
+    await feed(vols(330, 0), T0 + 6000)
+    expect(h.volumeWriteSparkline('/a')).toEqual([0, 10])
+    expect(h.nodeWriteSparkline('n1')).toEqual([0, 10])
+    expect(h.clusterWriteSparkline.value).toEqual([0, 10])
+    expect(h.writeRateBytesPerSec.value).toBe(10)
   })
 
   it('caps sparklines at the last 20 points', async () => {

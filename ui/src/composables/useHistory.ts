@@ -40,7 +40,7 @@ export interface VolumeSample {
    * Written extents times extent size, as parsed (clamped to the volume size).
    * Stands in for extentsWritten, which the domain model folds into this.
    */
-  allocatedBytes: number
+  writtenBytes: number
   sizeBytes: number
   leaseHolder: string
 }
@@ -93,7 +93,7 @@ export interface History {
   clusterUsedRatePerHour: ComputedRef<number | null>
   secondsUntilFull: ComputedRef<number | null>
   writeRateBytesPerSec: ComputedRef<number | null>
-  /** Cluster-wide allocation growth in bytes per second, one point per recent sample interval. */
+  /** Cluster-wide growth of written bytes, in bytes per second, one point per recent sample interval. */
   clusterWriteSparkline: ComputedRef<number[]>
   gcRuns: ComputedRef<GcRun[]>
   backupRuns: ComputedRef<BackupRunPoint[]>
@@ -116,7 +116,7 @@ function record(s: Status, t: number): HistorySample {
       ]),
     ),
     volumes: new Map(
-      s.volumes.map((v) => [v.path, { allocatedBytes: v.allocatedBytes, sizeBytes: v.sizeBytes, leaseHolder: v.leaseHolder }]),
+      s.volumes.map((v) => [v.path, { writtenBytes: v.writtenBytes, sizeBytes: v.sizeBytes, leaseHolder: v.leaseHolder }]),
     ),
     usedBytes: cap ? cap.usedBytes : 0,
     capacityBytes: cap ? cap.capacityBytes : 0,
@@ -125,12 +125,16 @@ function record(s: Status, t: number): HistorySample {
   }
 }
 
-/** Sum of positive allocation growth between two samples, over volumes `pick` accepts. */
+/**
+ * Sum of written-bytes growth between two samples, over volumes `pick` accepts.
+ * A discard frees extents and lowers the count; that delta counts as zero, since
+ * a trim is not a negative write.
+ */
 function grownBytes(a: HistorySample, b: HistorySample, pick: (path: string, v: VolumeSample) => boolean): number {
   let sum = 0
   for (const [path, v] of b.volumes) {
     const before = a.volumes.get(path)
-    if (before && pick(path, v)) sum += Math.max(v.allocatedBytes - before.allocatedBytes, 0)
+    if (before && pick(path, v)) sum += Math.max(v.writtenBytes - before.writtenBytes, 0)
   }
   return sum
 }

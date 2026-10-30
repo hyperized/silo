@@ -216,12 +216,12 @@ describe('App', () => {
   })
 
   describe('history', () => {
-    let allocated = 0
+    let written = 0
     beforeEach(() => {
-      allocated = 0
+      written = 0
       fetchMock.mockImplementation(() => {
-        allocated += GIB
-        return Promise.resolve(status({ volumes: [volume({ allocatedBytes: allocated })] }))
+        written += GIB
+        return Promise.resolve(status({ volumes: [volume({ writtenBytes: written })] }))
       })
     })
 

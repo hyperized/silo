@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import type { ClusterNode, Volume } from '../api/status'
-import { node, volume } from '../test/factories'
+import { GIB, node, volume } from '../test/factories'
 import Skeleton from './Skeleton.vue'
 import VolumesPanel from './VolumesPanel.vue'
 
@@ -81,6 +81,43 @@ describe('VolumesPanel', () => {
       ]
       const w = panel({ volumes, replicationFactor: 3, sparks: { '/busy': [1, 9], '/b-quiet': [0, 0] } })
       expect(paths(w)).toEqual(['/damaged', '/degraded', '/busy', '/a-quiet', '/b-quiet'])
+    })
+  })
+
+  describe('written', () => {
+    it('labels the column Written and explains what it counts', () => {
+      const w = panel({ volumes: [volume()] })
+      const th = w.findAll('thead th').find((h) => h.text().startsWith('Written'))
+      expect(th).toBeDefined()
+      expect(w.findAll('thead th').some((h) => h.text().includes('Allocated'))).toBe(false)
+      const hint = th?.get('[role="tooltip"]')
+      expect(hint?.text()).toBe('Extents ever written; freed only on filesystem discard')
+      expect(th?.get('[aria-describedby]').attributes('aria-describedby')).toBe(hint?.attributes('id'))
+    })
+
+    it('shows the written amount as text and a neutral meter named for writes', () => {
+      const w = panel({ volumes: [volume({ path: '/full', sizeBytes: 10 * GIB, writtenBytes: 10 * GIB })] })
+      const cell = w.get('[data-label="Written"]')
+      expect(cell.text()).toContain('10 / 10 GiB')
+      const meter = cell.get('[role="meter"]')
+      expect(meter.attributes('aria-label')).toBe('Written extents of /full')
+      expect(meter.attributes('aria-valuetext')).toBe('100%, 0 B unwritten')
+      const fill = meter.get('span').classes()
+      expect(fill).toContain('bg-accent')
+      expect(fill).not.toContain('bg-crit')
+    })
+
+    it('does not move a fully written volume ahead of a degraded or busier one', () => {
+      const replicas = ['node-a', 'node-b', 'node-c']
+      const volumes = [
+        volume({ path: '/full', replicas, sizeBytes: GIB, writtenBytes: GIB }),
+        volume({ path: '/busy', replicas, sizeBytes: GIB, writtenBytes: 0 }),
+        volume({ path: '/degraded', replicas: ['node-a'], sizeBytes: GIB, writtenBytes: 0 }),
+      ]
+      const w = panel({ volumes, replicationFactor: 3, sparks: { '/busy': [0, 5] } })
+      expect(paths(w)).toEqual(['/degraded', '/busy', '/full'])
+      expect(w.get('[data-label="State"]').text()).toMatch(/^Degraded/)
+      expect(w.findAll('[data-label="State"]').at(-1)?.text()).toMatch(/^Healthy/)
     })
   })
 

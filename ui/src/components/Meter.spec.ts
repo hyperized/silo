@@ -30,6 +30,19 @@ describe('Meter', () => {
     expect(meter(used, 100).get('[role="meter"] > span').classes()).toContain(cls)
   })
 
+  it.each([50, 90, 100])('keeps a neutral meter on the accent at %i%%', (used) => {
+    const w = mount(Meter, { props: { usedBytes: used, capacityBytes: 100, label: 'Written', tone: 'neutral' } })
+    const fill = w.get('[role="meter"] > span')
+    expect(fill.classes()).toContain('bg-accent')
+    expect(fill.classes()).not.toContain('bg-crit')
+    expect(fill.classes()).not.toContain('bg-warn-bar')
+  })
+
+  it('names the remainder with the given word', () => {
+    const w = mount(Meter, { props: { usedBytes: 93, capacityBytes: 100, label: 'Written', rest: 'unwritten' } })
+    expect(w.get('[role="meter"]').attributes('aria-valuetext')).toBe('93%, 7 B unwritten')
+  })
+
   it('never reports negative free space when over capacity', () => {
     expect(meter(150, 100).get('[role="meter"]').attributes('aria-valuetext')).toBe('100%, 0 B free')
   })

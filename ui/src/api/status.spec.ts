@@ -127,23 +127,23 @@ describe('parseStatus', () => {
     })
   })
 
-  it('sorts volumes by path and computes allocated bytes', () => {
+  it('sorts volumes by path and computes written bytes', () => {
     const s = parseStatus(wire())
     expect(s.volumes.map((v) => v.path)).toEqual(['/cache', '/db'])
     expect(s.volumes[1]).toEqual({
       path: '/db',
       sizeBytes: 53687091200,
-      allocatedBytes: 1800 * 4194304,
+      writtenBytes: 1800 * 4194304,
       extentSizeBytes: 4194304,
       leaseHolder: 'csi-node-3',
       replicas: ['node-a', 'node-b', 'node-c'],
       mapDamaged: false,
       attachedHere: true,
     })
-    expect(s.volumes[0]?.allocatedBytes).toBe(0)
+    expect(s.volumes[0]?.writtenBytes).toBe(0)
   })
 
-  it('clamps allocated bytes to the volume size', () => {
+  it('clamps written bytes to the volume size', () => {
     const s = parseStatus(
       mutated((w) => {
         const v = volumes(w)[0] as Raw
@@ -151,7 +151,7 @@ describe('parseStatus', () => {
       }),
     )
     const db = s.volumes.find((v) => v.path === '/db')
-    expect(db?.allocatedBytes).toBe(db?.sizeBytes)
+    expect(db?.writtenBytes).toBe(db?.sizeBytes)
   })
 
   it('sorts nodes by id', () => {
