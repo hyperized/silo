@@ -58,8 +58,8 @@ naming the variable, so a typo cannot quietly leave a feature on.
 | `SILO_EXTENT_REAP_INTERVAL` | `15m` | Extent-map reaper sweep cadence (the GC backstop for the synchronous delete path). |
 | `SILO_EXTENT_SCRUB_INTERVAL` | `1m` | Extent-map scrubber cadence: re-replicates an idle volume's extent map to its full replica set after a node loss (the metadata analog of `SILO_SCRUB_INTERVAL`, which heals chunks). The synchronous write-path fan-out only keeps replicas in step while writes flow; a volume written once and then left idle would otherwise stay under-replicated after a later node loss. |
 | `SILO_CHUNK_GC_INTERVAL` | `10m` | Chunk garbage-collector sweep cadence. The GC reclaims chunks no live volume or file references anymore (whole-volume deletes and copy-on-write overwrite orphans) by mark-and-sweep over the cluster's live reference set. |
-| `SILO_CHUNK_GC_GRACE` | `1h` | How old an unreferenced chunk must be before the GC reclaims it. This is the safety margin for the write-then-record gap (a chunk is stored just before its reference is recorded). Keep it well above write latency plus gossip/HLC skew. |
-| `SILO_CHUNK_GC_ENABLE` | `true` | Actually delete. On by default: copy-on-write overwrites orphan chunks continuously and no other mechanism reclaims them, so a store with reclamation off does not hold steady, it fills. Set it `false` for the reporting-only **dry run**, which computes the live set and reports `silo_chunkgc_orphan_chunks` without removing anything. Dry run is worth using to validate the computation against a particular store, but it is a commissioning step rather than a resting state. A sweep also waits while this node's extent maps disagree with their replicas (`silo_chunkgc_diverged_maps`), since a keep set built from a map that missed a write omits chunks the cluster still references. |
+| `SILO_CHUNK_GC_GRACE` | `1h` | How old an unreferenced chunk must be before the GC reclaims it. This is the safety margin for the write-then-record gap (a chunk is stored just before its reference is recorded). Keep it well above write latency plus gossip/HLC skew. Half of it is also how far back a node's extent maps must match their replicas before it sweeps (see `SILO_CHUNK_GC_ENABLE`). |
+| `SILO_CHUNK_GC_ENABLE` | `true` | Actually delete. On by default: copy-on-write overwrites orphan chunks continuously and no other mechanism reclaims them, so a store with reclamation off does not hold steady, it fills. Set it `false` for the reporting-only **dry run**, which computes the live set and reports `silo_chunkgc_orphan_chunks` without removing anything. Dry run is worth using to validate the computation against a particular store, but it is a commissioning step rather than a resting state. A sweep also waits while this node's extent maps are behind their replicas (`silo_chunkgc_diverged_maps`), since a keep set built from a map that missed a write omits chunks the cluster still references. Bindings written in the last half of `SILO_CHUNK_GC_GRACE` are allowed to be missing: they can only name chunks the grace window already protects, and it is what lets the GC sweep while writes and trims are in flight. |
 | `SILO_CHUNK_GC_MAX_DELETES` | `100000` | Cap on reclamations per sweep. Only binds on a backlog: it keeps the first sweep after a long-running leak from turning into one unbounded burst of unlinks against the disk the serving path is using, draining across consecutive sweeps instead. `silo_chunkgc_deferred_chunks` reports what a sweep left behind. Negative = no cap. |
 
 ### Encryption (at rest)
@@ -1030,7 +1030,8 @@ or two.
 | `gc.running` | A sweep is in progress |
 | `gc.lastRunUnix`, `lastDurationMs` | When the last sweep finished and how long it took; `"0"` before the first sweep since start |
 | `gc.lastOrphansDeleted`, `lastBytesFreed` | What the last sweep reclaimed (bytes as stored on disk) |
-| `gc.lastError` | Empty when the last sweep completed, otherwise why it stopped or skipped |
+| `gc.lastError` | Empty when the last sweep completed, otherwise why it stopped or skipped; a skipped sweep's message starts with `skipped: ` |
+| `gc.consecutiveSkips` | How many sweeps in a row have skipped; `"0"` once a sweep completes. A sweep that fails for another reason (a list error, shutdown) leaves it as it was |
 | `volumes[].replicas` | Node ids that hold the volume's extent map, as this node's placement ring resolves them now |
 | `volumes[].mapDamaged` | This node found its copy of the volume's extent map damaged and has not rebuilt it yet (see the [runbook](runbook.md#a-volume-will-not-attach-after-an-unclean-reboot-damaged-extent-map)) |
 | `volumes[].attachedHere` | An NBD client has the volume open on this node |
@@ -1148,19 +1149,28 @@ The **CSI node plugin** serves its own series on `SILO_CSI_HTTP_ADDR`
   on a cluster whose replication factor covers every node; a persistent non-zero
   means the GC is abstaining and not reclaiming on that node.
   `silo_chunkgc_deferred_chunks` is what a sweep left for the next one after
-  spending `SILO_CHUNK_GC_MAX_DELETES`. `silo_chunkgc_diverged_maps` is 1 when a
-  node skipped a sweep because its extent maps disagreed with its replicas'; a
-  brief 1 while the extent scrubber reconciles them is normal, a persistent one
-  means reconciliation is not completing and the GC is reclaiming nothing there. Non-zero for a stretch is the backlog
+  spending `SILO_CHUNK_GC_MAX_DELETES`. Non-zero for a stretch is the backlog
   draining as intended; non-zero forever means orphans are being created faster
   than the cap reclaims them, so raise the cap or shorten the interval.
+  `silo_chunkgc_diverged_maps` is 1 when a node skipped a sweep because its
+  extent maps were behind its replicas'. A digest mismatch alone does not
+  trigger it: the GC re-probes for a second or two and then compares the
+  bindings, and only a missing binding older than half the grace window counts,
+  so live write and trim traffic does not cause skips. A persistent 1 means
+  reconciliation is not completing and the GC is reclaiming nothing there.
+  `silo_chunkgc_skipped_sweeps_total` counts every skipped sweep, for either
+  reason; the status API's `gc.consecutiveSkips` gives the current streak.
 - `silo_replication_unreferenced_skipped` and `silo_replication_incomplete_view`:
   local chunks the last scrub passed over as unreferenced, and whether it could
   filter at all. On a leaking store `unreferenced_skipped` is large and is the
   scrubber correctly declining to heal what the GC is reclaiming; it should fall
   toward zero as the GC drains. `incomplete_view` at 1 means the node cannot
   distinguish orphans from chunks bound by maps it does not hold, so it is
-  healing everything — safe, but it will fight a concurrent GC sweep.
+  healing everything — safe, but it will fight a concurrent GC sweep. A chunk
+  the GC reclaims while a scrub is partway through its walk is checked against
+  a fresh live set and passed over at debug level; the warning "scrubber could
+  not read a local chunk" is kept for chunks that are gone while something
+  still references them, which needs a look.
 - `silo_extentmap_scrub_shortfall_maps` and `silo_extentmap_scrub_repairs_total`:
   extent maps this node is responsible for that were under-replicated at the last
   scrub (gauge), and the running count of map replicas it has re-pushed to heal

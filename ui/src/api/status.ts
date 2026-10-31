@@ -34,6 +34,7 @@ export interface WireGc {
   lastOrphansDeleted?: string
   lastBytesFreed?: string
   lastError?: string
+  consecutiveSkips?: string
 }
 
 export interface WireStorage {

@@ -384,6 +384,11 @@ func TestPrintGC(t *testing.T) {
 			want: []string{"last sweep: 5m ago, did not complete: skipped: maps disagree"},
 		},
 		{
+			name: "skipped repeatedly",
+			gc:   &statusv1.GCStatus{Enabled: true, LastRunUnix: fiveMinAgo, LastError: "skipped: maps disagree", ConsecutiveSkips: 4},
+			want: []string{"did not complete: skipped: maps disagree", "skipped 4 sweeps in a row"},
+		},
+		{
 			name: "completed",
 			gc:   &statusv1.GCStatus{Enabled: true, LastRunUnix: fiveMinAgo, LastDurationMs: 1200, LastOrphansDeleted: 1, LastBytesFreed: 2048},
 			want: []string{"last sweep: 5m ago in 1.2s, 1 chunk reclaimed (2.0 KiB)"},

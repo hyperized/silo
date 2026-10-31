@@ -81,9 +81,11 @@ type ExtentRefSource interface {
 // Divergence is a transient state the extent scrubber repairs, so the GC waits
 // rather than treating it as an error. *ExtentScrubber satisfies this.
 type ExtentAgreement interface {
-	// MapsConverged reports whether every volume's map agrees across its
-	// replicas, and names one that does not when the answer is no.
-	MapsConverged(ctx context.Context, volumes map[string]struct{}) (converged bool, disagreeing string)
+	// MapsConverged reports whether every volume's local map is current enough
+	// to sweep on, and names one that is not when the answer is no. Peer
+	// bindings written at or after horizon may be missing locally without
+	// counting against convergence.
+	MapsConverged(ctx context.Context, volumes map[string]struct{}, horizon time.Time) (converged bool, disagreeing string)
 }
 
 // ChunkGC reclaims orphaned chunks — chunks no live volume or file references
@@ -108,7 +110,9 @@ type ExtentAgreement interface {
 //     extent write path acknowledges at a quorum, so a replica can miss deltas and
 //     serve a copy that looks healthy while lacking bindings its peers have. Before
 //     sweeping, the GC checks its maps agree with the other replicas' and waits for
-//     the extent scrubber to reconcile them if they do not.
+//     the extent scrubber to reconcile them if they do not. Bindings written in
+//     the last half of the grace window are allowed to be missing: they can only
+//     name chunks the grace guard already protects (see currencyHorizon).
 //
 //   - Grace. A chunk newer than the grace window is never reclaimed, covering the
 //     write-then-record gap where a freshly stored chunk's reference has not yet
@@ -149,6 +153,9 @@ type ChunkGC struct {
 	unaccounted atomic.Int64
 	deferred    atomic.Int64
 	diverged    atomic.Int64
+	// skipped counts every sweep that abstained (incomplete view or diverged
+	// maps) since the process started.
+	skipped atomic.Int64
 
 	// statusMu guards status, the run summary the operator status reads.
 	statusMu sync.Mutex
@@ -172,8 +179,13 @@ type ChunkGCStatus struct {
 	LastDeleted    int64
 	LastBytesFreed int64
 	// LastError is empty when the last sweep completed, otherwise why it
-	// stopped or abstained.
+	// stopped or abstained. Abstentions start with "skipped: "; the web UI
+	// classifies on that prefix.
 	LastError string
+	// ConsecutiveSkips is how many sweeps in a row have abstained. One or two
+	// are normal while maps reconcile; it returns to 0 when a sweep completes,
+	// and a sweep that stops for any other reason leaves it unchanged.
+	ConsecutiveSkips int64
 }
 
 // Status returns the GC's current summary. Safe for concurrent use.
@@ -186,9 +198,11 @@ func (g *ChunkGC) Status() ChunkGCStatus {
 }
 
 // sweepOutcome is what one sweep reports back to runOnce for the status.
+// skipped marks an abstention, as opposed to a sweep that ran and failed.
 type sweepOutcome struct {
 	deleted, freed int64
 	err            string
+	skipped        bool
 }
 
 // Messages for a sweep that did not complete. They stay free of volume ids:
@@ -301,12 +315,21 @@ func (g *ChunkGC) runOnce(ctx context.Context) {
 
 	end := g.now()
 	g.statusMu.Lock()
+	skips := g.status.ConsecutiveSkips
+	switch {
+	case out.skipped:
+		skips++
+		g.skipped.Add(1)
+	case out.err == "":
+		skips = 0
+	}
 	g.status = ChunkGCStatus{
-		LastRun:        end,
-		LastDuration:   end.Sub(start),
-		LastDeleted:    out.deleted,
-		LastBytesFreed: out.freed,
-		LastError:      out.err,
+		LastRun:          end,
+		LastDuration:     end.Sub(start),
+		LastDeleted:      out.deleted,
+		LastBytesFreed:   out.freed,
+		LastError:        out.err,
+		ConsecutiveSkips: skips,
 	}
 	g.statusMu.Unlock()
 }
@@ -324,7 +347,7 @@ func (g *ChunkGC) sweep(ctx context.Context) sweepOutcome {
 		g.orphans.Store(0)
 		g.lastReclaim.Store(0)
 		g.logger.Warn("chunk-gc is skipping this sweep: it does not hold the extent maps of every live volume, so some chunk references are not visible here", "unaccounted_volumes", missing)
-		return sweepOutcome{err: gcErrIncomplete}
+		return sweepOutcome{err: gcErrIncomplete, skipped: true}
 	}
 	g.incomplete.Store(0)
 
@@ -334,13 +357,13 @@ func (g *ChunkGC) sweep(ctx context.Context) sweepOutcome {
 	// like that deletes chunks the other replicas still reference, so wait for
 	// the extent scrubber to reconcile them instead.
 	if g.agreement != nil {
-		converged, disagreeing := g.agreement.MapsConverged(ctx, liveVolumes(g.ns))
+		converged, disagreeing := g.agreement.MapsConverged(ctx, liveVolumes(g.ns), g.currencyHorizon())
 		if !converged {
 			g.diverged.Store(1)
 			g.orphans.Store(0)
 			g.lastReclaim.Store(0)
 			g.logger.Warn("chunk-gc is skipping this sweep: this node's extent maps disagree with its replicas, so its view of what is still referenced may be short", "volume", disagreeing)
-			return sweepOutcome{err: gcErrDiverged}
+			return sweepOutcome{err: gcErrDiverged, skipped: true}
 		}
 	}
 	g.diverged.Store(0)
@@ -420,6 +443,18 @@ func (g *ChunkGC) sweep(ctx context.Context) sweepOutcome {
 	return sweepOutcome{deleted: reclaimed, freed: freed}
 }
 
+// currencyHorizon is how far back a replica's extent map must be complete for
+// this node to sweep on it. Chunk ids are never reused: every binding names a
+// chunk written just before the binding was recorded. A binding this node has
+// not received yet therefore names a chunk about as young as the binding, and
+// if that is younger than the grace window the sweep leaves it alone anyway.
+// The horizon sits at half the grace rather than at the full grace to leave room
+// for the write-then-record gap and for clock skew between the node that
+// stamped the binding and this one.
+func (g *ChunkGC) currencyHorizon() time.Time {
+	return g.now().Add(-g.grace / 2)
+}
+
 // MetricPrefix namespaces the chunk GC's readings.
 func (g *ChunkGC) MetricPrefix() string { return "silo_chunkgc" }
 
@@ -427,7 +462,8 @@ func (g *ChunkGC) MetricPrefix() string { return "silo_chunkgc" }
 // the reclaimable orphan count at the last complete sweep (what a dry run would
 // delete); reclaimed_total and last_reclaimed are cumulative and last-sweep
 // deletions; incomplete_view is 1 when the node abstained for an incomplete
-// view; unaccounted_volumes is how many live volumes' maps it could not see.
+// view; unaccounted_volumes is how many live volumes' maps it could not see;
+// skipped_sweeps_total counts every abstention.
 func (g *ChunkGC) CollectMetrics() []metrics.Metric {
 	labels := [][2]string{{"node", g.nodeID}}
 	return []metrics.Metric{
@@ -437,6 +473,7 @@ func (g *ChunkGC) CollectMetrics() []metrics.Metric {
 		{Name: "incomplete_view", Help: "1 when the last cycle abstained because this node does not hold every live volume's extent map.", Kind: metrics.Gauge, Value: float64(g.incomplete.Load()), Labels: labels},
 		{Name: "unaccounted_volumes", Help: "Live volumes whose extent maps this node could not see at the last cycle.", Kind: metrics.Gauge, Value: float64(g.unaccounted.Load()), Labels: labels},
 		{Name: "deferred_chunks", Help: "Reclaimable orphans the last sweep left behind after spending its per-sweep delete budget.", Kind: metrics.Gauge, Value: float64(g.deferred.Load()), Labels: labels},
+		{Name: "skipped_sweeps_total", Help: "Sweeps this node skipped because its view of the live chunks was incomplete or its extent maps were behind their replicas'.", Kind: metrics.Counter, Value: float64(g.skipped.Load()), Labels: labels},
 		{Name: "diverged_maps", Help: "1 when the last cycle abstained because this node's extent maps disagreed with its replicas'.", Kind: metrics.Gauge, Value: float64(g.diverged.Load()), Labels: labels},
 	}
 }

@@ -83,8 +83,11 @@ message GCStatus {
   int64 last_orphans_deleted = 5;
   int64 last_bytes_freed = 6;
   // last_error is empty when the last sweep completed; otherwise it says why
-  // the sweep stopped or abstained.
+  // the sweep stopped or abstained. Abstentions start with "skipped: ".
   string last_error = 7;
+  // consecutive_skips is how many sweeps in a row have abstained. It returns
+  // to 0 when a sweep completes.
+  int64 consecutive_skips = 8;
 }
 
 // StorageStatus is the responding node's local backing storage.
