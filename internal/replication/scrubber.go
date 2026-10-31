@@ -2,6 +2,7 @@ package replication
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
@@ -14,6 +15,14 @@ import (
 // DefaultScrubInterval is how often the scrubber re-checks local chunks for
 // under-replication when no interval is configured.
 const DefaultScrubInterval = 30 * time.Second
+
+// liveSetMaxAge is how stale a rebuilt live set may be before a chunk that has
+// vanished from disk forces another rebuild. A scrub cycle walks the store for
+// minutes and the chunk GC deletes during that walk, so the live set taken at
+// the start of the cycle is out of date by the time most chunks are reached.
+// Rebuilding it costs a pass over every held extent map, so one rebuild serves
+// every vanished chunk found in the next few seconds.
+const liveSetMaxAge = 10 * time.Second
 
 // ChunkCatalog is the scrubber's read view of the local store: enumerate
 // the chunks held here and load one to re-push. chunkstore.FileStore
@@ -52,6 +61,7 @@ type Scrubber struct {
 	rf       int
 	interval time.Duration
 	logger   *slog.Logger
+	now      func() time.Time
 
 	// shortfall is the number of chunks this node was responsible for healing
 	// that were under-replicated at the last completed scrub — the operator's
@@ -89,6 +99,7 @@ func NewScrubber(place Placement, catalog ChunkCatalog, ns NamespaceRefSource, e
 		rf:       rf,
 		interval: interval,
 		logger:   logger,
+		now:      time.Now,
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -156,6 +167,7 @@ func (s *Scrubber) runOnce(ctx context.Context) {
 	}
 
 	self := s.place.SelfID()
+	refs := &refCheck{s: s}
 	var short, skipped int64
 	for _, id := range ids {
 		if ctx.Err() != nil {
@@ -167,7 +179,7 @@ func (s *Scrubber) runOnce(ctx context.Context) {
 				continue // orphaned: the GC owns this one
 			}
 		}
-		if s.scrubChunk(ctx, self, id) {
+		if s.scrubChunk(ctx, self, id, refs) {
 			short++
 		}
 	}
@@ -180,7 +192,10 @@ func (s *Scrubber) runOnce(ctx context.Context) {
 // it — so exactly one node pushes, avoiding a re-replication stampede. It
 // reports whether the chunk was under-replicated (some target was missing it),
 // which the caller tallies into the shortfall gauge.
-func (s *Scrubber) scrubChunk(ctx context.Context, self, id string) (underReplicated bool) {
+//
+// refs answers whether a chunk that has disappeared from the local store is
+// still referenced.
+func (s *Scrubber) scrubChunk(ctx context.Context, self, id string, refs *refCheck) (underReplicated bool) {
 	targets := s.place.Replicas(id, s.rf)
 	myRank := indexOf(targets, self)
 	if myRank < 0 {
@@ -205,6 +220,12 @@ func (s *Scrubber) scrubChunk(ctx context.Context, self, id string) (underReplic
 		underReplicated = true
 		if !loaded {
 			d, _, err := s.catalog.Get(ctx, id)
+			if errors.Is(err, chunkstore.ErrNotFound) && !refs.referenced(id) {
+				// The chunk GC reclaimed it after this cycle's live set was
+				// built. Nobody needs it, so it is not a shortfall either.
+				s.logger.Debug("scrubber passed over a chunk reclaimed during the cycle", "chunk", id)
+				return false
+			}
 			if err != nil {
 				s.logger.Warn("scrubber could not read a local chunk to re-replicate it", "chunk", id, "error", err)
 				return underReplicated
@@ -223,6 +244,36 @@ func (s *Scrubber) scrubChunk(ctx context.Context, self, id string) (underReplic
 		s.logger.Info("scrubber re-replicated a chunk", "chunk", id, "peer", t)
 	}
 	return underReplicated
+}
+
+// refCheck answers whether a chunk is still referenced, from a live set rebuilt
+// on demand and reused for liveSetMaxAge. It belongs to one scrub cycle and is
+// not safe for concurrent use.
+type refCheck struct {
+	s     *Scrubber
+	keep  map[string]struct{}
+	built time.Time
+	// partial is true when the last rebuild could not see every live volume's
+	// extent map, so absence from keep proves nothing.
+	partial bool
+}
+
+// referenced reports whether id is bound by anything this node can see. Chunk
+// ids are never reused, so once a chunk drops out of the live set it stays out,
+// and a set built at any point after that is good enough to say so. An
+// incomplete view answers true, which keeps the warning.
+func (r *refCheck) referenced(id string) bool {
+	if r.keep == nil || r.s.now().Sub(r.built) > liveSetMaxAge {
+		var unaccounted int64
+		r.keep, unaccounted = liveSet(r.s.ns, r.s.ext)
+		r.partial = unaccounted > 0
+		r.built = r.s.now()
+	}
+	if r.partial {
+		return true
+	}
+	_, ok := r.keep[id]
+	return ok
 }
 
 // holds reports whether node holds id, via a local Stat on that peer. Any

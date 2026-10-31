@@ -524,15 +524,17 @@ func TestChunkGC_FallsBackToPerChunkDeleteWithoutBatching(t *testing.T) {
 
 // fakeAgreement stands in for the extent scrubber's map-agreement check.
 type fakeAgreement struct {
-	converged bool
-	who       string
-	calls     int
-	sawVols   map[string]struct{}
+	converged  bool
+	who        string
+	calls      int
+	sawVols    map[string]struct{}
+	sawHorizon time.Time
 }
 
-func (f *fakeAgreement) MapsConverged(_ context.Context, vols map[string]struct{}) (bool, string) {
+func (f *fakeAgreement) MapsConverged(_ context.Context, vols map[string]struct{}, horizon time.Time) (bool, string) {
 	f.calls++
 	f.sawVols = vols
+	f.sawHorizon = horizon
 	return f.converged, f.who
 }
 
@@ -716,5 +718,75 @@ func TestChunkGC_StatusRunningDuringSweep(t *testing.T) {
 	}
 	if g.Status().Running {
 		t.Error("Status after the sweep should not report Running")
+	}
+}
+
+// --- skipped-sweep accounting ------------------------------------------------
+
+// An operator needs to tell a GC that skipped once while maps caught up from
+// one that has not reclaimed anything in hours. The counter carries the history,
+// the status field the current streak, and only a completed sweep ends the
+// streak: a list failure or a shutdown says nothing about whether the maps are
+// current, so it must not reset it.
+func TestChunkGC_CountsSkippedSweeps(t *testing.T) {
+	type step struct {
+		converged  bool
+		listErr    error
+		wantStreak int64
+		wantTotal  float64
+	}
+	lister := newFakeChunkLister("o1")
+	agree := &fakeAgreement{who: "v1"}
+	g := NewChunkGC(lister, fakeNSRefs{}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog(),
+		WithExtentAgreement(agree))
+
+	for i, s := range []step{
+		{converged: false, wantStreak: 1, wantTotal: 1},
+		{converged: false, wantStreak: 2, wantTotal: 2},
+		{converged: true, listErr: errors.New("readdir boom"), wantStreak: 2, wantTotal: 2},
+		{converged: true, wantStreak: 0, wantTotal: 2},
+		{converged: false, wantStreak: 1, wantTotal: 3},
+	} {
+		agree.converged = s.converged
+		lister.listErr = s.listErr
+
+		g.runOnce(context.Background())
+
+		if got := g.Status().ConsecutiveSkips; got != s.wantStreak {
+			t.Errorf("step %d: ConsecutiveSkips = %d, want %d", i, got, s.wantStreak)
+		}
+		if got := gcMetric(t, g, "skipped_sweeps_total"); got.Value != s.wantTotal || got.Kind != metrics.Counter {
+			t.Errorf("step %d: skipped_sweeps_total = %v (%v), want counter %v", i, got.Value, got.Kind, s.wantTotal)
+		}
+	}
+}
+
+func TestChunkGC_IncompleteViewCountsAsSkipped(t *testing.T) {
+	g := NewChunkGC(newFakeChunkLister("o1"), fakeNSRefs{volumes: []string{"v1"}}, fakeExtRefs{}, "a", time.Hour, time.Hour, true, quietLog())
+
+	g.runOnce(context.Background())
+
+	if got := g.Status().ConsecutiveSkips; got != 1 {
+		t.Errorf("ConsecutiveSkips = %d, want 1", got)
+	}
+	if got := gcMetric(t, g, "skipped_sweeps_total").Value; got != 1 {
+		t.Errorf("skipped_sweeps_total = %v, want 1", got)
+	}
+}
+
+// The tolerance for missing bindings is tied to the grace window: half of it,
+// so that a binding the guard lets through names a chunk the grace guard still
+// protects, with margin for skew.
+func TestChunkGC_AsksForCurrencyAtHalfTheGrace(t *testing.T) {
+	agree := &fakeAgreement{converged: true}
+	g := NewChunkGC(newFakeChunkLister(), fakeNSRefs{}, fakeExtRefs{}, "a", 40*time.Minute, time.Hour, true, quietLog(),
+		WithExtentAgreement(agree))
+	now := time.Unix(2_000_000, 0)
+	g.now = func() time.Time { return now }
+
+	g.runOnce(context.Background())
+
+	if want := now.Add(-20 * time.Minute); !agree.sawHorizon.Equal(want) {
+		t.Errorf("horizon = %v, want %v", agree.sawHorizon, want)
 	}
 }

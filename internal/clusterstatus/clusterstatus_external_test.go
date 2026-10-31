@@ -114,7 +114,7 @@ func fullBuilder() *clusterstatus.Builder {
 		// monitor somehow held one for it.
 		clusterstatus.WithClockSkew(fakeSkew{peers: map[string]time.Duration{"silo-a": time.Hour, "silo-b": -1500 * time.Millisecond, "silo-c": 40 * time.Millisecond}, alerts: 2}),
 		clusterstatus.WithGossipHealth(fakeGossip{isolated: true, attempts: 5}),
-		clusterstatus.WithGC(fakeGC{replication.ChunkGCStatus{Enabled: true, LastRun: changed, LastDuration: 1500 * time.Millisecond, LastDeleted: 3, LastBytesFreed: 4096, LastError: "skipped"}}),
+		clusterstatus.WithGC(fakeGC{replication.ChunkGCStatus{Enabled: true, LastRun: changed, LastDuration: 1500 * time.Millisecond, LastDeleted: 3, LastBytesFreed: 4096, LastError: "skipped", ConsecutiveSkips: 2}}),
 		clusterstatus.WithMapDamage(fakeDamage{"inode-2": true}),
 		clusterstatus.WithReplicaSet(fakeReplicas{"silo-b", "silo-c"}),
 		clusterstatus.WithAttached(fakeAttached{"vols//db"}),
@@ -152,7 +152,7 @@ func TestBuilder_Build(t *testing.T) {
 		t.Errorf("health = %+v", h)
 	}
 	if gc := resp.GetGc(); !gc.GetEnabled() || gc.GetRunning() || gc.GetLastRunUnix() != changed.Unix() || gc.GetLastDurationMs() != 1500 ||
-		gc.GetLastOrphansDeleted() != 3 || gc.GetLastBytesFreed() != 4096 || gc.GetLastError() != "skipped" {
+		gc.GetLastOrphansDeleted() != 3 || gc.GetLastBytesFreed() != 4096 || gc.GetLastError() != "skipped" || gc.GetConsecutiveSkips() != 2 {
 		t.Errorf("gc = %+v", gc)
 	}
 	st := resp.GetStorage()
@@ -311,7 +311,7 @@ func TestHandler_JSONContract(t *testing.T) {
 		t.Errorf("HTTP health = %#v", h)
 	}
 	gc := body["gc"].(map[string]any)
-	for _, k := range []string{"enabled", "running", "lastRunUnix", "lastDurationMs", "lastOrphansDeleted", "lastBytesFreed", "lastError"} {
+	for _, k := range []string{"enabled", "running", "lastRunUnix", "lastDurationMs", "lastOrphansDeleted", "lastBytesFreed", "lastError", "consecutiveSkips"} {
 		if _, ok := gc[k]; !ok {
 			t.Errorf("HTTP gc is missing %q: %#v", k, gc)
 		}

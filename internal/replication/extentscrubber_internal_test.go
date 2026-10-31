@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/hyperized/silo/internal/crdt"
+	"github.com/hyperized/silo/internal/extentmap"
+	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/metrics"
 )
 
@@ -444,7 +446,7 @@ func TestExtentScrubber_MapsConverged(t *testing.T) {
 		peers := newFakeEpeers()
 		peers.statHas["b:7000"] = true
 		s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
-		if ok, who := s.MapsConverged(context.Background(), vols); !ok {
+		if ok, who := s.MapsConverged(context.Background(), vols, time.Now()); !ok {
 			t.Errorf("MapsConverged = false (%q), want true", who)
 		}
 	})
@@ -454,8 +456,11 @@ func TestExtentScrubber_MapsConverged(t *testing.T) {
 		peers := newFakeEpeers()
 		peers.statHas["b:7000"] = true
 		peers.statDiverged["b:7000"] = true
+		// An old binding this node never received: the replica really is behind.
+		peers.fetchRes["b:7000"] = []crdt.MapEntry[uint64, string]{{Key: 7, Value: "c7", TS: hlc.Timestamp{Wall: 1}}}
 		s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
-		ok, who := s.MapsConverged(context.Background(), vols)
+		s.settleDelay = time.Millisecond
+		ok, who := s.MapsConverged(context.Background(), vols, time.Now())
 		if ok || who != "v1" {
 			t.Errorf("MapsConverged = (%v,%q), want (false,\"v1\")", ok, who)
 		}
@@ -466,7 +471,7 @@ func TestExtentScrubber_MapsConverged(t *testing.T) {
 		peers := newFakeEpeers()
 		peers.statErr["b:7000"] = errors.New("unreachable")
 		s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
-		if ok, _ := s.MapsConverged(context.Background(), vols); ok {
+		if ok, _ := s.MapsConverged(context.Background(), vols, time.Now()); ok {
 			t.Error("an unreachable replica must not read as agreement: the sweep would run half-blind")
 		}
 	})
@@ -478,7 +483,7 @@ func TestExtentScrubber_MapsConverged(t *testing.T) {
 		s := NewExtentScrubber(place, cat, peers, 2, time.Hour, quietLog())
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if ok, _ := s.MapsConverged(ctx, vols); ok {
+		if ok, _ := s.MapsConverged(ctx, vols, time.Now()); ok {
 			t.Error("a cancelled check must not report convergence")
 		}
 	})
@@ -499,8 +504,11 @@ func TestExtentScrubber_SkipsPeersWithNoAdvertisedAddress(t *testing.T) {
 	if len(peers.snapApplied()) != 0 {
 		t.Errorf("nothing can be pushed to a peer with no address: %+v", peers.snapApplied())
 	}
-	if ok, _ := s.MapsConverged(context.Background(), map[string]struct{}{"v1": {}}); ok {
+	if ok, _ := s.MapsConverged(context.Background(), map[string]struct{}{"v1": {}}, time.Now()); ok {
 		t.Error("a peer that cannot be reached must not read as agreement")
+	}
+	if _, known := s.agrees(context.Background(), "b", "v1"); known {
+		t.Error("agreement with a peer that has no address cannot be known")
 	}
 }
 
@@ -584,5 +592,137 @@ func TestExtentScrubber_EstablishesAnEmptyMapOnAPeerThatHasNone(t *testing.T) {
 	}
 	if !rec.ensure {
 		t.Error("the push must set ensure, or the peer creates nothing")
+	}
+}
+
+// scriptedProbe answers Stat from a script, one response per call with the
+// last repeated, so a test can make a replica's digest move between probes.
+type scriptedProbe struct {
+	mu       sync.Mutex
+	stats    []scriptedStat
+	statN    int
+	fetch    []crdt.MapEntry[uint64, string]
+	fetchErr error
+	fetchN   int
+}
+
+type scriptedStat struct {
+	digest []byte
+	err    error
+}
+
+func (p *scriptedProbe) Stat(context.Context, string, string) (bool, int64, []byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	r := p.stats[min(p.statN, len(p.stats)-1)]
+	p.statN++
+	if r.err != nil {
+		return false, 0, nil, r.err
+	}
+	return true, 1, r.digest, nil
+}
+
+func (p *scriptedProbe) Fetch(context.Context, string, string) ([]crdt.MapEntry[uint64, string], error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fetchN++
+	return p.fetch, p.fetchErr
+}
+
+func (p *scriptedProbe) Apply(context.Context, string, string, []crdt.MapEntry[uint64, string], bool) error {
+	return nil
+}
+
+// The GC's currency check on a cluster that is being written to. A replica's
+// digest can differ for the few milliseconds a quorum-acknowledged delta takes
+// to reach it, and that must not cost a sweep. A replica that is missing a
+// binding old enough to name a chunk past the grace window must still stop it.
+func TestExtentScrubber_MapsConvergedToleratesInFlightDeltas(t *testing.T) {
+	horizon := time.Unix(10_000, 0)
+	old := hlc.Timestamp{Wall: horizon.Add(-time.Minute).UnixNano(), Node: "node-b"}
+	older := hlc.Timestamp{Wall: horizon.Add(-2 * time.Minute).UnixNano(), Node: "node-a"}
+	recent := hlc.Timestamp{Wall: horizon.Add(time.Second).UnixNano(), Node: "node-b"}
+	local := []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c0", TS: older}}
+	differ := scriptedStat{digest: otherDigest}
+	agree := scriptedStat{digest: sameDigest}
+	down := scriptedStat{err: errors.New("unreachable")}
+
+	for _, tc := range []struct {
+		name      string
+		stats     []scriptedStat
+		fetch     []crdt.MapEntry[uint64, string]
+		fetchErr  error
+		cancel    bool
+		want      bool
+		wantStats int
+		wantFetch int
+	}{
+		{name: "agreeing replica costs one probe", stats: []scriptedStat{agree}, want: true, wantStats: 1},
+		{name: "mismatch that settles", stats: []scriptedStat{differ, differ, agree}, want: true, wantStats: 3},
+		{
+			name:  "persistent mismatch, peer only ahead by recent bindings",
+			stats: []scriptedStat{differ},
+			fetch: []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c0", TS: older}, {Key: 1, Value: "c1", TS: recent}},
+			want:  true, wantStats: 1 + convergeSettleProbes, wantFetch: 1,
+		},
+		{
+			name:  "persistent mismatch, peer holds an old binding this node lacks",
+			stats: []scriptedStat{differ},
+			fetch: []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c0", TS: older}, {Key: 1, Value: "c1", TS: old}},
+			want:  false, wantStats: 1 + convergeSettleProbes, wantFetch: 1,
+		},
+		{
+			name:  "persistent mismatch, peer has a newer old binding for a held extent",
+			stats: []scriptedStat{differ},
+			fetch: []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c0b", TS: old}},
+			want:  false, wantStats: 1 + convergeSettleProbes, wantFetch: 1,
+		},
+		{
+			name:  "persistent mismatch, this node already superseded the peer's binding",
+			stats: []scriptedStat{differ},
+			fetch: []crdt.MapEntry[uint64, string]{{Key: 0, Value: "stale", TS: hlc.Timestamp{Wall: 1}}},
+			want:  true, wantStats: 1 + convergeSettleProbes, wantFetch: 1,
+		},
+		{
+			name:  "persistent mismatch, the only missing binding is an old trim",
+			stats: []scriptedStat{differ},
+			fetch: []crdt.MapEntry[uint64, string]{{Key: 0, Value: "c0", TS: older}, {Key: 2, Value: extentmap.Unmapped, TS: old}},
+			want:  true, wantStats: 1 + convergeSettleProbes, wantFetch: 1,
+		},
+		{
+			name:  "persistent mismatch and the peer's copy cannot be fetched",
+			stats: []scriptedStat{differ}, fetchErr: errors.New("stream reset"),
+			want: false, wantStats: 1 + convergeSettleProbes, wantFetch: 1,
+		},
+		{name: "peer unreachable", stats: []scriptedStat{down}, want: false, wantStats: 1},
+		{name: "peer drops out while settling", stats: []scriptedStat{differ, down}, want: false, wantStats: 2},
+		{name: "cancelled while settling", stats: []scriptedStat{differ}, cancel: true, want: false, wantStats: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			place := &fakeMetaPlace{self: "a", replicas: []string{"a", "b"}}
+			cat := &fakeExtCatalog{vols: []string{"v1"}, snap: map[string][]crdt.MapEntry[uint64, string]{"v1": local}}
+			probe := &scriptedProbe{stats: tc.stats, fetch: tc.fetch, fetchErr: tc.fetchErr}
+			s := NewExtentScrubber(place, cat, probe, 2, time.Hour, quietLog())
+			s.settleDelay = time.Millisecond
+			ctx := context.Background()
+			if tc.cancel {
+				s.settleDelay = time.Hour
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 10*time.Millisecond)
+				defer cancel()
+			}
+
+			got, who := s.MapsConverged(ctx, map[string]struct{}{"v1": {}}, horizon)
+
+			if got != tc.want {
+				t.Errorf("MapsConverged = (%v,%q), want %v", got, who, tc.want)
+			}
+			if !got && who != "v1" {
+				t.Errorf("disagreeing volume = %q, want v1", who)
+			}
+			if probe.statN != tc.wantStats || probe.fetchN != tc.wantFetch {
+				t.Errorf("probes: %d stats, %d fetches; want %d, %d", probe.statN, probe.fetchN, tc.wantStats, tc.wantFetch)
+			}
+		})
 	}
 }

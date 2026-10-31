@@ -10,6 +10,7 @@ import (
 
 	"github.com/hyperized/silo/internal/crdt"
 	"github.com/hyperized/silo/internal/extentmap"
+	"github.com/hyperized/silo/internal/hlc"
 	"github.com/hyperized/silo/internal/metrics"
 )
 
@@ -20,6 +21,17 @@ import (
 // chunk data, so a slower cadence still heals a node loss promptly without
 // needless cross-node Stat traffic on an idle cluster.
 const DefaultExtentScrubInterval = time.Minute
+
+// convergeSettleProbes and defaultConvergeSettle bound how long MapsConverged
+// waits for a mismatched replica to catch up before it looks at the bindings
+// themselves. The write path acknowledges a delta once a majority holds it, so
+// the remaining replica normally trails by milliseconds. Three probes half a
+// second apart cover that with room to spare and add at most 1.5 s per
+// mismatched replica to a sweep. Replicas that already agree cost nothing extra.
+const (
+	convergeSettleProbes  = 3
+	defaultConvergeSettle = 500 * time.Millisecond
+)
 
 // ExtentCatalog is the scrubber's read/repair view of the local extent-map
 // store: enumerate the volumes whose maps live here, fingerprint or snapshot one
@@ -62,6 +74,9 @@ type ExtentScrubber struct {
 	rf       int
 	interval time.Duration
 	logger   *slog.Logger
+	// settleDelay is the pause between MapsConverged's re-probes of a mismatched
+	// replica. Tests shorten it.
+	settleDelay time.Duration
 
 	// shortfall is the number of extent maps this node was responsible for
 	// healing that were under-replicated at the last completed scrub. repairs is
@@ -85,14 +100,15 @@ func NewExtentScrubber(place MetaPlacement, catalog ExtentCatalog, probe ExtentR
 		interval = DefaultExtentScrubInterval
 	}
 	return &ExtentScrubber{
-		place:    place,
-		catalog:  catalog,
-		probe:    probe,
-		rf:       rf,
-		interval: interval,
-		logger:   logger,
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		place:       place,
+		catalog:     catalog,
+		probe:       probe,
+		rf:          rf,
+		interval:    interval,
+		logger:      logger,
+		settleDelay: defaultConvergeSettle,
+		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -321,6 +337,11 @@ func (s *ExtentScrubber) agrees(ctx context.Context, node, volumeID string) (sam
 	if !ok {
 		return false, false
 	}
+	return s.agreesAt(ctx, addr, volumeID)
+}
+
+// agreesAt is agrees for a peer whose data address is already resolved.
+func (s *ExtentScrubber) agreesAt(ctx context.Context, addr, volumeID string) (same, known bool) {
 	has, count, digest, err := s.probe.Stat(ctx, addr, volumeID)
 	if err != nil || !has {
 		return false, false
@@ -360,16 +381,27 @@ func (s *ExtentScrubber) CollectMetrics() []metrics.Metric {
 	}
 }
 
-// MapsConverged reports whether every named volume's extent map agrees across
-// the replicas that should hold it, and names one that does not when the answer
-// is no. It is the chunk GC's guard: a keep set built from a map that has drifted
-// behind its peers omits chunks the cluster still references, and sweeping on
-// that deletes live data.
+// MapsConverged reports whether every named volume's extent map is current
+// enough on this node for the chunk GC to sweep, and names one that is not when
+// the answer is no. A keep set built from a map that has drifted behind its
+// peers omits chunks the cluster still references, and sweeping on that deletes
+// live data.
 //
-// A volume whose agreement cannot be established — an unreachable peer, or one
-// too old to fingerprint its map — counts as not converged. The cost of waiting
-// is a delayed sweep; the cost of guessing is deleted data.
-func (s *ExtentScrubber) MapsConverged(ctx context.Context, volumes map[string]struct{}) (bool, string) {
+// Digests that differ are not proof of that. With writes or trims flowing, a
+// replica is always a few milliseconds behind the quorum that acknowledged the
+// delta, and a single probe catches that gap often enough on a busy cluster to
+// block every sweep. So a mismatch is re-probed for a short while first, and one
+// that does not settle is judged on the bindings: the local copy is current
+// enough when it holds every chunk binding the peer has that was written before
+// horizon. A binding newer than that can only name a chunk younger than the
+// GC's grace window, which the sweep will not touch, so missing it is harmless.
+// Older missing bindings mean this replica really is behind, and the GC waits
+// for the extent scrubber to reconcile it.
+//
+// A volume whose currency cannot be established (an unreachable peer, one that
+// cannot be fingerprinted or fetched) counts as not converged. The cost of
+// waiting is a delayed sweep; the cost of guessing is deleted data.
+func (s *ExtentScrubber) MapsConverged(ctx context.Context, volumes map[string]struct{}, horizon time.Time) (bool, string) {
 	self := s.place.SelfID()
 	for v := range volumes {
 		if ctx.Err() != nil {
@@ -379,11 +411,92 @@ func (s *ExtentScrubber) MapsConverged(ctx context.Context, volumes map[string]s
 			if t == self {
 				continue
 			}
-			same, known := s.agrees(ctx, t, v)
-			if !known || !same {
+			if !s.currentWith(ctx, t, v, horizon) {
 				return false, v
 			}
 		}
 	}
 	return true, ""
+}
+
+// currentWith runs the per-replica part of MapsConverged. The common case, an
+// agreeing replica, costs exactly one Stat.
+func (s *ExtentScrubber) currentWith(ctx context.Context, node, volumeID string, horizon time.Time) bool {
+	addr, ok := s.place.DataAddr(node)
+	if !ok {
+		return false
+	}
+	same, known := s.agreesAt(ctx, addr, volumeID)
+	if !known {
+		return false
+	}
+	if !same {
+		same, known = s.settle(ctx, addr, volumeID)
+	}
+	switch {
+	case !known:
+		return false
+	case same:
+		return true
+	}
+	return s.coversPeer(ctx, addr, node, volumeID, horizon)
+}
+
+// settle re-probes a mismatched replica a few times and reports whether the two
+// copies came to agree, which is what an in-flight delta looks like. known is
+// false when a probe failed or ctx ended, and then same means nothing.
+func (s *ExtentScrubber) settle(ctx context.Context, addr, volumeID string) (same, known bool) {
+	for range convergeSettleProbes {
+		if !pause(ctx, s.settleDelay) {
+			return false, false
+		}
+		if same, known = s.agreesAt(ctx, addr, volumeID); !known || same {
+			return same, known
+		}
+	}
+	return false, true
+}
+
+// coversPeer reports whether the local map holds every chunk binding of node's
+// copy that is older than horizon, either as the same binding or superseded by a
+// newer one. Unmapped bindings never count against it: missing a trim keeps the
+// old chunk referenced here, which wastes space until the scrubber catches up
+// but cannot delete anything.
+func (s *ExtentScrubber) coversPeer(ctx context.Context, addr, node, volumeID string, horizon time.Time) bool {
+	peer, err := s.probe.Fetch(ctx, addr, volumeID)
+	if err != nil {
+		s.logger.Debug("extent map currency check could not fetch a replica's copy", "volume", volumeID, "peer", node, "error", err)
+		return false
+	}
+	// Snapshot after the fetch, so deltas that were in flight while the peer's
+	// copy streamed have had the longest possible time to land here.
+	local := s.catalog.Snapshot(volumeID)
+	have := make(map[uint64]hlc.Timestamp, len(local))
+	for _, e := range local {
+		have[e.Key] = e.TS
+	}
+	cutoff := horizon.UnixNano()
+	for _, e := range peer {
+		if e.Value == extentmap.Unmapped || e.TS.Wall >= cutoff {
+			continue
+		}
+		if ts, ok := have[e.Key]; ok && ts.Compare(e.TS) >= 0 {
+			continue
+		}
+		s.logger.Debug("extent map currency check found an old binding this node lacks", "volume", volumeID, "peer", node, "extent", e.Key)
+		return false
+	}
+	return true
+}
+
+// pause waits d or until ctx is done, reporting false in the latter case.
+func pause(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

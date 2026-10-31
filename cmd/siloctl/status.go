@@ -132,6 +132,10 @@ func printGC(w io.Writer, gc *statusv1.GCStatus) {
 			humanizeAge(gc.GetLastRunUnix()), time.Duration(gc.GetLastDurationMs())*time.Millisecond,
 			gc.GetLastOrphansDeleted(), pluralCount(gc.GetLastOrphansDeleted()), humanizeBytes(gc.GetLastBytesFreed()))
 	}
+	// One skip is routine while extent maps reconcile; a streak is the signal.
+	if n := gc.GetConsecutiveSkips(); n > 1 {
+		fmt.Fprintf(w, "  skipped %d sweeps in a row\n", n)
+	}
 }
 
 // nodeCapacity is capacitySummary plus a marker when the node advertised disk
