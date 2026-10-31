@@ -312,9 +312,11 @@ describe('useHistory: runs', () => {
     // Recorded even though this status arrives too soon to be sampled.
     await feed(withGc(T0 + 6500, { lastError: 'disk gone', lastBytesFreed: 7, lastOrphansDeleted: 3, lastDurationMs: 9 }), T0 + 7000)
     await feed(status({ gc: null }), T0 + 9000)
+    await feed(withGc(T0 + 9500, { lastError: 'skipped: maps disagree', lastBytesFreed: 0, lastOrphansDeleted: 0, lastDurationMs: 4 }), T0 + 10_000)
     expect(h.gcRuns.value).toEqual([
-      { at: T0 - 5000, ok: true, bytesFreed: 1.2 * GIB, orphans: 312, durationMs: 1840 },
-      { at: T0 + 6500, ok: false, bytesFreed: 7, orphans: 3, durationMs: 9 },
+      { at: T0 - 5000, outcome: 'ok', bytesFreed: 1.2 * GIB, orphans: 312, durationMs: 1840 },
+      { at: T0 + 6500, outcome: 'failed', bytesFreed: 7, orphans: 3, durationMs: 9 },
+      { at: T0 + 9500, outcome: 'skipped', bytesFreed: 0, orphans: 0, durationMs: 4 },
     ])
   })
 

@@ -45,6 +45,7 @@ export const GC_PRESENTATION: Readonly<Record<GcKind, Presentation>> = {
   running: { label: 'Running', tone: 'good', icon: 'sync' },
   never: { label: 'Never', tone: 'neutral', icon: 'clock', tip: 'Never: no run since silod started' },
   ok: { label: 'OK', tone: 'good', icon: 'check' },
+  skipped: { label: 'Skipped', tone: 'neutral', icon: 'clock', tip: 'Skipped: waiting for extent maps to agree' },
   failed: { label: 'Failed', tone: 'warn', icon: 'alert' },
 }
 

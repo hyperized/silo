@@ -42,7 +42,7 @@ VITE_MOCK=1 npm run dev
 or open the dev server with `?mock=<scenario>`, where the scenario is one of
 `healthy`, `attention`, `degraded`, `incident`, `empty`, `unconfigured` or `error`.
 `incident` is the picture from the design mockup: one node at 84 % disk, one degraded
-volume and a GC run that fails now and then. The sample data changes over time (disks
+volume, and a GC run that now and then fails or is skipped. The sample data changes over time (disks
 fill, volumes take writes, clocks drift a little, GC runs every minute and backups every
 two), so the charts have something to draw. `VITE_MOCK=1` or
 `?mock=1` alone shows `attention`, which puts something in every panel and the issue

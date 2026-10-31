@@ -9,7 +9,7 @@ import { computed } from 'vue'
 import type { Gc } from '../api/status'
 import type { GcRun } from '../composables/useHistory'
 import { formatBytes, formatClock, formatCount, formatMillis } from '../lib/format'
-import { gcKind } from '../lib/health'
+import { gcKind, gcSkipReason } from '../lib/health'
 import { GC_PRESENTATION } from '../lib/presentation'
 import Card from './Card.vue'
 import { RunBars } from './charts'
@@ -27,17 +27,20 @@ const props = defineProps<{
 
 const kind = computed(() => (props.gc ? gcKind(props.gc) : null))
 
+const OUTCOME_LABEL = { skipped: 'skipped', failed: 'failed' } as const
+
 const bars = computed(() =>
   props.runs.map((r) => ({
     value: r.bytesFreed,
-    ok: r.ok,
-    label: `${formatClock(new Date(r.at))}, ${r.ok ? `freed ${formatBytes(r.bytesFreed)}` : 'failed'}`,
+    ok: r.outcome === 'ok',
+    skipped: r.outcome === 'skipped',
+    label: `${formatClock(new Date(r.at))}, ${r.outcome === 'ok' ? `freed ${formatBytes(r.bytesFreed)}` : OUTCOME_LABEL[r.outcome]}`,
   })),
 )
 
 // The latest run's error is printed in full below; this names the older failures the bars show.
 const earlierFailures = computed(() => {
-  const older = props.runs.slice(0, -1).filter((r) => !r.ok)
+  const older = props.runs.slice(0, -1).filter((r) => r.outcome === 'failed')
   if (older.length === 0) return ''
   const at = older.map((r) => formatClock(new Date(r.at))).join(', ')
   return `${String(older.length)} of ${String(props.runs.length)} runs failed, at ${at}.`
@@ -118,7 +121,17 @@ const earlierFailures = computed(() => {
         {{ earlierFailures }}
       </p>
       <div
-        v-if="gc.lastError"
+        v-if="kind === 'skipped'"
+        class="text-[11.5px]"
+        data-testid="gc-skipped"
+      >
+        <p class="text-ink-3">
+          silod skipped the latest sweep. GC holds off until this node's extent maps agree, and the skip clears by itself.
+        </p>
+        <code class="mt-0.5 block font-mono text-[11.5px] leading-[17px] break-words whitespace-pre-wrap text-ink">{{ gcSkipReason(gc.lastError) }}</code>
+      </div>
+      <div
+        v-else-if="gc.lastError"
         class="text-[11.5px]"
       >
         <p class="text-warn">
