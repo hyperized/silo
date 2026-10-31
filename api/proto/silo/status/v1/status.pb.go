@@ -358,10 +358,13 @@ type GCStatus struct {
 	LastOrphansDeleted int64 `protobuf:"varint,5,opt,name=last_orphans_deleted,json=lastOrphansDeleted,proto3" json:"last_orphans_deleted,omitempty"`
 	LastBytesFreed     int64 `protobuf:"varint,6,opt,name=last_bytes_freed,json=lastBytesFreed,proto3" json:"last_bytes_freed,omitempty"`
 	// last_error is empty when the last sweep completed; otherwise it says why
-	// the sweep stopped or abstained.
-	LastError     string `protobuf:"bytes,7,opt,name=last_error,json=lastError,proto3" json:"last_error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// the sweep stopped or abstained. Abstentions start with "skipped: ".
+	LastError string `protobuf:"bytes,7,opt,name=last_error,json=lastError,proto3" json:"last_error,omitempty"`
+	// consecutive_skips is how many sweeps in a row have abstained. It returns
+	// to 0 when a sweep completes.
+	ConsecutiveSkips int64 `protobuf:"varint,8,opt,name=consecutive_skips,json=consecutiveSkips,proto3" json:"consecutive_skips,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *GCStatus) Reset() {
@@ -441,6 +444,13 @@ func (x *GCStatus) GetLastError() string {
 		return x.LastError
 	}
 	return ""
+}
+
+func (x *GCStatus) GetConsecutiveSkips() int64 {
+	if x != nil {
+		return x.ConsecutiveSkips
+	}
+	return 0
 }
 
 // StorageStatus is the responding node's local backing storage.
@@ -958,7 +968,7 @@ const file_silo_status_v1_status_proto_rawDesc = "" +
 	"\x0frejoin_attempts\x18\x04 \x01(\x04R\x0erejoinAttempts\x12\"\n" +
 	"\rclock_skew_ms\x18\x05 \x01(\x03R\vclockSkewMs\x12*\n" +
 	"\x11clock_skew_alerts\x18\x06 \x01(\x04R\x0fclockSkewAlerts\x12!\n" +
-	"\fstarted_unix\x18\a \x01(\x03R\vstartedUnix\"\x87\x02\n" +
+	"\fstarted_unix\x18\a \x01(\x03R\vstartedUnix\"\xb4\x02\n" +
 	"\bGCStatus\x12\x18\n" +
 	"\aenabled\x18\x01 \x01(\bR\aenabled\x12\x18\n" +
 	"\arunning\x18\x02 \x01(\bR\arunning\x12\"\n" +
@@ -967,7 +977,8 @@ const file_silo_status_v1_status_proto_rawDesc = "" +
 	"\x14last_orphans_deleted\x18\x05 \x01(\x03R\x12lastOrphansDeleted\x12(\n" +
 	"\x10last_bytes_freed\x18\x06 \x01(\x03R\x0elastBytesFreed\x12\x1d\n" +
 	"\n" +
-	"last_error\x18\a \x01(\tR\tlastError\"\xba\x01\n" +
+	"last_error\x18\a \x01(\tR\tlastError\x12+\n" +
+	"\x11consecutive_skips\x18\b \x01(\x03R\x10consecutiveSkips\"\xba\x01\n" +
 	"\rStorageStatus\x12\x19\n" +
 	"\bdata_dir\x18\x01 \x01(\tR\adataDir\x12%\n" +
 	"\x0ecapacity_bytes\x18\x02 \x01(\x03R\rcapacityBytes\x12\x1d\n" +

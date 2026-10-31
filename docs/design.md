@@ -88,6 +88,22 @@ zero-filled reads and a way to delete live data. The extent scrubber reconciles
 divergent copies in both directions, and the chunk GC waits for that to finish
 rather than sweeping on a view it cannot trust.
 
+The GC has to tell a replica that stays behind from one that is a few
+milliseconds behind because a write is still on its way to it. While a volume
+is being written or trimmed, two healthy replicas' digests differ for that long
+after every delta, and a GC that skipped on any mismatch would skip most sweeps
+on a busy cluster. So it re-probes a mismatched replica for a second or two
+first. If the copies still differ, it fetches the peer's map and checks the one
+thing deletion depends on: the local map must hold every chunk binding the peer
+has that is older than half the grace window. A newer binding names a chunk at
+most about that old, since chunk ids are never reused and a binding is recorded
+right after its chunk is written, and the grace window already keeps the sweep
+away from chunks that young. A missed trim only keeps garbage around. A short
+lag therefore cannot cause a wrong delete and the GC sweeps through it. A
+missing binding older than the horizon means the replica really is behind, and
+the GC waits for the extent scrubber, which repairs that kind of divergence
+every interval.
+
 **A damaged local map is rebuilt from every replica, never from one.** Each node
 saves its maps under `<DATA_DIR>/extents/` as a snapshot plus an append-only
 log: a write appends a checksummed record to the log and fsyncs it, and the

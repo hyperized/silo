@@ -1,10 +1,13 @@
 package replication
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -470,5 +473,82 @@ func TestScrubber_ClearsIncompleteViewOnceMapsArrive(t *testing.T) {
 	}
 	if got := scrubberMetric(t, s, "unreferenced_skipped").Value; got != 1 {
 		t.Errorf("unreferenced_skipped = %v, want 1 (c1 is bound by nothing)", got)
+	}
+}
+
+// --- chunks reclaimed mid-cycle ---------------------------------------------
+
+// seqNSRefs returns a different namespace view on each call (the last one
+// repeats), standing in for references that change while a scrub cycle walks
+// the store.
+type seqNSRefs struct {
+	mu    sync.Mutex
+	views []fakeNSRefs
+	calls int
+}
+
+func (f *seqNSRefs) LiveChunkRefs() (map[string]struct{}, map[string]struct{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v := f.views[min(f.calls, len(f.views)-1)]
+	f.calls++
+	return v.LiveChunkRefs()
+}
+
+// The chunk GC deletes while the scrubber is partway through a cycle whose live
+// set was built minutes earlier. A chunk that vanished because it was reclaimed
+// is not a problem and must not be reported as one. A chunk that vanished while
+// something still references it is, and keeps its warning.
+func TestScrubber_VanishedChunk(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		later     fakeNSRefs // the namespace as seen after the cycle started
+		wantWarn  bool
+		wantShort float64
+	}{
+		{name: "reclaimed by the GC", later: fakeNSRefs{}, wantWarn: false, wantShort: 0},
+		{name: "still referenced", later: fakeNSRefs{chunks: []string{"c1"}}, wantWarn: true, wantShort: 1},
+		{name: "view became incomplete", later: fakeNSRefs{volumes: []string{"v-unheld"}}, wantWarn: true, wantShort: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			place := stubPlace{self: "a", replicas: []string{"a", "b"}, addrs: map[string]string{"a": "a:7000", "b": "b:7000"}}
+			cat := &fakeCatalog{ids: []string{"c1"}, getErr: map[string]error{"c1": fmt.Errorf("open: %w", chunkstore.ErrNotFound)}}
+			ns := &seqNSRefs{views: []fakeNSRefs{{chunks: []string{"c1"}}, tc.later}}
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+			s := NewScrubber(place, cat, ns, fakeExtRefs{}, &fakeProbe{}, 2, time.Hour, logger)
+
+			s.runOnce(context.Background())
+
+			if got := strings.Contains(buf.String(), "could not read a local chunk"); got != tc.wantWarn {
+				t.Errorf("warned = %v, want %v; log: %s", got, tc.wantWarn, buf.String())
+			}
+			if got := scrubberMetric(t, s, "shortfall_chunks").Value; got != tc.wantShort {
+				t.Errorf("shortfall = %v, want %v", got, tc.wantShort)
+			}
+		})
+	}
+}
+
+// Rebuilding the live set walks every held extent map, and a GC sweep can make
+// hundreds of chunks vanish in a minute, so one rebuild has to serve the ones
+// that follow shortly after it.
+func TestRefCheck_ReusesRecentLiveSet(t *testing.T) {
+	ns := &seqNSRefs{views: []fakeNSRefs{{chunks: []string{"c1"}}}}
+	s := NewScrubber(stubPlace{self: "a"}, &fakeCatalog{}, ns, fakeExtRefs{}, &fakeProbe{}, 1, time.Hour, nopLogger())
+	now := time.Unix(1_000, 0)
+	s.now = func() time.Time { return now }
+	r := &refCheck{s: s}
+
+	if !r.referenced("c1") || r.referenced("c2") {
+		t.Fatal("referenced must answer from the live set")
+	}
+	if ns.calls != 1 {
+		t.Errorf("built the live set %d times for two lookups, want 1", ns.calls)
+	}
+	now = now.Add(liveSetMaxAge + time.Second)
+	r.referenced("c2")
+	if ns.calls != 2 {
+		t.Errorf("a live set older than %v was reused; builds = %d, want 2", liveSetMaxAge, ns.calls)
 	}
 }

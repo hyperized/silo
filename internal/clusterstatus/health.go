@@ -152,6 +152,7 @@ func gcStatus(r GCReporter) *statusv1.GCStatus {
 		LastOrphansDeleted: st.LastDeleted,
 		LastBytesFreed:     st.LastBytesFreed,
 		LastError:          st.LastError,
+		ConsecutiveSkips:   st.ConsecutiveSkips,
 	}
 	// time.Time{}.Unix() is a large negative number; the contract is 0.
 	if !st.LastRun.IsZero() {
