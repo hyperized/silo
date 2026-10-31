@@ -449,9 +449,11 @@ describe('mockWire over time', () => {
       expect(h.findings.map((f) => f.text)).toContain('1 volume degraded')
     })
 
-    it('fails GC on every seventh run only', () => {
+    it('fails one GC run in seven and skips another', () => {
       expect(at('incident', 3 * 60).gc?.lastError).toBe('lease scan timed out after 30 s')
       expect(at('incident', 4 * 60).gc?.lastError).toBe('')
+      expect(at('incident', 5 * 60).gc?.lastError).toBe("skipped: this node's extent maps disagree with their replicas; wait for the extent scrubber to reconcile them")
+      expect(at('incident', 12 * 60).gc?.lastError).toMatch(/^skipped: /)
       expect(at('incident', 10 * 60).gc?.lastError).toBe('lease scan timed out after 30 s')
       expect(at('incident', 0).gc?.lastError).toBe('')
     })

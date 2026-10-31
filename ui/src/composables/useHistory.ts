@@ -1,6 +1,6 @@
 import { computed, ref, shallowRef, watch, type ComputedRef, type Ref } from 'vue'
 import type { NodeState, Status } from '../api/status'
-import { deriveHealth } from '../lib/health'
+import { deriveHealth, gcOutcome, type GcOutcome } from '../lib/health'
 import { linearTrend, bucketMeans, fillGaps, RingBuffer, window, type Sample } from '../lib/series'
 
 /** One hour of history at the default sampling interval. */
@@ -60,7 +60,7 @@ export interface HistorySample {
 
 export interface GcRun {
   at: number
-  ok: boolean
+  outcome: GcOutcome
   bytesFreed: number
   orphans: number
   durationMs: number
@@ -187,7 +187,7 @@ export function useHistory(
     if (g && gcAt !== undefined && gcAt !== gcBuffer.last()?.at) {
       gcBuffer.push({
         at: gcAt,
-        ok: g.lastError === '',
+        outcome: gcOutcome(g.lastError),
         bytesFreed: g.lastBytesFreed,
         orphans: g.lastOrphansDeleted,
         durationMs: g.lastDurationMs,

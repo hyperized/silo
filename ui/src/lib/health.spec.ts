@@ -6,6 +6,8 @@ import {
   fillLevel,
   GC_NEVER_AFTER_MS,
   gcKind,
+  gcOutcome,
+  gcSkipReason,
   maxSkewMs,
   nodeLevel,
   OVERDUE_GRACE_MS,
@@ -264,10 +266,37 @@ describe('gcKind', () => {
     ['disabled, even with an error', gc({ enabled: false, lastError: 'x' }), 'off'],
     ['running, even after a failure', gc({ running: true, lastError: 'x' }), 'running'],
     ['failed', gc({ lastError: 'x' }), 'failed'],
+    ['skipped', gc({ lastError: 'skipped: maps disagree' }), 'skipped'],
+    ['running, even after a skip', gc({ running: true, lastError: 'skipped: maps disagree' }), 'running'],
     ['ok', gc(), 'ok'],
     ['never', gc({ lastRunAt: null }), 'never'],
   ])('%s', (_n, g, want) => {
     expect(gcKind(g)).toBe(want)
+  })
+})
+
+describe('gcOutcome', () => {
+  it.each<[string, string, ReturnType<typeof gcOutcome>]>([
+    ['empty is ok', '', 'ok'],
+    ['silod diverged sentinel', "skipped: this node's extent maps disagree with their replicas; wait for the extent scrubber to reconcile them", 'skipped'],
+    ['silod incomplete sentinel', 'skipped: this node does not hold the extent maps of every live volume', 'skipped'],
+    ['prefix without a space', 'skipped:reason', 'skipped'],
+    ['a real failure', 'could not list the local chunk store: EIO', 'failed'],
+    ['skipped later in the text', 'sweep skipped: disk gone', 'failed'],
+    ['capitalised prefix', 'Skipped: no', 'failed'],
+  ])('%s', (_n, err, want) => {
+    expect(gcOutcome(err)).toBe(want)
+  })
+})
+
+describe('gcSkipReason', () => {
+  it.each([
+    ['strips the prefix and its space', 'skipped: maps disagree', 'maps disagree'],
+    ['strips a prefix without a space', 'skipped:maps disagree', 'maps disagree'],
+    ['leaves a failure alone', 'disk gone', 'disk gone'],
+    ['leaves empty alone', '', ''],
+  ])('%s', (_n, err, want) => {
+    expect(gcSkipReason(err)).toBe(want)
   })
 })
 
@@ -551,6 +580,10 @@ describe('deriveHealth', () => {
         expect(deriveHealth(status({ gc: gc({ lastError: 'disk gone' }) }), NOW).findings).toEqual([
           { level: 'attention', text: 'GC failed 1 h ago', detail: 'disk gone' },
         ])
+      })
+
+      it('skipped is not an issue', () => {
+        expect(texts({ gc: gc({ lastError: 'skipped: maps disagree' }) })).toEqual([])
       })
 
       it('failed without a finished run has no age', () => {

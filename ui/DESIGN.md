@@ -65,7 +65,7 @@ words ("Capacity 47%, 142 of 300 GiB, warning").
 | Bullet | clock skew | value against warn 500 ms and crit 2000 ms markers on a scale that gives the healthy range room; fill green, amber, red |
 | Sparkline | write rates per volume, per node, cluster wide | own range per line, last point marked; a dashed flat line until two samples exist |
 | StackedArea | used capacity per node | one hue at three opacities, 80 % of capacity as a dashed warn line, hover and arrow keys move a readout that is mirrored into a live region |
-| RunBars | GC runs | bytes freed per run, latest run at full opacity, failed runs in crit with a title naming the time |
+| RunBars | GC runs | bytes freed per run, latest run at full opacity, failed runs in crit and skipped runs in muted ink, each with a title naming the time |
 | RunDots | backup runs | green dot per success, red dot with a cross per failure, a dashed hollow dot for the next scheduled run |
 
 ## History
@@ -163,8 +163,13 @@ octagon). The overall state in the top bar is the worst open issue.
 | Volume map damaged | Critical | count of volumes whose extent map is damaged |
 | Volume degraded | Warning | count of volumes with a replica on a node that is not alive (or not in the node table), or fewer replicas than the replication factor |
 | Backup failed, overdue | Warning | |
-| GC failed | Warning | the last GC run left an error |
+| GC failed | Warning | the last GC run left an error that does not start with `skipped:` |
 | GC never ran | Warning | GC enabled, no run yet, silod up for more than 24 h |
+
+A GC sweep that silod skipped on purpose (`lastError` starts with `skipped:`, for
+example while this node's extent maps disagree with their replicas) is not an issue.
+The GC card shows it as Skipped in the neutral tone, prints the reason without the
+prefix and says the skip clears by itself. It usually does within one or two sweeps.
 
 Half a second of skew is worth a look; at two seconds lease expiry and timestamp
 ordering can disagree between nodes. Replication is Healthy when alive nodes are at
@@ -194,7 +199,7 @@ sends no report at all.
 
 Explanations exist as tooltips of at most eight words on state badges and column
 headers, shown on hover and focus, and as one sentence in the GC and Backups cards when
-a run failed.
+a run failed or, for GC, was skipped.
 
 ## Motion
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import RunBars from './RunBars.vue'
 
-type Run = { value: number; ok: boolean; label: string }
+type Run = { value: number; ok: boolean; skipped?: boolean; label: string }
 
 function bars(runs: Run[], max?: number) {
   return mount(RunBars, { props: { runs, label: 'Bytes freed', ...(max === undefined ? {} : { max }) } })
@@ -24,6 +24,21 @@ describe('RunBars', () => {
     const r = bars([run(10), run(20), run(30, false)]).findAll('[data-part="bar"]')
     expect(r.map((b) => b.attributes('fill'))).toEqual(['var(--c-accent)', 'var(--c-accent)', 'var(--c-crit)'])
     expect(r.map((b) => b.attributes('opacity'))).toEqual(['0.6', '1', '1'])
+  })
+
+  it('draws skipped runs muted and counts them apart from failures', () => {
+    const skip = { ...run(0, false), skipped: true }
+    const w = bars([run(10), skip, run(30, false)])
+    const r = w.findAll('[data-part="bar"]')
+    expect(r.map((b) => b.attributes('fill'))).toEqual(['var(--c-accent)', 'var(--c-ink-3)', 'var(--c-crit)'])
+    expect(r.map((b) => b.attributes('data-skipped'))).toEqual([undefined, 'true', undefined])
+    expect(w.get('svg').attributes('aria-label')).toBe('Bytes freed: 3 runs, 1 failed, 1 skipped')
+  })
+
+  it('ignores skipped on a run that succeeded', () => {
+    const r = bars([{ ...run(10), skipped: true }]).get('[data-part="bar"]')
+    expect(r.attributes('fill')).toBe('var(--c-accent)')
+    expect(r.attributes('data-skipped')).toBeUndefined()
   })
 
   it('titles each bar and summarises in its accessible name', () => {

@@ -106,7 +106,7 @@ describe('presentation tables', () => {
   it('gives the states that need explaining a tip', () => {
     for (const s of states) expect(NODE_PRESENTATION[s].tip).toBeTruthy()
     for (const k of ['unconfigured', 'never', 'overdue'] as const) expect(BACKUP_PRESENTATION[k].tip).toBeTruthy()
-    for (const k of ['off', 'never'] as const) expect(GC_PRESENTATION[k].tip).toBeTruthy()
+    for (const k of ['off', 'never', 'skipped'] as const) expect(GC_PRESENTATION[k].tip).toBeTruthy()
     for (const k of replication) expect(REPLICATION_PRESENTATION[k].tip).toBeTruthy()
     expect(MEMBERSHIP_PRESENTATION.isolated.tip).toBeTruthy()
   })

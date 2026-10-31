@@ -25,7 +25,18 @@ export interface Finding {
   detail?: string
 }
 
-export type GcKind = 'off' | 'running' | 'never' | 'ok' | 'failed'
+export type GcKind = 'off' | 'running' | 'never' | 'ok' | 'skipped' | 'failed'
+
+/** How the last sweep ended, read from gc.lastError. */
+export type GcOutcome = 'ok' | 'skipped' | 'failed'
+
+/**
+ * silod prefixes lastError with this when it chose not to sweep, for example
+ * while this node's extent maps disagree with their replicas. Deleting chunks
+ * then could free live data, so the GC waits; the next sweep or two after the
+ * maps settle clears it. Anything else in lastError is a real failure.
+ */
+export const GC_SKIP_PREFIX = 'skipped:'
 
 /** healthy: alive nodes cover the replication factor; degraded: they do not. */
 export type ReplicationKind = 'healthy' | 'degraded'
@@ -92,10 +103,21 @@ export function replicationKind(h: ClusterHealth | null | undefined): Replicatio
   return h.aliveNodes >= h.replicationFactor ? 'healthy' : 'degraded'
 }
 
+/** ok for an empty lastError, skipped for silod's skip sentinel, failed for anything else. */
+export function gcOutcome(lastError: string): GcOutcome {
+  if (lastError === '') return 'ok'
+  return lastError.startsWith(GC_SKIP_PREFIX) ? 'skipped' : 'failed'
+}
+
+/** The reason after the skip prefix, or lastError unchanged when it is not a skip. */
+export function gcSkipReason(lastError: string): string {
+  return lastError.startsWith(GC_SKIP_PREFIX) ? lastError.slice(GC_SKIP_PREFIX.length).trimStart() : lastError
+}
+
 export function gcKind(gc: Gc): GcKind {
   if (!gc.enabled) return 'off'
   if (gc.running) return 'running'
-  if (gc.lastError) return 'failed'
+  if (gc.lastError) return gcOutcome(gc.lastError)
   return gc.lastRunAt ? 'ok' : 'never'
 }
 
@@ -200,6 +222,7 @@ export function deriveHealth(s: Status, nowMs: number): Health {
   if (s.gc) {
     const gc = gcKind(s.gc)
     const at = s.gc.lastRunAt
+    // A skipped sweep is not an issue: silod abstains on purpose and clears it itself.
     if (gc === 'failed') add('attention', at ? `GC failed ${formatAgo(at, nowMs)}` : 'GC failed', s.gc.lastError)
     const started = h?.startedAt ?? null
     if (gc === 'never' && started && nowMs - started.getTime() > GC_NEVER_AFTER_MS) {

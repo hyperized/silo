@@ -7,7 +7,8 @@ import { computed } from 'vue'
 import { num } from '../../lib/chart'
 
 const props = defineProps<{
-  runs: { value: number; ok: boolean; label: string }[]
+  /** skipped marks a run that chose not to work; it is drawn muted, not as a failure. */
+  runs: { value: number; ok: boolean; skipped?: boolean | undefined; label: string }[]
   label: string
   /** Value at full height; defaults to the largest run. */
   max?: number | undefined
@@ -39,7 +40,8 @@ const bars = computed(() => {
       width: `${String(num(slot * 0.72))}%`,
       y: num(BASE - h),
       height: h,
-      fill: r.ok ? 'var(--c-accent)' : 'var(--c-crit)',
+      skipped: !r.ok && r.skipped === true,
+      fill: r.ok ? 'var(--c-accent)' : r.skipped ? 'var(--c-ink-3)' : 'var(--c-crit)',
       opacity: !r.ok || i === latestOk.value ? 1 : 0.6,
     }
   })
@@ -48,8 +50,10 @@ const bars = computed(() => {
 const ariaLabel = computed(() => {
   const n = props.runs.length
   if (n === 0) return `${props.label}: no runs seen yet`
-  const failed = props.runs.filter((r) => !r.ok).length
-  return `${props.label}: ${String(n)} ${n === 1 ? 'run' : 'runs'}, ${String(failed)} failed`
+  const skipped = props.runs.filter((r) => !r.ok && r.skipped).length
+  const failed = props.runs.filter((r) => !r.ok).length - skipped
+  const skips = skipped ? `, ${String(skipped)} skipped` : ''
+  return `${props.label}: ${String(n)} ${n === 1 ? 'run' : 'runs'}, ${String(failed)} failed${skips}`
 })
 </script>
 
@@ -66,6 +70,7 @@ const ariaLabel = computed(() => {
       :key="bar.key"
       data-part="bar"
       :data-ok="bar.ok"
+      :data-skipped="bar.skipped || undefined"
       :x="bar.x"
       :y="bar.y"
       :width="bar.width"

@@ -9,6 +9,10 @@ const FIXTURE_NOW = 1761641000
 const GIB = 1024 ** 3
 const MIB = 1024 ** 2
 const GC_PERIOD_S = 60
+const GC_INCIDENT_ERRORS: Readonly<Record<number, string>> = {
+  3: 'lease scan timed out after 30 s',
+  5: "skipped: this node's extent maps disagree with their replicas; wait for the extent scrubber to reconcile them",
+}
 const BACKUP_PERIOD_S = 120
 const NODE_IDS = ['node-a', 'node-b', 'node-c']
 
@@ -160,8 +164,9 @@ export function mockWire(scenario: MockScenario, nowMs: number, sinceMs: number 
       for (const v of w.volumes) {
         if (v.path === '/csi/volumes/pvc-3b0d') v.replicas = ['node-a', 'node-b']
       }
-      // Every seventh run fails, offset so the first failure shows up after a few minutes.
-      if (w.gc) w.gc.lastError = gcK % 7 === 3 ? 'lease scan timed out after 30 s' : ''
+      // Of every seven runs one fails and one is skipped, offset so both show up
+      // within a few minutes. The skip text is silod's own.
+      if (w.gc) w.gc.lastError = GC_INCIDENT_ERRORS[gcK % 7] ?? ''
       break
     case 'empty':
       w.nodes = []
